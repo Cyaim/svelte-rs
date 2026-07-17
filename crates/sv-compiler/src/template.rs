@@ -11,6 +11,8 @@ pub enum Tag {
     View,
     Text,
     Button,
+    /// 复选框叶子(bind:checked 双向绑定的宿主)
+    Checkbox,
     /// 大写开头的标签 = 组件调用,如 `<TodoItem />`
     Component(String),
 }
@@ -81,6 +83,16 @@ pub enum Node {
     Render { call: ExprSrc, offset: usize },
     /// `{@debug a, b}`:依赖变化时 Debug 打印
     Debug { args: Vec<ExprSrc>, offset: usize },
+    /// `{#await fut}...{:then v}...{:catch e}...{/await}`
+    Await {
+        fut: ExprSrc,
+        pending: Vec<Node>,
+        then_pat: Option<String>,
+        then_children: Vec<Node>,
+        catch_pat: Option<String>,
+        catch_children: Vec<Node>,
+        offset: usize,
+    },
 }
 
 pub fn parse(source: &str, span: &Span) -> Result<Vec<Node>, CompileError> {
@@ -159,6 +171,24 @@ impl<'a> Parser<'a> {
             if self.pos >= self.end || self.at_any(terms) {
                 break;
             }
+            if self.starts("<!--") {
+                // 模板注释:跳过,不进产物
+                let off = self.pos;
+                match self.rest().find("-->") {
+                    Some(rel) => self.pos += rel + 3,
+                    None => return Err(self.err(off, "模板注释未闭合(缺 -->)")),
+                }
+                continue;
+            }
+            if self.starts("<svelte:options") || self.starts("<sv:options") {
+                // 选项元素:桌面场景无对应语义,接受语法并忽略(自闭合形态)
+                let off = self.pos;
+                match self.rest().find("/>") {
+                    Some(rel) => self.pos += rel + 2,
+                    None => return Err(self.err(off, "<svelte:options> 应自闭合(... />)")),
+                }
+                continue;
+            }
             if self.starts("</") {
                 return Err(self.err(self.pos, "未匹配的闭合标签"));
             }
@@ -177,6 +207,9 @@ impl<'a> Parser<'a> {
             } else if self.starts_block("{#snippet") {
                 flush_segments(&mut segments, &mut nodes);
                 nodes.push(self.parse_snippet()?);
+            } else if self.starts_block("{#await") {
+                flush_segments(&mut segments, &mut nodes);
+                nodes.push(self.parse_await()?);
             } else if self.starts_block("{@const") {
                 flush_segments(&mut segments, &mut nodes);
                 nodes.push(self.parse_const()?);
@@ -224,6 +257,7 @@ impl<'a> Parser<'a> {
             "view" => Tag::View,
             "text" => Tag::Text,
             "button" => Tag::Button,
+            "checkbox" => Tag::Checkbox,
             "" => return Err(self.err(off, "`<` 后应为标签名")),
             other if other.chars().next().unwrap().is_ascii_uppercase() => {
                 Tag::Component(other.to_string())
@@ -258,6 +292,12 @@ impl<'a> Parser<'a> {
             Tag::View => Ok(Node::Element { tag, attrs, children, offset: off }),
             // 组件 children:非自闭合形态的子内容编译成隐式 children snippet
             Tag::Component(_) => Ok(Node::Element { tag, attrs, children, offset: off }),
+            Tag::Checkbox => {
+                if !children.is_empty() {
+                    return Err(self.err(off, "`<checkbox>` 是叶子元素,请自闭合"));
+                }
+                Ok(Node::Element { tag, attrs, children, offset: off })
+            }
             Tag::Text | Tag::Button => {
                 // 叶子标签:内容折叠成一段文本
                 let mut segments = Vec::new();
@@ -284,11 +324,51 @@ impl<'a> Parser<'a> {
 
     fn parse_attr(&mut self) -> Result<Attr, CompileError> {
         let off = self.pos;
+        // {@attach 表达式}:附着闭包(挂载时以 (doc, 节点) 调用,响应式重跑)
+        if self.starts("{@attach") {
+            self.pos += "{@attach".len();
+            self.skip_ws();
+            let voff = self.pos;
+            let src = self.read_balanced()?;
+            self.expect("}", "{@attach} 结束")?;
+            if src.trim().is_empty() {
+                return Err(self.err(off, "{@attach} 需要闭包表达式"));
+            }
+            return Ok(Attr {
+                name: "@attach".to_string(),
+                value: AttrValue::Expr(ExprSrc { src, offset: voff }),
+                offset: off,
+            });
+        }
+        // 简写 {name}:等价 name={name}
+        if self.starts("{") {
+            self.pos += 1;
+            self.skip_ws();
+            let name = self.read_name();
+            if name.is_empty() {
+                return Err(self.err(off, "简写属性 {名字} 里应为标识符"));
+            }
+            self.skip_ws();
+            self.expect("}", "简写属性结束")?;
+            return Ok(Attr {
+                name: name.clone(),
+                value: AttrValue::Expr(ExprSrc { src: name, offset: off + 1 }),
+                offset: off,
+            });
+        }
         let name = self.read_attr_name();
         if name.is_empty() {
             return Err(self.err(off, "无法解析属性名"));
         }
         self.skip_ws();
+        // 无值属性(如 `transition:fade`):值记为空字符串
+        if !self.starts("=") {
+            return Ok(Attr {
+                name,
+                value: AttrValue::Str { value: String::new(), offset: off },
+                offset: off,
+            });
+        }
         self.expect("=", &format!("属性 `{name}` 的值"))?;
         self.skip_ws();
         let value = if self.starts("\"") {
@@ -368,9 +448,33 @@ impl<'a> Parser<'a> {
 
         // 在顶层深度找最后一个独立 `as`(列表表达式里的 `x as f32` 转型也在顶层,
         // 取最后一个可以让 `expr as pat` 的常见写法工作;病态嵌套 v0 不管)
-        let as_pos = find_top_level_as(&header).ok_or_else(|| {
-            self.err(off, "{#each} 需要 `as` 绑定,如 {#each items as item, i}")
-        })?;
+        // `{#each expr}`(省略 as):不绑定项,按长度渲染 N 次
+        let Some(as_pos) = find_top_level_as(&header) else {
+            if header.trim().is_empty() {
+                return Err(self.err(off, "{#each} 缺少列表表达式"));
+            }
+            let children = self.parse_nodes(&["{:else", "{/each}", "</"])?;
+            let mut else_children = Vec::new();
+            if self.starts("{:else") {
+                self.pos += "{:else".len();
+                self.skip_ws();
+                self.expect("}", "{:else} 结束")?;
+                else_children = self.parse_nodes(&["{/each}", "</"])?;
+            }
+            if !self.eat("{/each}") {
+                return Err(self.err(off, "{#each} 没有对应的 {/each}"));
+            }
+            return Ok(Node::Each {
+                list: ExprSrc { src: header.trim().to_string(), offset: header_off },
+                pat: "_".to_string(),
+                pat_offset: header_off,
+                index: None,
+                key: None,
+                children,
+                else_children,
+                offset: off,
+            });
+        };
         let list_src = header[..as_pos].trim().to_string();
         let mut binding = &header[as_pos + 2..];
 
@@ -484,6 +588,59 @@ impl<'a> Parser<'a> {
             return Err(self.err(off, "{#snippet} 没有对应的 {/snippet}"));
         }
         Ok(Node::Snippet { name, params, children, offset: off })
+    }
+
+    fn parse_await(&mut self) -> Result<Node, CompileError> {
+        let off = self.pos;
+        self.pos += "{#await".len();
+        self.skip_ws();
+        let fut_off = self.pos;
+        let fut = self.read_balanced()?;
+        if fut.trim().is_empty() {
+            return Err(self.err(off, "{#await} 缺少 Future 表达式"));
+        }
+        self.expect("}", "{#await 表达式} 结束")?;
+        let pending = self.parse_nodes(&["{:then", "{:catch", "{/await}", "</"])?;
+
+        let mut read_arm = |p: &mut Self, kw: &str| -> Result<(Option<String>, Vec<Node>), CompileError> {
+            p.pos += kw.len();
+            p.skip_ws();
+            let pat = {
+                let name = p.read_name();
+                if name.is_empty() { None } else { Some(name) }
+            };
+            p.skip_ws();
+            p.expect("}", "分支头结束")?;
+            let children = p.parse_nodes(&["{:then", "{:catch", "{/await}", "</"])?;
+            Ok((pat, children))
+        };
+
+        let (mut then_pat, mut then_children) = (None, Vec::new());
+        let (mut catch_pat, mut catch_children) = (None, Vec::new());
+        let mut has_then = false;
+        let mut has_catch = false;
+        while self.starts("{:then") || self.starts("{:catch") {
+            if self.starts("{:then") {
+                if has_then {
+                    return Err(self.err(self.pos, "{#await} 只能有一个 {:then}"));
+                }
+                (then_pat, then_children) = read_arm(self, "{:then")?;
+                has_then = true;
+            } else {
+                if has_catch {
+                    return Err(self.err(self.pos, "{#await} 只能有一个 {:catch}"));
+                }
+                (catch_pat, catch_children) = read_arm(self, "{:catch")?;
+                has_catch = true;
+            }
+        }
+        if !self.eat("{/await}") {
+            return Err(self.err(off, "{#await} 没有对应的 {/await}"));
+        }
+        if !has_then {
+            return Err(self.err(off, "{#await} 需要 {:then} 分支(v0 不支持纯 pending 形态)"));
+        }
+        Ok(Node::Await { fut: ExprSrc { src: fut, offset: fut_off }, pending, then_pat, then_children, catch_pat, catch_children, offset: off })
     }
 
     fn parse_render(&mut self) -> Result<Node, CompileError> {

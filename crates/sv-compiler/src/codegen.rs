@@ -17,6 +17,7 @@ use syn::parse::Parser as _;
 
 use crate::script::{self, ScriptOutput, collect_pat_idents};
 use crate::template::{Arm, Attr, AttrValue, ExprSrc, Node, Segment, Tag};
+use crate::style::ClassStyle;
 use crate::{CompileError, PropsRegistry, style};
 
 /// 模板一处作用域
@@ -28,6 +29,8 @@ struct Scope {
     locals: HashSet<String>,
     /// 普通变量(props/script 普通 let/each 绑定)——move 闭包捕获前需预克隆
     plain: HashSet<String>,
+    /// {#snippet} 定义的名字(组件 prop 传递时自动包 Rc)
+    snippets: HashSet<String>,
 }
 
 pub fn generate(
@@ -36,7 +39,7 @@ pub fn generate(
     script: &ScriptOutput,
     nodes: &[Node],
     registry: &PropsRegistry,
-    classes: &HashMap<String, TokenStream>,
+    classes: &HashMap<String, ClassStyle>,
 ) -> Result<String, CompileError> {
     let mut root_scope = Scope::default();
     root_scope.plain.extend(script.plain_vars.iter().cloned());
@@ -159,8 +162,8 @@ struct Cg<'a> {
     source: &'a str,
     script: &'a ScriptOutput,
     registry: &'a PropsRegistry,
-    /// `<style>` 块编译出的类 → 赋值语句流
-    classes: &'a HashMap<String, TokenStream>,
+    /// `<style>` 块编译出的类(基础 + :hover 变体)
+    classes: &'a HashMap<String, ClassStyle>,
     n: usize,
 }
 
@@ -256,6 +259,7 @@ impl Cg<'_> {
                         };
                     });
                     scope.plain.insert(name.clone());
+                    scope.snippets.insert(name.clone());
                 }
                 _ => {
                     let node_ts = self.emit_node(n, &scope)?;
@@ -367,6 +371,59 @@ impl Cg<'_> {
                     });
                 })
             }
+            // {#await fut}{:then v}{:catch e}:pending → 完成/失败渲染
+            Node::Await { fut, pending, then_pat, then_children, catch_pat, catch_children, .. } => {
+                let fut_expr = self.expr(fut, scope, false)?;
+                let pending_ts = self.emit_nodes(pending, scope)?;
+                let pending_cl = self.rebuild_closure(pending_ts, scope);
+
+                let bind_arm = |pat: &Option<String>, scope: &Scope| -> (Scope, TokenStream) {
+                    let mut inner = scope.clone();
+                    let binding = match pat {
+                        Some(name) => {
+                            inner.shadowed.insert(name.clone());
+                            inner.plain.insert(name.clone());
+                            let id = format_ident!("{name}");
+                            quote! { let #id = ::std::clone::Clone::clone(__value); }
+                        }
+                        None => quote! { let _ = __value; },
+                    };
+                    (inner, binding)
+                };
+                let (then_scope, then_bind) = bind_arm(then_pat, scope);
+                let then_ts = self.emit_nodes(then_children, &then_scope)?;
+                let then_pre = preclones(&then_ts, scope);
+                let then_cl = quote! {
+                    move |__doc, __parent, __value| {
+                        let __doc: ::sv_ui::Doc = __doc.clone();
+                        #then_pre
+                        #then_bind
+                        #then_ts
+                    }
+                };
+                if catch_children.is_empty() && catch_pat.is_none() {
+                    Ok(quote! {
+                        ::sv_ui::tasks::await_block(&__doc, __parent,
+                            move || #fut_expr, #pending_cl, #then_cl);
+                    })
+                } else {
+                    let (catch_scope, catch_bind) = bind_arm(catch_pat, scope);
+                    let catch_ts = self.emit_nodes(catch_children, &catch_scope)?;
+                    let catch_pre = preclones(&catch_ts, scope);
+                    let catch_cl = quote! {
+                        move |__doc, __parent, __value| {
+                            let __doc: ::sv_ui::Doc = __doc.clone();
+                            #catch_pre
+                            #catch_bind
+                            #catch_ts
+                        }
+                    };
+                    Ok(quote! {
+                        ::sv_ui::tasks::await_block_result(&__doc, __parent,
+                            move || #fut_expr, #pending_cl, #then_cl, #catch_cl);
+                    })
+                }
+            }
             Node::Const { .. } | Node::Snippet { .. } => {
                 unreachable!("Const/Snippet 在 emit_nodes 中处理")
             }
@@ -387,6 +444,7 @@ impl Cg<'_> {
         let el = self.fresh("el");
         let mut ts = match tag {
             Tag::View => quote! { let #el = __doc.create_view(); },
+            Tag::Checkbox => quote! { let #el = __doc.create_checkbox(); },
             Tag::Text | Tag::Button => {
                 let segments: &[Segment] = match children.first() {
                     Some(Node::Text { segments }) => segments,
@@ -398,35 +456,48 @@ impl Cg<'_> {
         };
         ts.extend(quote! { __doc.append(__parent, #el); });
 
-        // 第一遍:静态样式。优先级(后写覆盖):class 类 < style=""/简写属性;
-        // style: 指令(响应式 patch)在第二遍,永远最后生效——顺序确定
+        // ---- 静态样式源(优先级:class 类 < style=""/简写,后写覆盖) ----
         let mut style_setters = TokenStream::new();
+        // :hover 变体收集(CSS 伪类 → 内部 hover 状态 + 指针事件接线)
+        let mut hover_static: Vec<TokenStream> = Vec::new();
+        let mut hover_conds: Vec<(TokenStream, TokenStream)> = Vec::new();
         for attr in attrs.iter().filter(|a| a.name == "class") {
             match &attr.value {
                 AttrValue::Str { value, offset } => {
                     for cls in value.split_whitespace() {
-                        let setters = self.classes.get(cls).ok_or_else(|| {
+                        let entry = self.classes.get(cls).ok_or_else(|| {
                             CompileError::at_offset(
                                 self.source,
                                 *offset,
                                 format!("未知样式类 `.{cls}`(应在 <style> 块里定义)"),
                             )
                         })?;
-                        style_setters.extend(setters.clone());
+                        style_setters.extend(entry.base.clone());
+                        if let Some(h) = &entry.hover {
+                            hover_static.push(h.clone());
+                        }
                     }
                 }
                 AttrValue::Expr(_) => {
                     return Err(CompileError::at_offset(
                         self.source,
                         attr.offset,
-                        "class 属性 v0 只支持静态字符串(动态样式走 style: 指令)",
+                        "class 属性 v0 只支持静态字符串(条件类用 class:名字={cond})",
                     ));
                 }
             }
         }
         for attr in attrs {
             match attr.name.as_str() {
-                "class" => {}
+                "class" | "checked" | "@attach" => {}
+                name if name == "onclick"
+                    || name.starts_with("on")
+                    || name.starts_with("style:")
+                    || name.starts_with("class:")
+                    || name.starts_with("transition:")
+                    || name.starts_with("in:")
+                    || name.starts_with("out:")
+                    || name.starts_with("bind:") => {}
                 "style" => match &attr.value {
                     AttrValue::Str { value, offset } => {
                         style_setters.extend(style::parse_style(self.source, value, *offset)?);
@@ -439,9 +510,6 @@ impl Cg<'_> {
                         ));
                     }
                 },
-                name if name == "onclick"
-                    || name.starts_with("on")
-                    || name.starts_with("style:") => {}
                 name => match &attr.value {
                     AttrValue::Str { value, offset } => {
                         let decl = format!("{name}:{value}");
@@ -462,14 +530,148 @@ impl Cg<'_> {
                 },
             }
         }
-        if !style_setters.is_empty() {
-            ts.extend(quote! { __doc.update_style(#el, |s| { #style_setters }); });
+
+        // ---- class: 条件类 与 style: 指令 ----
+        let mut class_conds: Vec<(TokenStream, TokenStream)> = Vec::new();
+        let mut style_directives: Vec<TokenStream> = Vec::new();
+        for attr in attrs {
+            if let Some(cls) = attr.name.strip_prefix("class:") {
+                let entry = self.classes.get(cls).cloned().ok_or_else(|| {
+                    CompileError::at_offset(
+                        self.source,
+                        attr.offset,
+                        format!("未知样式类 `.{cls}`(应在 <style> 块里定义)"),
+                    )
+                })?;
+                let setters = entry.base.clone();
+                let cond = match &attr.value {
+                    AttrValue::Expr(e) => {
+                        let x = self.expr(e, scope, false)?;
+                        quote! { #x }
+                    }
+                    // 简写 class:muted → 条件即同名变量
+                    AttrValue::Str { value, .. } if value.is_empty() => {
+                        let e = ExprSrc { src: cls.to_string(), offset: attr.offset };
+                        let x = self.expr(&e, scope, false)?;
+                        quote! { #x }
+                    }
+                    AttrValue::Str { .. } => {
+                        return Err(CompileError::at_offset(
+                            self.source,
+                            attr.offset,
+                            "class: 的值应为 {布尔表达式} 或省略(简写)",
+                        ));
+                    }
+                };
+                if let Some(h) = &entry.hover {
+                    hover_conds.push((cond.clone(), h.clone()));
+                }
+                class_conds.push((cond, setters));
+            } else if let Some(key) = attr.name.strip_prefix("style:") {
+                let AttrValue::Expr(e) = &attr.value else {
+                    return Err(CompileError::at_offset(
+                        self.source,
+                        attr.offset,
+                        "style: 指令的值应为 {表达式}(静态值请用 style=\"...\")",
+                    ));
+                };
+                let expr = self.expr(e, scope, false)?;
+                let setter = style_directive_setter(key, &expr).ok_or_else(|| {
+                    CompileError::at_offset(
+                        self.source,
+                        attr.offset,
+                        format!("style: 不认识字段 `{key}`"),
+                    )
+                })?;
+                style_directives.push(setter);
+            }
         }
 
-        // 第二遍:事件与 style: 指令
+        let has_hover = !hover_static.is_empty() || !hover_conds.is_empty();
+        // 用户自己的指针回调(有 :hover 时与内部状态接线合成,避免互相覆盖)
+        let user_enter = attrs.iter().find(|a| a.name == "onpointerenter");
+        let user_leave = attrs.iter().find(|a| a.name == "onpointerleave");
+        if class_conds.is_empty() && !has_hover {
+            if !style_setters.is_empty() {
+                // 静态样式:创建时设置一次,零 effect
+                ts.extend(quote! { __doc.update_style(#el, |s| { #style_setters }); });
+            }
+            for setter in &style_directives {
+                ts.extend(quote! {
+                    ::sv_ui::bind_style_patch(&__doc, #el, move |s| { #setter });
+                });
+            }
+        } else {
+            // 条件类 / :hover:该元素样式整体交给一个响应式重算闭包
+            // (优先级:类 < style="" < 条件类 < :hover < style: 指令)
+            let arms = class_conds.iter().map(|(c, s)| quote! { if #c { #s } });
+            let hover_arms = hover_conds.iter().map(|(c, h)| quote! { if #c && __hv.get() { #h } });
+            let hover_block = if has_hover {
+                quote! { if __hv.get() { #(#hover_static)* } #(#hover_arms)* }
+            } else {
+                TokenStream::new()
+            };
+            let wiring = if has_hover {
+                let enter_bind = match user_enter {
+                    Some(a) => {
+                        let AttrValue::Expr(e) = &a.value else {
+                            return Err(CompileError::at_offset(
+                                self.source,
+                                a.offset,
+                                "事件处理器应为 {闭包表达式}",
+                            ));
+                        };
+                        let x = self.expr(e, scope, true)?;
+                        quote! { let __ue = #x; }
+                    }
+                    None => quote! { let __ue = || {}; },
+                };
+                let leave_bind = match user_leave {
+                    Some(a) => {
+                        let AttrValue::Expr(e) = &a.value else {
+                            return Err(CompileError::at_offset(
+                                self.source,
+                                a.offset,
+                                "事件处理器应为 {闭包表达式}",
+                            ));
+                        };
+                        let x = self.expr(e, scope, true)?;
+                        quote! { let __ul = #x; }
+                    }
+                    None => quote! { let __ul = || {}; },
+                };
+                quote! {
+                    #enter_bind
+                    #leave_bind
+                    __doc.set_on_pointer_enter(#el, move || { __hv.set(true); __ue(); });
+                    __doc.set_on_pointer_leave(#el, move || { __hv.set(false); __ul(); });
+                }
+            } else {
+                TokenStream::new()
+            };
+            let hv_decl = if has_hover {
+                quote! { let __hv = ::sv_reactive::state(false); }
+            } else {
+                TokenStream::new()
+            };
+            ts.extend(quote! {
+                {
+                    #hv_decl
+                    ::sv_ui::bind_style(&__doc, #el, move |s| {
+                        #style_setters
+                        #(#arms)*
+                        #hover_block
+                        #(#style_directives)*
+                    });
+                    #wiring
+                }
+            });
+        }
+
+        // ---- 事件 / 绑定 / 附着 / 过渡 ----
         for attr in attrs {
             match attr.name.as_str() {
-                // Svelte 5 事件属性 onclick={...} 与遗留 on:click={...} 都认
+                // Svelte 5 事件属性与遗留 on: 指令都认
                 "onclick" | "on:click" => match &attr.value {
                     AttrValue::Expr(e) => {
                         let handler = self.expr(e, scope, true)?;
@@ -483,42 +685,156 @@ impl Cg<'_> {
                         ));
                     }
                 },
-                name if name.starts_with("on") && !name.starts_with("on:") && name != "onclick" => {
-                    return Err(CompileError::at_offset(
-                        self.source,
-                        attr.offset,
-                        format!("v0 只支持 onclick,收到 `{name}`"),
-                    ));
-                }
-                name if name.starts_with("on:") => {
-                    if name != "on:click" {
+                "onpointerenter" | "onpointerleave" if has_hover => {}
+                "onpointerenter" | "onpointerleave" => match &attr.value {
+                    AttrValue::Expr(e) => {
+                        let handler = self.expr(e, scope, true)?;
+                        let setter = if attr.name == "onpointerenter" {
+                            quote! { set_on_pointer_enter }
+                        } else {
+                            quote! { set_on_pointer_leave }
+                        };
+                        ts.extend(quote! { __doc.#setter(#el, #handler); });
+                    }
+                    AttrValue::Str { .. } => {
                         return Err(CompileError::at_offset(
                             self.source,
                             attr.offset,
-                            format!("v0 只支持 on:click,收到 `{name}`"),
+                            "事件处理器应为 {闭包表达式}",
                         ));
                     }
+                },
+                // {@attach fn}:挂载时以 (doc, 节点) 调用,依赖变化时重跑
+                "@attach" => {
+                    let AttrValue::Expr(e) = &attr.value else { unreachable!() };
+                    let expr = self.expr(e, scope, true)?;
+                    ts.extend(quote! {
+                        {
+                            let __a_doc = __doc.clone();
+                            let __a_el = #el;
+                            ::sv_reactive::effect(move || { (#expr)(&__a_doc, __a_el); });
+                        }
+                    });
                 }
-                name if name.starts_with("style:") => {
+                // bind:checked:<checkbox> 双向绑定
+                "bind:checked" => {
+                    if *tag != Tag::Checkbox {
+                        return Err(CompileError::at_offset(
+                            self.source,
+                            attr.offset,
+                            "bind:checked 只能用在 <checkbox> 上",
+                        ));
+                    }
                     let AttrValue::Expr(e) = &attr.value else {
                         return Err(CompileError::at_offset(
                             self.source,
                             attr.offset,
-                            "style: 指令的值应为 {表达式}(静态值请用 style=\"...\")",
+                            "bind:checked 的值应为 {反应式变量}",
+                        ));
+                    };
+                    let sig_ts = if let Ok(syn::Expr::Path(p)) = syn::parse_str::<syn::Expr>(&e.src)
+                        && p.path.segments.len() == 1
+                        && self.script.vars.contains(&p.path.segments[0].ident.to_string())
+                    {
+                        let id = p.path.segments[0].ident.clone();
+                        quote! { #id }
+                    } else {
+                        let x = self.expr(e, scope, false)?;
+                        quote! { #x }
+                    };
+                    ts.extend(quote! {
+                        {
+                            let __b_sig = #sig_ts;
+                            let __b_doc = __doc.clone();
+                            let __b_el = #el;
+                            ::sv_reactive::effect(move || { __b_doc.set_checked(__b_el, __b_sig.get()); });
+                            __doc.set_on_click(#el, move || __b_sig.update(|__v| *__v = !*__v));
+                        }
+                    });
+                }
+                // checked={bool}:单向
+                "checked" => {
+                    let AttrValue::Expr(e) = &attr.value else {
+                        return Err(CompileError::at_offset(
+                            self.source,
+                            attr.offset,
+                            "checked 的值应为 {布尔表达式}",
                         ));
                     };
                     let expr = self.expr(e, scope, false)?;
-                    let setter = style_directive_setter(&name["style:".len()..], &expr)
-                        .ok_or_else(|| {
-                            CompileError::at_offset(
-                                self.source,
-                                attr.offset,
-                                format!("style: 不认识字段 `{}`", &name["style:".len()..]),
-                            )
-                        })?;
                     ts.extend(quote! {
-                        ::sv_ui::bind_style_patch(&__doc, #el, move |s| { #setter });
+                        {
+                            let __c_doc = __doc.clone();
+                            let __c_el = #el;
+                            ::sv_reactive::effect(move || { __c_doc.set_checked(__c_el, #expr); });
+                        }
                     });
+                }
+                name if name.starts_with("bind:") => {
+                    return Err(CompileError::at_offset(
+                        self.source,
+                        attr.offset,
+                        format!(
+                            "v0 的元素绑定支持 bind:checked;`{name}` 需要对应控件/布局测量(见 SVELTE-SUPPORT)"
+                        ),
+                    ));
+                }
+                // 进场过渡(out: 需要 INERT 延迟销毁,推迟)
+                name if name.starts_with("transition:") || name.starts_with("in:") => {
+                    let anim = name.split(':').nth(1).unwrap_or("");
+                    if anim != "fade" {
+                        return Err(CompileError::at_offset(
+                            self.source,
+                            attr.offset,
+                            format!("v0 过渡只支持 fade,收到 `{anim}`"),
+                        ));
+                    }
+                    let dur = match &attr.value {
+                        AttrValue::Expr(e) => {
+                            let x = self.expr(e, scope, false)?;
+                            quote! { #x }
+                        }
+                        AttrValue::Str { value, .. } if value.trim().is_empty() => quote! { 200u32 },
+                        AttrValue::Str { value, offset } => {
+                            let n: u32 = value.trim().parse().map_err(|_| {
+                                CompileError::at_offset(
+                                    self.source,
+                                    *offset,
+                                    format!("过渡时长 `{value}` 不是毫秒数"),
+                                )
+                            })?;
+                            quote! { #n }
+                        }
+                    };
+                    ts.extend(quote! { ::sv_ui::anim::transition_in_fade(&__doc, #el, #dur); });
+                }
+                name if name.starts_with("out:") => {
+                    return Err(CompileError::at_offset(
+                        self.source,
+                        attr.offset,
+                        "out: 出场过渡需要 INERT 延迟销毁机制,已推迟(见 SVELTE-SUPPORT)",
+                    ));
+                }
+                name if name.starts_with("on")
+                    && !name.starts_with("on:")
+                    && name != "onclick"
+                    && name != "onpointerenter"
+                    && name != "onpointerleave" =>
+                {
+                    return Err(CompileError::at_offset(
+                        self.source,
+                        attr.offset,
+                        format!(
+                            "v0 事件支持 onclick/onpointerenter/onpointerleave,收到 `{name}`(键盘事件待焦点链)"
+                        ),
+                    ));
+                }
+                name if name.starts_with("on:") && name != "on:click" => {
+                    return Err(CompileError::at_offset(
+                        self.source,
+                        attr.offset,
+                        format!("v0 只支持 on:click,收到 `{name}`"),
+                    ));
                 }
                 _ => {}
             }
@@ -637,6 +953,18 @@ impl Cg<'_> {
             let value = match attr {
                 Some(attr) => match &attr.value {
                     AttrValue::Expr(e) => {
+                        // 零参 snippet 名作为 prop:自动包成 sv_ui::Snippet
+                        if let Ok(syn::Expr::Path(p)) = syn::parse_str::<syn::Expr>(&e.src)
+                            && p.path.segments.len() == 1
+                            && scope.snippets.contains(&p.path.segments[0].ident.to_string())
+                        {
+                            let id = p.path.segments[0].ident.clone();
+                            inits.push(quote! {
+                                #fid: ::std::rc::Rc::new(::std::clone::Clone::clone(&#id))
+                                    as ::sv_ui::Snippet
+                            });
+                            continue;
+                        }
                         // $bindable + 裸反应式变量名:直接传句柄(双向绑定零胶水)
                         if field.bindable
                             && let Ok(syn::Expr::Path(p)) = syn::parse_str::<syn::Expr>(&e.src)
@@ -855,6 +1183,7 @@ fn style_directive_setter(key: &str, expr: &syn::Expr) -> Option<TokenStream> {
         "gap" => quote! { s.gap = #expr; },
         "font-size" | "font_size" => quote! { s.font_size = #expr; },
         "radius" | "corner-radius" => quote! { s.corner_radius = #expr; },
+        "opacity" => quote! { s.opacity = #expr; },
         "width" => quote! { s.width = Some(#expr); },
         "height" => quote! { s.height = Some(#expr); },
         "direction" => quote! { s.direction = #expr; },

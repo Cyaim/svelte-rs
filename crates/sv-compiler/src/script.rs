@@ -236,7 +236,23 @@ fn mask_rust_source(content: &str) -> String {
 /// 注释/字符串里的 `$props` 不会被误认。
 pub fn extract_props(content: &str) -> Result<(String, Option<PropsDecl>), String> {
     let masked = mask_rust_source(content);
-    let Some(start) = masked.find("$props") else {
+    // 只有后跟 `{` 的 `$props` 才是声明;`$props.id()` 等 rune 变体留给后续替换
+    let mut decl_starts = Vec::new();
+    let mut at = 0usize;
+    while let Some(rel) = masked[at..].find("$props") {
+        let pos = at + rel;
+        let after = &masked[pos + "$props".len()..];
+        if let Some(i) = after.find(|c: char| !c.is_whitespace())
+            && after[i..].starts_with('{')
+        {
+            decl_starts.push(pos);
+        }
+        at = pos + "$props".len();
+    }
+    if decl_starts.len() > 1 {
+        return Err("每个组件只允许一个 $props 声明".to_string());
+    }
+    let Some(start) = decl_starts.first().copied() else {
         return Ok((content.to_string(), None));
     };
     let after = &masked[start + "$props".len()..];
@@ -263,9 +279,6 @@ pub fn extract_props(content: &str) -> Result<(String, Option<PropsDecl>), Strin
     }
     let body_end = body_end.ok_or("$props { ... } 花括号未闭合")?;
     let inner = &content[body_start..body_end];
-    if masked[body_end + 1..].contains("$props") {
-        return Err("每个组件只允许一个 $props 声明".to_string());
-    }
 
     struct Field {
         name: syn::Ident,
@@ -421,8 +434,11 @@ fn replace_runes(content: &str) -> String {
 fn is_rune_init(e: &Expr) -> bool {
     match e {
         Expr::Call(c) => rune_kind(&c.func).is_some(),
+        // 只有 $derived.by / $state.raw 是声明形态;$state.snapshot 等产生普通值
         Expr::MethodCall(mc) => {
-            matches!(mc.receiver.as_ref(), Expr::Path(p) if p.path.is_ident("__sv_state") || p.path.is_ident("__sv_derived"))
+            matches!(mc.receiver.as_ref(), Expr::Path(p)
+                if (p.path.is_ident("__sv_state") && mc.method == "raw")
+                    || (p.path.is_ident("__sv_derived") && mc.method == "by"))
         }
         _ => false,
     }
@@ -461,30 +477,21 @@ fn rewrite_stmt(
     mut stmt: Stmt,
     vars: &mut VarTable,
 ) -> Result<TokenStream, CompileError> {
-    // `let x = $derived.by(|| ...)`(闭包形态,不再包 move ||)
+    // `let x = $derived.by(|| ...)` / `$state.raw(v)`(声明形态的 rune 变体)。
+    // 其它方法($state.snapshot 等表达式变体)放行给通用改写处理
     if let Stmt::Local(local) = &mut stmt
         && let Some(init) = &mut local.init
         && let Expr::MethodCall(mc) = init.expr.as_mut()
         && let Expr::Path(p) = mc.receiver.as_ref()
-        && (p.path.is_ident("__sv_derived") || p.path.is_ident("__sv_state"))
+        && ((p.path.is_ident("__sv_derived") && mc.method == "by")
+            || (p.path.is_ident("__sv_state") && mc.method == "raw"))
     {
-        let method = mc.method.to_string();
-        let (kind, ctor): (VarKind, fn(&Expr) -> TokenStream) = match (
-            p.path.is_ident("__sv_derived"),
-            method.as_str(),
-        ) {
+        let (kind, ctor): (VarKind, fn(&Expr) -> TokenStream) = if p.path.is_ident("__sv_derived") {
             // $derived.by(f):f 就是计算闭包
-            (true, "by") => (VarKind::Derived, |arg| quote! { ::sv_reactive::derived(#arg) }),
+            (VarKind::Derived, |arg| quote! { ::sv_reactive::derived(#arg) })
+        } else {
             // $state.raw(v):本实现无深层响应,等价于 $state
-            (false, "raw") => (VarKind::State, |arg| quote! { ::sv_reactive::state(#arg) }),
-            _ => {
-                return Err(syn_err(
-                    source,
-                    span,
-                    &syn::Error::new_spanned(&mc.method, "x"),
-                    &format!("未知 rune 变体 `.{method}`(支持 $derived.by / $state.raw)"),
-                ));
-            }
+            (VarKind::State, |arg| quote! { ::sv_reactive::state(#arg) })
         };
         let Pat::Ident(pi) = &mut local.pat else {
             return Err(syn_err(source, span, &syn::Error::new_spanned(&local.pat, "x"), "rune 只能绑定到简单变量名"));
@@ -573,7 +580,42 @@ fn rewrite_stmt(
         {
             c.capture = Some(Default::default());
         }
-        return Ok(quote! { ::sv_reactive::effect(#arg); });
+        // $effect.pre → 两阶段 flush 的 pre 效应(渲染前)
+        let ctor = if what == "$effect.pre" {
+            quote! { ::sv_reactive::effect_pre }
+        } else {
+            quote! { ::sv_reactive::effect }
+        };
+        return Ok(quote! { #ctor(#arg); });
+    }
+
+    // `$inspect(a, b).with(cb)`:自定义观察回调,依赖变化时以值元组调用 cb
+    if let Stmt::Expr(Expr::MethodCall(mc), _) = &mut stmt
+        && mc.method == "with"
+        && let Expr::Call(call) = mc.receiver.as_ref()
+        && matches!(call.func.as_ref(), Expr::Path(p) if p.path.is_ident("__sv_inspect"))
+    {
+        let mut args: Vec<Expr> = call.args.iter().cloned().collect();
+        for a in &mut args {
+            rewrite_checked(source, span, vars, |rw| rw.visit_expr_mut(a))?;
+        }
+        let mut cb = mc.args.first().cloned().ok_or_else(|| {
+            syn_err(
+                source,
+                span,
+                &syn::Error::new_spanned(&mc.method, "x"),
+                "$inspect(...).with 需要回调参数",
+            )
+        })?;
+        rewrite_checked(source, span, vars, |rw| rw.visit_expr_mut(&mut cb))?;
+        if let Expr::Closure(c) = &mut cb
+            && c.capture.is_none()
+        {
+            c.capture = Some(Default::default());
+        }
+        return Ok(quote! {
+            ::sv_reactive::effect(move || { (#cb)(( #(#args),* )); });
+        });
     }
 
     // `$inspect(a, b, ...)` → 开发期观察 effect(Debug 打印,依赖变化即输出)
@@ -806,6 +848,68 @@ impl VisitMut for Rewriter<'_> {
                     *e = parse_quote!( { let __sv_rhs = #rhs; #ident.update(|__v| *__v #op __sv_rhs) } );
                     return;
                 }
+            }
+            // 表达式位的 rune 变体:$state.snapshot / $props.id / $effect.tracking
+            // / $effect.root / $effect.pending / $inspect.trace
+            Expr::MethodCall(mc)
+                if matches!(mc.receiver.as_ref(), Expr::Path(p)
+                    if ["__sv_state", "__sv_props", "__sv_effect", "__sv_inspect"]
+                        .iter().any(|r| p.path.is_ident(r))) =>
+            {
+                let recv = match mc.receiver.as_ref() {
+                    Expr::Path(p) => p.path.segments[0].ident.to_string(),
+                    _ => unreachable!(),
+                };
+                let method = mc.method.to_string();
+                match (recv.as_str(), method.as_str()) {
+                    // $state.snapshot(x):本实现无 Proxy,读出来就是普通值
+                    ("__sv_state", "snapshot") if mc.args.len() == 1 => {
+                        let mut arg = mc.args.first().unwrap().clone();
+                        self.visit_expr_mut(&mut arg);
+                        *e = parse_quote!( (#arg) );
+                    }
+                    ("__sv_props", "id") => {
+                        *e = parse_quote!( ::sv_reactive::unique_id() );
+                    }
+                    ("__sv_effect", "tracking") => {
+                        *e = parse_quote!( ::sv_reactive::is_tracking() );
+                    }
+                    // $effect.root(f) → 返回销毁闭包
+                    ("__sv_effect", "root") if mc.args.len() == 1 => {
+                        let mut arg = mc.args.first().unwrap().clone();
+                        self.visit_expr_mut(&mut arg);
+                        if let Expr::Closure(c) = &mut arg
+                            && c.capture.is_none()
+                        {
+                            c.capture = Some(Default::default());
+                        }
+                        *e = parse_quote!({
+                            let (_, __sv_root) = ::sv_reactive::create_root(#arg);
+                            move || __sv_root.dispose()
+                        });
+                    }
+                    // $effect.pending():进行中的 {#await}/后台任务数(响应式)
+                    ("__sv_effect", "pending") => {
+                        *e = parse_quote!( ::sv_ui::tasks::pending_count() );
+                    }
+                    // $inspect.trace(标签):所在 effect 每次重跑时打印
+                    ("__sv_inspect", "trace") => {
+                        let label = mc.args.first().cloned().map(|a| quote! { #a })
+                            .unwrap_or_else(|| quote! { "trace" });
+                        *e = parse_quote!( ::std::println!("[trace] {} 重跑", #label) );
+                    }
+                    // 这些留给 rewrite_stmt 的语句级处理($derived.by/$state.raw 等)
+                    ("__sv_state", "raw") | ("__sv_derived", _) => {
+                        visit_mut::visit_expr_mut(self, e);
+                    }
+                    _ => {
+                        self.errors.push(syn::Error::new_spanned(
+                            &mc.method,
+                            format!("未知 rune 变体 `.{method}`"),
+                        ));
+                    }
+                }
+                return;
             }
             // 显式句柄方法调用的接收者不再包 .get()
             Expr::MethodCall(mc) => {
