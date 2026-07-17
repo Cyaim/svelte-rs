@@ -1,6 +1,8 @@
 <script>
 let count = $state(0i32);
 let double = $derived(count * 2);
+let agree = $state(false);
+let hovers = $state(0i32);
 let items = $state(vec![
     (1i32, String::from("学 Rust")),
     (2, String::from("写 UI 库")),
@@ -47,6 +49,22 @@ $inspect(count);
     {/each}
   </Card>
 
+  <Card title={String::from("异步 · 过渡 · 表单 · 悬停")}>
+    <view class="row">
+      <checkbox bind:checked={agree} />
+      <text>同意协议(bind:checked 双向)</text>
+    </view>
+    {#if agree}
+      <text in:fade={300} fg="#1a7f37">已同意 —— 这行带 300ms 淡入</text>
+    {/if}
+    {#await async move { let base = 6 * 7; base }}
+      <text class="muted">后台计算中…</text>
+    {:then v}
+      <text>异步答案:{v}</text>
+    {/await}
+    <text class="muted" onpointerenter={|| hovers += 1}>悬停过 {hovers} 次的区域</text>
+  </Card>
+
   <Card title={String::from("{@const} · {#key} · {@debug}")}>
     {@const summary = format!("{} 项任务 · 计数 {}", items.len(), count)}
     <text class="muted">{summary}</text>
@@ -58,11 +76,14 @@ $inspect(count);
 </view>
 
 <style>
-.page { padding: 24; gap: 12; }
-.h1 { font-size: 28; }
-.row { direction: row; gap: 8; }
-.muted { fg: #666677; }
-.tiny { font-size: 12; fg: #9999aa; }
-.btn { padding: 8; radius: 6; bg: #ff3e00; fg: #ffffff; }
-.btn-alt { padding: 8; radius: 6; bg: #3c78ff; fg: #ffffff; }
+/* CSS 兼容层演示:标准属性名、px 单位、rgb()/颜色名、:hover 伪类 */
+.page { padding: 24px; gap: 12px; }
+.h1 { font-size: 28px; }
+.row { flex-direction: row; gap: 8px; }
+.muted { color: #666677; }
+.tiny { font-size: 12px; color: #9999aa; }
+.btn { padding: 8px; border-radius: 6px; background-color: rgb(255, 62, 0); color: white; }
+.btn:hover { background-color: orange; }
+.btn-alt { padding: 8px; border-radius: 6px; background-color: #3c78ff; color: white; }
+.btn-alt:hover { opacity: 0.8; }
 </style>
