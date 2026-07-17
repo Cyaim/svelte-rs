@@ -704,6 +704,263 @@ let n = $state(1i32);
         syn::parse_file(&code).unwrap();
     }
 
+    // ---- 第四批特性:补齐矩阵剩余项 ----
+
+    #[test]
+    fn comments_and_options_ignored() {
+        let src = "<view><!-- 这是注释 --><svelte:options runes />\n<text>x</text></view>";
+        let code = compile_sv(src, "c").expect("应编译成功");
+        assert!(!code.contains("这是注释") && !code.contains("options"), "\n{code}");
+        syn::parse_file(&code).unwrap();
+    }
+
+    #[test]
+    fn each_without_as() {
+        let src = r#"<script>
+let n = $state(3usize);
+</script>
+<view>
+  {#each vec![(); n]}
+    <text>一行</text>
+  {/each}
+</view>
+"#;
+        let code = compile_sv(src, "c").expect("应编译成功");
+        assert!(code.contains("each_block"), "\n{code}");
+        syn::parse_file(&code).unwrap();
+    }
+
+    #[test]
+    fn shorthand_attr_on_component() {
+        let mut registry = PropsRegistry::new();
+        registry.insert(
+            "card",
+            PropsSig {
+                fields: Some(vec![PropsSigField {
+                    name: "title".into(),
+                    has_default: false,
+                    bindable: false,
+                }]),
+            },
+        );
+        let src = r#"<script>
+let title = String::from("你好");
+</script>
+<view><Card {title} /></view>
+"#;
+        let code = compile_sv_with(src, "app", &registry).expect("应编译成功");
+        assert!(code.contains("title: title"), "简写 {{title}} 应展开:\n{code}");
+        syn::parse_file(&code).unwrap();
+    }
+
+    #[test]
+    fn attach_compiles() {
+        let src = r#"<script>
+let n = $state(0i32);
+</script>
+<view {@attach |d: &sv_ui::Doc, id: sv_ui::ViewId| { let _ = (d, id, n); }}></view>
+"#;
+        let code = compile_sv(src, "c").expect("应编译成功");
+        assert!(code.contains("::sv_reactive::effect"), "{{@attach}} 应包进 effect:\n{code}");
+        assert!(code.contains("n.get()"), "附着闭包内读应改写:\n{code}");
+        syn::parse_file(&code).unwrap();
+    }
+
+    #[test]
+    fn class_directive_reactive() {
+        let src = r#"<script>
+let muted = $state(false);
+let big = $state(true);
+</script>
+<view>
+  <text class:muted class:big={big} style:padding={4.0f32}>字</text>
+</view>
+
+<style>
+.muted { fg: #999999; }
+.big { font-size: 30; }
+</style>
+"#;
+        let code = compile_sv(src, "c").expect("应编译成功");
+        assert!(code.contains("::sv_ui::bind_style"), "有条件类应整体重算:\n{code}");
+        assert!(code.contains("if muted.get()"), "简写条件即同名变量:\n{code}");
+        assert!(code.contains("if big.get()"), "\n{code}");
+        assert!(code.contains("s.padding = 4.0f32"), "style: 指令应并入同一闭包:\n{code}");
+        assert!(!code.contains("bind_style_patch"), "并入后不应再有独立 patch:\n{code}");
+        syn::parse_file(&code).unwrap();
+    }
+
+    #[test]
+    fn transition_fade_compiles() {
+        let src = r#"<view>
+  <view transition:fade><text>a</text></view>
+  <view in:fade={500u32}><text>b</text></view>
+</view>
+"#;
+        let code = compile_sv(src, "c").expect("应编译成功");
+        assert!(code.contains("transition_in_fade"), "\n{code}");
+        assert!(code.contains("200u32") && code.contains("500u32"), "\n{code}");
+        let err = compile_sv("<view out:fade><text>x</text></view>", "c").unwrap_err();
+        assert!(err.message.contains("INERT"), "{err}");
+        syn::parse_file(&code).unwrap();
+    }
+
+    #[test]
+    fn bind_checked_two_way() {
+        let src = r#"<script>
+let done = $state(false);
+</script>
+<view><checkbox bind:checked={done} /></view>
+"#;
+        let code = compile_sv(src, "c").expect("应编译成功");
+        assert!(code.contains("create_checkbox"), "\n{code}");
+        assert!(code.contains("set_checked(__b_el, __b_sig.get())"), "状态→视图:\n{code}");
+        assert!(code.contains("__b_sig.update(|__v| *__v = !*__v)"), "点击→状态:\n{code}");
+        syn::parse_file(&code).unwrap();
+    }
+
+    #[test]
+    fn await_block_compiles() {
+        let src = r#"<script>
+let base = $state(1i32);
+</script>
+<view>
+  {#await async move { base + 1 }}
+    <text>加载中</text>
+  {:then v}
+    <text>{v}</text>
+  {/await}
+</view>
+"#;
+        let code = compile_sv(src, "c").expect("应编译成功");
+        assert!(code.contains("::sv_ui::tasks::await_block"), "\n{code}");
+        assert!(code.contains("base.get() + 1"), "future 工厂内读应改写(依赖变化即重启):\n{code}");
+        syn::parse_file(&code).unwrap();
+
+        let src2 = r#"<view>
+  {#await do_load()}
+    <text>...</text>
+  {:then v}
+    <text>{v}</text>
+  {:catch e}
+    <text>{e}</text>
+  {/await}
+</view>
+"#;
+        let code2 = compile_sv(src2, "c").expect("应编译成功");
+        assert!(code2.contains("await_block_result"), "带 catch 走 Result 版:\n{code2}");
+        syn::parse_file(&code2).unwrap();
+    }
+
+    #[test]
+    fn rune_variants_batch4() {
+        let src = r#"<script>
+let count = $state(1i32);
+let snap = $state.snapshot(count);
+let id = $props.id();
+let tracking = $effect.tracking();
+let stop = $effect.root(|| {
+    let _ = count;
+});
+$inspect(count).with(|vals| {
+    let _ = vals;
+});
+$effect(|| {
+    $inspect.trace("主效应");
+    let _ = count;
+});
+</script>
+<view><text>{snap} {id}</text></view>
+"#;
+        let code = compile_sv(src, "c").expect("应编译成功");
+        assert!(code.contains("let snap = (count.get())"), "$state.snapshot:\n{code}");
+        assert!(code.contains("::sv_reactive::unique_id()"), "$props.id:\n{code}");
+        assert!(code.contains("::sv_reactive::is_tracking()"), "$effect.tracking:\n{code}");
+        assert!(code.contains("__sv_root.dispose()"), "$effect.root 返回销毁闭包:\n{code}");
+        assert!(code.contains("[trace]"), "$inspect.trace:\n{code}");
+        syn::parse_file(&code).unwrap();
+    }
+
+    #[test]
+    fn writable_derived_assignment() {
+        let src = r#"<script>
+let a = $state(1i32);
+let d = $derived(a * 2);
+let optimistic = || d = 99;
+</script>
+<view><text>{d}</text></view>
+"#;
+        let code = compile_sv(src, "c").expect("应编译成功");
+        assert!(code.contains("d.set(99)"), "写 derived 应改写(乐观 UI):\n{code}");
+        syn::parse_file(&code).unwrap();
+    }
+
+    #[test]
+    fn snippet_as_prop_auto_rc() {
+        let mut registry = PropsRegistry::new();
+        registry.insert(
+            "card",
+            PropsSig {
+                fields: Some(vec![PropsSigField {
+                    name: "body".into(),
+                    has_default: false,
+                    bindable: false,
+                }]),
+            },
+        );
+        let src = r#"<view>
+  {#snippet hello()}
+    <text>你好</text>
+  {/snippet}
+  <Card body={hello} />
+</view>
+"#;
+        let code = compile_sv_with(src, "app", &registry).expect("应编译成功");
+        assert!(
+            code.contains("as ::sv_ui::Snippet"),
+            "snippet 名作 prop 应自动包 Rc:\n{code}"
+        );
+        syn::parse_file(&code).unwrap();
+    }
+
+    #[test]
+    fn css_compat_names_units_hover() {
+        let src = r##"<view>
+  <button class="btn">按钮</button>
+</view>
+
+<style>
+.btn {
+  background-color: rgb(255, 62, 0);
+  color: white;
+  border-radius: 6px;
+  padding: 8px;
+  flex-direction: row;
+}
+.btn:hover { background-color: orange; opacity: 0.9; }
+</style>
+"##;
+        let code = compile_sv(src, "c").expect("CSS 语法应编译成功");
+        assert!(code.contains("s.corner_radius = 6f32"), "px 单位应剥离:\n{code}");
+        assert!(code.contains("Color::rgba(255u8, 62u8, 0u8, 255u8)"), "rgb() 应解析:\n{code}");
+        assert!(code.contains("Color::rgba(255u8, 165u8, 0u8, 255u8)"), "颜色名 orange:\n{code}");
+        assert!(code.contains("__hv"), ":hover 应生成内部悬停状态:\n{code}");
+        assert!(
+            code.contains("set_on_pointer_enter") && code.contains("set_on_pointer_leave"),
+            ":hover 应自动接线指针事件:\n{code}"
+        );
+        assert!(code.contains("if __hv.get()"), ":hover 样式应条件生效:\n{code}");
+        syn::parse_file(&code).unwrap();
+
+        // 不支持的单位给出引导
+        let err = compile_sv(
+            "<view><text style=\"padding: 2em\">x</text></view>",
+            "c",
+        )
+        .unwrap_err();
+        assert!(err.message.contains("em") && err.message.contains("px"), "{err}");
+    }
+
     // ---- 对抗审查回归测试(2026-07-17,docs 见审查 workflow)----
 
     #[test]
