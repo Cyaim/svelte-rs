@@ -177,6 +177,8 @@ winit redraw 时机,鸿蒙接 OH_NativeVSync。目前原型是写入即同步 fl
 - **永不支持清单**(文档化 + 替代写法):伪元素、:global、:nth-child 结构伪类
   (P2 复评)、!important、inherit 关键字、@layer/@supports——业界共识裁剪与
   Svelte 低频使用面双重印证。
+- **现代 CSS 全面差距表**(91 项逐条,含 2023–2026 新浪潮的逐项裁决)见
+  [CSS-SUPPORT.md](CSS-SUPPORT.md)。
 
 ## 4. 原型现状(本仓库,全部测试绿)
 

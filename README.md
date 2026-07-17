@@ -26,7 +26,8 @@ count.set(1);                                // 精准触发,无 diff
 | `examples/counter-sfc` | 计数器 · `.sv` 文件写法(`src/Counter.sv`,build.rs 编译) |
 | `examples/todo-sfc` | 待办 · `.sv` 特性集(组件+`$props`、`{#each}{:else}`、`{@const}`、`{#key}`、`style:` 指令、`$inspect`) |
 | `examples/showcase` | **特性橱窗**(推荐先看):`$bindable` 双向绑定、children snippet、`{#snippet}/{@render}`、keyed `{#each}` 重排保状态、`<style>` scoped 类 |
-| `docs/SVELTE-SUPPORT.md` | Svelte 5 语法/特性支持矩阵(77 项逐项对照,当前 ✅24/🚧7/📋7/⏳19/❌20) |
+| `docs/SVELTE-SUPPORT.md` | Svelte 5 语法/特性支持矩阵(77 项,终局 ✅43/🚧3/📋0/⏳11/❌20) |
+| `docs/CSS-SUPPORT.md` | 现代 CSS 对比矩阵(91 项差距表:✅12 / C1+C2 排期 32 / P2 13 / ⏳18 / ❌16) |
 | `docs/DESIGN.md` | 架构设计与决策记录(ADR) |
 | `docs/research/` | 5 份联网核实的深度调研(Svelte 内核 / 生态 / 鸿蒙 / 编译器 / 渲染栈) |
 
