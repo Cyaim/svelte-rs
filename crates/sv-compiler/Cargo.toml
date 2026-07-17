@@ -1,0 +1,12 @@
+[package]
+name = "sv-compiler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = ".sv 单文件组件编译器:script 块 runes 源变换 + Svelte 语法模板 → Rust 代码生成"
+
+[dependencies]
+syn = { version = "2", features = ["full", "visit", "visit-mut", "extra-traits", "printing"] }
+quote = "1"
+proc-macro2 = { version = "1", features = ["span-locations"] }
+prettyplease = "0.2"
