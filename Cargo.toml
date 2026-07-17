@@ -1,0 +1,33 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/sv-reactive",
+    "crates/sv-ui",
+    "crates/sv-macro",
+    "crates/sv-compiler",
+    "crates/sv-shell",
+    "examples/counter",
+    "examples/counter-sfc",
+    "examples/todo-sfc",
+    "examples/showcase",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+slotmap = "1.0"
+sv-reactive = { path = "crates/sv-reactive" }
+sv-ui = { path = "crates/sv-ui" }
+sv-macro = { path = "crates/sv-macro" }
+sv-compiler = { path = "crates/sv-compiler" }
+sv-shell = { path = "crates/sv-shell" }
+
+[profile.dev]
+# UI 原型迭代期:略微提高优化等级让 demo 不至于太卡,同时保持编译速度
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2

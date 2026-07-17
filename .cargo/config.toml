@@ -1,0 +1,5 @@
+[build]
+# 若你的检出目录在 OneDrive 等同步盘内,建议把构建产物移出同步目录:
+# 同步器会锁文件导致 Windows 上链接失败/增量构建损坏,target/ 也会产生
+# 数 GB 无意义同步流量。按机器取消注释并调整路径:
+# target-dir = "C:/cargo-target/svelte-rs"
