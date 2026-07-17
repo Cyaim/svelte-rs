@@ -1,0 +1,10 @@
+[package]
+name = "sv-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "retained 场景树(桌面版 DOM)+ 细粒度响应式绑定原语,view! 宏的编译目标"
+
+[dependencies]
+slotmap = { workspace = true }
+sv-reactive = { workspace = true }
