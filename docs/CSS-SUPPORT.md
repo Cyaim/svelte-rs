@@ -16,6 +16,27 @@
 > | ⏳ | 桌面有意义,未排期(前置条件注明) |
 > | ❌ | 永不(桌面无对应/被架构裁掉,给替代写法) |
 
+## C1 已落地(2026-07-18)
+
+> **本节覆盖正文行的状态列**(冲突以此为准)。C1 批次已实现并验证
+> (`css_c1_box_model_vars_nesting` 等 46 个编译器测试 + showcase 渲染):
+>
+> - **盒模型**:`padding`/`margin` 1–4 值简写与 `-left` 系长手(`Edges` 四方向)、
+>   `border: 2px solid <color>`(实线)与 `border: none`
+> - **继承**:`color`/`font-size` 沿树解析(`fg=None`/`font_size=NAN` 哨兵,
+>   渲染期 O(depth) 父链回溯);`currentColor`/`inherit` 关键字 → 继承语义
+> - **单位**:`rem`(编译期 ×16);`em/%` 仍按引导报错(动态基准/taffy,C2)
+> - **颜色**:`hsl()`/`hsla()`/`hwb()` 编译期折叠、现代空格斜杠语法
+>   `rgb(255 62 0 / .5)`、`#hex` 4/8 位 alpha、命名色扩到 ~60
+> - **变量**:`:root { --x }` + `var(--x[, fallback])` 编译期文本代入
+> - **CSS 嵌套**:规则内 `&:hover { }` / `&:active { }` 展平
+> - **伪类**:`:active`(按压状态位 + pointer down/up 自动接线,LVHA 序生效)
+> - **选择器**:元素类型规则(`text { }` 组件内打底,specificity 直觉:元素 < 类)
+> - **`cursor`**(pointer/text/grab/not-allowed,shell 悬停时切换系统光标)
+>
+> 修正统计:**✅24 / 📅C2 19 / ✏️P2 14 / ⏳18 / ❌16**(border-radius 四角独立值
+> 从 C1 挪到 P2;`:focus/:disabled` 归 C2 随焦点链)。
+
 ## TL;DR
 
 - **已实现**是刻意的小切片(≈12 项):标准属性名、px、hex/rgb()/颜色名、类 + `:hover`、
