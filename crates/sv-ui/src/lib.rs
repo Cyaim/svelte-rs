@@ -14,7 +14,10 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use slotmap::{SlotMap, new_key_type};
-use sv_reactive::{create_root, derived, effect, on_cleanup, untrack};
+use sv_reactive::{RootHandle, create_root, derived, effect, on_cleanup, untrack};
+
+pub mod anim;
+pub mod tasks;
 
 /// 组件 children / 具名 snippet 的类型:接收 (doc, 挂载点) 的可复用构建闭包
 pub type Snippet = Rc<dyn Fn(&Doc, ViewId)>;
@@ -65,6 +68,8 @@ pub struct Style {
     pub width: Option<f32>,
     pub height: Option<f32>,
     pub corner_radius: f32,
+    /// 不透明度 0.0-1.0(过渡动画的载体)
+    pub opacity: f32,
 }
 
 impl Default for Style {
@@ -79,6 +84,7 @@ impl Default for Style {
             width: None,
             height: None,
             corner_radius: 0.0,
+            opacity: 1.0,
         }
     }
 }
@@ -95,16 +101,22 @@ pub enum ElementKind {
     Text,
     /// 按钮叶子(自带 label 文本,可点击)
     Button,
+    /// 复选框叶子(勾选状态在 [`ViewNode::checked`],label 复用 text 字段)
+    Checkbox,
 }
 
 pub struct ViewNode {
     pub kind: ElementKind,
-    /// Text / Button 的文本内容
+    /// Text / Button / Checkbox 的文本内容
     pub text: String,
+    /// Checkbox 的勾选状态(其它元素恒为 false)
+    pub checked: bool,
     pub style: Style,
     pub parent: Option<ViewId>,
     pub children: Vec<ViewId>,
     pub on_click: Option<Rc<dyn Fn()>>,
+    pub on_pointer_enter: Option<Rc<dyn Fn()>>,
+    pub on_pointer_leave: Option<Rc<dyn Fn()>>,
 }
 
 pub struct DocumentInner {
@@ -130,10 +142,13 @@ impl Doc {
         let root = nodes.insert(ViewNode {
             kind: ElementKind::View,
             text: String::new(),
+            checked: false,
             style: Style::default(),
             parent: None,
             children: Vec::new(),
             on_click: None,
+            on_pointer_enter: None,
+            on_pointer_leave: None,
         });
         Doc(Rc::new(RefCell::new(DocumentInner {
             nodes,
@@ -178,10 +193,13 @@ impl Doc {
         let id = self.0.borrow_mut().nodes.insert(ViewNode {
             kind,
             text: text.to_string(),
+            checked: false,
             style: Style::default(),
             parent: None,
             children: Vec::new(),
             on_click: None,
+            on_pointer_enter: None,
+            on_pointer_leave: None,
         });
         self.bump();
         id
@@ -197,6 +215,11 @@ impl Doc {
 
     pub fn create_button(&self, label: &str) -> ViewId {
         self.create(ElementKind::Button, label)
+    }
+
+    /// label 用 [`Doc::set_text`] 设置,勾选状态用 [`Doc::set_checked`]
+    pub fn create_checkbox(&self) -> ViewId {
+        self.create(ElementKind::Checkbox, "")
     }
 
     pub fn append(&self, parent: ViewId, child: ViewId) {
@@ -257,6 +280,18 @@ impl Doc {
         self.bump();
     }
 
+    pub fn set_checked(&self, id: ViewId, checked: bool) {
+        {
+            let mut inner = self.0.borrow_mut();
+            let Some(n) = inner.nodes.get_mut(id) else { return };
+            if n.checked == checked {
+                return; // 相等不 bump:渲染端不用白白重绘
+            }
+            n.checked = checked;
+        }
+        self.bump();
+    }
+
     pub fn set_style(&self, id: ViewId, style: Style) {
         {
             let mut inner = self.0.borrow_mut();
@@ -293,6 +328,34 @@ impl Doc {
         self.0.borrow().nodes.get(id).and_then(|n| n.on_click.clone())
     }
 
+    pub fn set_on_pointer_enter(&self, id: ViewId, f: impl Fn() + 'static) {
+        {
+            let mut inner = self.0.borrow_mut();
+            let Some(n) = inner.nodes.get_mut(id) else { return };
+            n.on_pointer_enter = Some(Rc::new(f));
+        }
+        self.bump();
+    }
+
+    pub fn set_on_pointer_leave(&self, id: ViewId, f: impl Fn() + 'static) {
+        {
+            let mut inner = self.0.borrow_mut();
+            let Some(n) = inner.nodes.get_mut(id) else { return };
+            n.on_pointer_leave = Some(Rc::new(f));
+        }
+        self.bump();
+    }
+
+    /// 取出悬停进入回调(同 [`Doc::click_handler`]:clone 出来调用,不持树借用)
+    pub fn pointer_enter_handler(&self, id: ViewId) -> Option<Rc<dyn Fn()>> {
+        self.0.borrow().nodes.get(id).and_then(|n| n.on_pointer_enter.clone())
+    }
+
+    /// 取出悬停离开回调
+    pub fn pointer_leave_handler(&self, id: ViewId) -> Option<Rc<dyn Fn()>> {
+        self.0.borrow().nodes.get(id).and_then(|n| n.on_pointer_leave.clone())
+    }
+
     /// 调试:把树 dump 成缩进文本
     pub fn dump(&self) -> String {
         fn walk(inner: &DocumentInner, id: ViewId, depth: usize, out: &mut String) {
@@ -302,6 +365,11 @@ impl Doc {
                 ElementKind::View => out.push_str(&format!("{pad}<view>\n")),
                 ElementKind::Text => out.push_str(&format!("{pad}\"{}\"\n", n.text)),
                 ElementKind::Button => out.push_str(&format!("{pad}[button \"{}\"]\n", n.text)),
+                ElementKind::Checkbox => out.push_str(&format!(
+                    "{pad}{} \"{}\"\n",
+                    if n.checked { "[x]" } else { "[ ]" },
+                    n.text
+                )),
             }
             for c in &n.children {
                 walk(inner, *c, depth + 1, out);
@@ -425,8 +493,6 @@ pub fn each_block_keyed<T, K>(
     T: Clone + 'static,
     K: PartialEq + Clone + 'static,
 {
-    use sv_reactive::RootHandle;
-
     let container = doc.create_view();
     doc.append(parent, container);
     let doc = doc.clone();
@@ -502,6 +568,38 @@ pub fn bind_style_patch(doc: &Doc, id: ViewId, patch: impl Fn(&mut Style) + 'sta
     effect(move || {
         doc.update_style(id, &patch);
     });
+}
+
+// ---------------------------------------------------------------------------
+// 命令式挂载(对应 Svelte 的 mount / unmount)
+// ---------------------------------------------------------------------------
+
+/// [`mount`] 返回的句柄:整个挂载体的生命周期由它掌控
+pub struct MountHandle {
+    doc: Doc,
+    container: ViewId,
+    scope: RootHandle,
+}
+
+impl MountHandle {
+    /// 对应 Svelte 的 `unmount`:先销毁响应式作用域(effect 停跑、cleanup 执行),
+    /// 再移除容器子树——顺序不能反,否则销毁期间的 effect 还可能触碰已删的节点
+    pub fn unmount(self) {
+        self.scope.dispose();
+        self.doc.remove(self.container);
+    }
+}
+
+/// 对应 Svelte 的 `mount`:在 parent 下建一个容器节点,并在**独立 root 作用域**
+/// 里执行构建闭包。内部创建的 signal/effect 不挂在调用方作用域上,生命周期完全
+/// 由返回的 [`MountHandle`] 掌控——与 keyed each 行作用域是同一套做法
+pub fn mount(doc: &Doc, parent: ViewId, f: impl FnOnce(&Doc, ViewId) + 'static) -> MountHandle {
+    let container = doc.create_view();
+    doc.append(parent, container);
+    let d = doc.clone();
+    // untrack:若在某个 effect 内调用 mount,构建期的散读不应订阅到该 effect 上
+    let (_, scope) = create_root(|| untrack(|| f(&d, container)));
+    MountHandle { doc: d, container, scope }
 }
 
 // ---------------------------------------------------------------------------
@@ -732,6 +830,113 @@ mod tests {
         size.set(20.0);
         assert_eq!(read(|s| s.padding), 20.0, "patch 应响应式更新");
         assert_eq!(read(|s| s.gap), 3.0);
+    }
+
+    #[test]
+    fn checkbox_toggle_and_dump() {
+        let doc = Doc::new();
+        let cb = doc.create_checkbox();
+        doc.append(doc.root(), cb);
+        doc.set_text(cb, "同意条款");
+        assert!(doc.dump().contains("[ ] \"同意条款\""), "\n{}", doc.dump());
+        doc.set_checked(cb, true);
+        assert!(doc.dump().contains("[x] \"同意条款\""), "\n{}", doc.dump());
+        // 相等不 bump:渲染端不用重绘
+        let v = doc.version();
+        doc.set_checked(cb, true);
+        assert_eq!(doc.version(), v, "写入相同勾选状态不应触发树变更");
+        doc.set_checked(cb, false);
+        assert!(doc.dump().contains("[ ] \"同意条款\""));
+    }
+
+    #[test]
+    fn pointer_hover_handlers_roundtrip() {
+        let doc = Doc::new();
+        let el = doc.create_view();
+        doc.append(doc.root(), el);
+        let log: std::rc::Rc<std::cell::RefCell<Vec<&'static str>>> = Default::default();
+        let l = log.clone();
+        doc.set_on_pointer_enter(el, move || l.borrow_mut().push("enter"));
+        let l = log.clone();
+        doc.set_on_pointer_leave(el, move || l.borrow_mut().push("leave"));
+        // 模拟指针进出(渲染壳命中测试后会这样取回调调用)
+        let enter = doc.pointer_enter_handler(el).unwrap();
+        let leave = doc.pointer_leave_handler(el).unwrap();
+        enter();
+        leave();
+        enter();
+        assert_eq!(*log.borrow(), vec!["enter", "leave", "enter"]);
+        // 未设置回调的节点取不到
+        let other = doc.create_view();
+        assert!(doc.pointer_enter_handler(other).is_none());
+        assert!(doc.pointer_leave_handler(other).is_none());
+    }
+
+    #[test]
+    fn mount_twice_unmount_cleans_tree_and_scopes() {
+        let doc = Doc::new();
+        let tick = state(0);
+        let n0 = sv_reactive::debug_node_count();
+
+        let h1 = mount(&doc, doc.root(), move |doc, parent| {
+            let t = doc.create_text("");
+            doc.append(parent, t);
+            bind_text(doc, t, move || format!("一号:{}", tick.get()));
+        });
+        let h2 = mount(&doc, doc.root(), move |doc, parent| {
+            let t = doc.create_text("");
+            doc.append(parent, t);
+            bind_text(doc, t, move || format!("二号:{}", tick.get()));
+        });
+        tick.set(1);
+        let dump = doc.dump();
+        assert!(dump.contains("一号:1") && dump.contains("二号:1"), "\n{dump}");
+
+        h1.unmount();
+        let dump = doc.dump();
+        assert!(!dump.contains("一号") && dump.contains("二号:1"), "\n{dump}");
+        tick.set(2); // 一号的作用域已销毁,只有二号还在响应
+        assert!(doc.dump().contains("二号:2"));
+
+        h2.unmount();
+        assert_eq!(
+            sv_reactive::debug_node_count(),
+            n0,
+            "unmount 后挂载体的响应式节点应全部回收"
+        );
+        let v = doc.version();
+        tick.set(3);
+        assert_eq!(doc.version(), v, "全部卸载后不应再有绑定触碰树");
+    }
+
+    #[test]
+    fn context_reaches_keyed_each_rows() {
+        use sv_reactive::{provide_context, use_context};
+        struct Theme(&'static str);
+
+        let doc = Doc::new();
+        let items = state(vec![1i32, 2]);
+        // 组件层作用域提供 context;行作用域是独立 create_root,
+        // 仍应沿"创建时 owner"链穿过去取到
+        let (_, _scope) = create_root(|| {
+            provide_context(Theme("dark"));
+            each_block_keyed(
+                &doc,
+                doc.root(),
+                move || items.get(),
+                |it| *it,
+                |doc, parent, it| {
+                    let theme = use_context::<Theme>().map_or("取不到", |t| t.0);
+                    let t = doc.create_text(&format!("{it}:{theme}"));
+                    doc.append(parent, t);
+                },
+            );
+        });
+        let dump = doc.dump();
+        assert!(dump.contains("1:dark") && dump.contains("2:dark"), "\n{dump}");
+        // 列表更新后新建的行(effect 重跑里建的 root)同样取得到
+        items.update(|v| v.push(3));
+        assert!(doc.dump().contains("3:dark"), "\n{}", doc.dump());
     }
 
     #[test]

@@ -40,10 +40,17 @@ struct App {
     win: Option<WinState>,
     placed: Vec<Placed>,
     cursor: (f64, f64),
+    hovered: Option<ViewId>,
+    epoch: std::time::Instant,
+    proxy: winit::event_loop::EventLoopProxy<()>,
 }
 
 impl App {
     fn paint(&mut self) {
+        // 先套用后台任务完成值、推进动画,再渲染本帧
+        sv_ui::tasks::pump();
+        let now_ms = self.epoch.elapsed().as_secs_f64() * 1000.0;
+        let animating = sv_ui::anim::pump(now_ms);
         let Some(ws) = &mut self.win else { return };
         let size = ws.window.inner_size();
         if size.width == 0 || size.height == 0 {
@@ -63,6 +70,39 @@ impl App {
             *dst = ((c.red() as u32) << 16) | ((c.green() as u32) << 8) | (c.blue() as u32);
         }
         buffer.present().expect("sv-shell: present 失败");
+        if animating {
+            ws.window.request_redraw();
+        }
+    }
+
+    /// 悬停派发:命中最上层带 enter/leave 回调的节点,变化时先 leave 后 enter
+    fn update_hover(&mut self) {
+        let Some(ws) = &self.win else { return };
+        let scale = ws.window.scale_factor();
+        let (lx, ly) = ((self.cursor.0 / scale) as f32, (self.cursor.1 / scale) as f32);
+        let target = self
+            .placed
+            .iter()
+            .rev()
+            .find(|p| {
+                p.rect.contains(lx, ly)
+                    && (self.doc.pointer_enter_handler(p.id).is_some()
+                        || self.doc.pointer_leave_handler(p.id).is_some())
+            })
+            .map(|p| p.id);
+        if target != self.hovered {
+            if let Some(old) = self.hovered
+                && let Some(h) = self.doc.pointer_leave_handler(old)
+            {
+                h();
+            }
+            if let Some(new) = target
+                && let Some(h) = self.doc.pointer_enter_handler(new)
+            {
+                h();
+            }
+            self.hovered = target;
+        }
     }
 
     fn click(&mut self) {
@@ -99,8 +139,20 @@ impl ApplicationHandler for App {
         }
         let w = window.clone();
         self.doc.set_on_mutate(move || w.request_redraw());
+        let proxy = self.proxy.clone();
+        sv_ui::tasks::set_waker(move || {
+            let _ = proxy.send_event(());
+        });
 
         self.win = Some(WinState { window, surface, _context: context });
+    }
+
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: ()) {
+        // 后台任务完成的唤醒:立即套用并请求重绘
+        sv_ui::tasks::pump();
+        if let Some(ws) = &self.win {
+            ws.window.request_redraw();
+        }
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -114,6 +166,7 @@ impl ApplicationHandler for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = (position.x, position.y);
+                self.update_hover();
             }
             WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
                 self.click();
@@ -129,6 +182,7 @@ pub fn run_app(
     build: impl FnOnce(&Doc, ViewId) + 'static,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let event_loop = EventLoop::new()?;
+    let proxy = event_loop.create_proxy();
     let mut app = App {
         title: title.to_string(),
         doc: Doc::new(),
@@ -137,6 +191,9 @@ pub fn run_app(
         win: None,
         placed: Vec::new(),
         cursor: (0.0, 0.0),
+        hovered: None,
+        epoch: std::time::Instant::now(),
+        proxy,
     };
     event_loop.run_app(&mut app)?;
     Ok(())

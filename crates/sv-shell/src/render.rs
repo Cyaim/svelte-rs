@@ -65,6 +65,10 @@ fn measure(
             let (tw, th) = measure_text(font, &n.text, s.font_size);
             (tw + s.padding * 2.0, th + s.padding * 2.0)
         }
+        ElementKind::Checkbox => {
+            let side = s.font_size.max(14.0);
+            (side + s.padding * 2.0, side + s.padding * 2.0)
+        }
         ElementKind::View => {
             let mut main = 0.0f32;
             let mut cross = 0.0f32;
@@ -155,6 +159,23 @@ fn skia_color(c: Color) -> tiny_skia::Color {
     tiny_skia::Color::from_rgba8(c.r, c.g, c.b, c.a)
 }
 
+/// 把节点的不透明度乘进颜色 alpha
+fn with_opacity(c: Color, o: f32) -> Color {
+    Color::rgba(c.r, c.g, c.b, (c.a as f32 * o.clamp(0.0, 1.0)) as u8)
+}
+
+/// 有效不透明度 = 自身 × 祖先链乘积(近似组透明,v0 无合成层)
+fn effective_opacity(inner: &DocumentInner, id: ViewId) -> f32 {
+    let mut o = 1.0f32;
+    let mut cur = Some(id);
+    while let Some(c) = cur {
+        let Some(n) = inner.nodes.get(c) else { break };
+        o *= n.style.opacity;
+        cur = n.parent;
+    }
+    o
+}
+
 fn rounded_rect(pb: &mut PathBuilder, x: f32, y: f32, w: f32, h: f32, r: f32) {
     let r = r.min(w / 2.0).min(h / 2.0);
     if r <= 0.5 {
@@ -242,6 +263,7 @@ pub fn render_frame(doc: &Doc, phys_w: u32, phys_h: u32, scale: f32) -> (Pixmap,
         for p in &placed {
             let Some(n) = inner.nodes.get(p.id) else { continue };
             let s = &n.style;
+            let op = effective_opacity(inner, p.id);
             let (x, y, w, h) = (p.rect.x * scale, p.rect.y * scale, p.rect.w * scale, p.rect.h * scale);
 
             if let Some(bg) = s.bg {
@@ -249,7 +271,7 @@ pub fn render_frame(doc: &Doc, phys_w: u32, phys_h: u32, scale: f32) -> (Pixmap,
                 rounded_rect(&mut pb, x, y, w, h, s.corner_radius * scale);
                 if let Some(path) = pb.finish() {
                     let mut paint = Paint::default();
-                    paint.set_color(skia_color(bg));
+                    paint.set_color(skia_color(with_opacity(bg, op)));
                     paint.anti_alias = true;
                     pixmap.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
                 }
@@ -257,7 +279,7 @@ pub fn render_frame(doc: &Doc, phys_w: u32, phys_h: u32, scale: f32) -> (Pixmap,
 
             match n.kind {
                 ElementKind::Text => {
-                    let fg = s.fg.unwrap_or(Color::BLACK);
+                    let fg = with_opacity(s.fg.unwrap_or(Color::BLACK), op);
                     draw_text(
                         &mut pixmap,
                         font,
@@ -269,7 +291,7 @@ pub fn render_frame(doc: &Doc, phys_w: u32, phys_h: u32, scale: f32) -> (Pixmap,
                     );
                 }
                 ElementKind::Button => {
-                    let fg = s.fg.unwrap_or(Color::WHITE);
+                    let fg = with_opacity(s.fg.unwrap_or(Color::WHITE), op);
                     // 按钮文本居中
                     let (tw, th) = measure_text(font, &n.text, s.font_size * scale);
                     draw_text(
@@ -281,6 +303,38 @@ pub fn render_frame(doc: &Doc, phys_w: u32, phys_h: u32, scale: f32) -> (Pixmap,
                         x + (w - tw) / 2.0,
                         y + (h - th) / 2.0,
                     );
+                }
+                ElementKind::Checkbox => {
+                    // 外框(未设 bg 用浅灰),选中时内嵌强调色小方块
+                    let boxc = with_opacity(s.bg.unwrap_or(Color::rgb(221, 221, 234)), op);
+                    let mut pb = PathBuilder::new();
+                    let r = if s.corner_radius > 0.0 { s.corner_radius } else { 4.0 };
+                    rounded_rect(&mut pb, x, y, w, h, r * scale);
+                    if let Some(path) = pb.finish() {
+                        let mut paint = Paint::default();
+                        paint.set_color(skia_color(boxc));
+                        paint.anti_alias = true;
+                        pixmap.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
+                    }
+                    if n.checked {
+                        let accent = with_opacity(s.fg.unwrap_or(Color::rgb(255, 62, 0)), op);
+                        let inset = w * 0.25;
+                        let mut pb = PathBuilder::new();
+                        rounded_rect(
+                            &mut pb,
+                            x + inset,
+                            y + inset,
+                            w - inset * 2.0,
+                            h - inset * 2.0,
+                            2.0 * scale,
+                        );
+                        if let Some(path) = pb.finish() {
+                            let mut paint = Paint::default();
+                            paint.set_color(skia_color(accent));
+                            paint.anti_alias = true;
+                            pixmap.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
+                        }
+                    }
                 }
                 ElementKind::View => {}
             }
