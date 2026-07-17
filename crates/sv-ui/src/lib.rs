@@ -56,20 +56,71 @@ pub enum Direction {
     Row,
 }
 
-/// 极简样式模型(原型阶段够用,后续换 taffy + 完整样式系统)
-#[derive(Clone, PartialEq, Debug)]
+/// 四方向边距(padding/margin;CSS 盒模型的最小载体)
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub struct Edges {
+    pub top: f32,
+    pub right: f32,
+    pub bottom: f32,
+    pub left: f32,
+}
+
+impl Edges {
+    pub const fn all(v: f32) -> Self {
+        Self { top: v, right: v, bottom: v, left: v }
+    }
+    pub fn horizontal(&self) -> f32 {
+        self.left + self.right
+    }
+    pub fn vertical(&self) -> f32 {
+        self.top + self.bottom
+    }
+}
+
+impl From<f32> for Edges {
+    fn from(v: f32) -> Self {
+        Edges::all(v)
+    }
+}
+
+/// 边框(v0:实线,单宽单色)
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Border {
+    pub width: f32,
+    pub color: Color,
+}
+
+/// 鼠标光标(CSS cursor 子集)
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Cursor {
+    Default,
+    Pointer,
+    Text,
+    Grab,
+    NotAllowed,
+}
+
+/// 极简样式模型(原型阶段够用,后续换 taffy + 完整样式系统)。
+/// 继承语义:`fg = None` / `font_size = NAN` 表示"继承"(沿父链解析,
+/// 白名单见渲染层 resolve;根 fallback:BLACK / 16.0)
+#[derive(Clone, Debug)]
 pub struct Style {
     pub direction: Direction,
     pub gap: f32,
-    pub padding: f32,
+    pub padding: Edges,
+    pub margin: Edges,
+    pub border: Option<Border>,
     pub bg: Option<Color>,
+    /// None = 继承
     pub fg: Option<Color>,
+    /// NAN = 继承
     pub font_size: f32,
     pub width: Option<f32>,
     pub height: Option<f32>,
     pub corner_radius: f32,
     /// 不透明度 0.0-1.0(过渡动画的载体)
     pub opacity: f32,
+    pub cursor: Option<Cursor>,
 }
 
 impl Default for Style {
@@ -77,15 +128,40 @@ impl Default for Style {
         Self {
             direction: Direction::Column,
             gap: 0.0,
-            padding: 0.0,
+            padding: Edges::default(),
+            margin: Edges::default(),
+            border: None,
             bg: None,
             fg: None,
-            font_size: 16.0,
+            font_size: f32::NAN, // 继承
             width: None,
             height: None,
             corner_radius: 0.0,
             opacity: 1.0,
+            cursor: None,
         }
+    }
+}
+
+// font_size 的 NAN(继承哨兵)要按"同为 NAN 即相等"比较,
+// 否则 set_style 的相等剪枝永远失效、每次重算都 bump 版本
+impl PartialEq for Style {
+    fn eq(&self, other: &Self) -> bool {
+        let fs_eq = (self.font_size.is_nan() && other.font_size.is_nan())
+            || self.font_size == other.font_size;
+        self.direction == other.direction
+            && self.gap == other.gap
+            && self.padding == other.padding
+            && self.margin == other.margin
+            && self.border == other.border
+            && self.bg == other.bg
+            && self.fg == other.fg
+            && fs_eq
+            && self.width == other.width
+            && self.height == other.height
+            && self.corner_radius == other.corner_radius
+            && self.opacity == other.opacity
+            && self.cursor == other.cursor
     }
 }
 
@@ -116,6 +192,8 @@ pub struct ViewNode {
     pub children: Vec<ViewId>,
     pub on_click: Option<Rc<dyn Fn()>>,
     pub on_pointer_enter: Option<Rc<dyn Fn()>>,
+    pub on_pointer_down: Option<Rc<dyn Fn()>>,
+    pub on_pointer_up: Option<Rc<dyn Fn()>>,
     pub on_pointer_leave: Option<Rc<dyn Fn()>>,
 }
 
@@ -148,6 +226,8 @@ impl Doc {
             children: Vec::new(),
             on_click: None,
             on_pointer_enter: None,
+            on_pointer_down: None,
+            on_pointer_up: None,
             on_pointer_leave: None,
         });
         Doc(Rc::new(RefCell::new(DocumentInner {
@@ -199,6 +279,8 @@ impl Doc {
             children: Vec::new(),
             on_click: None,
             on_pointer_enter: None,
+            on_pointer_down: None,
+            on_pointer_up: None,
             on_pointer_leave: None,
         });
         self.bump();
@@ -354,6 +436,32 @@ impl Doc {
     /// 取出悬停离开回调
     pub fn pointer_leave_handler(&self, id: ViewId) -> Option<Rc<dyn Fn()>> {
         self.0.borrow().nodes.get(id).and_then(|n| n.on_pointer_leave.clone())
+    }
+
+    pub fn set_on_pointer_down(&self, id: ViewId, f: impl Fn() + 'static) {
+        {
+            let mut inner = self.0.borrow_mut();
+            let Some(n) = inner.nodes.get_mut(id) else { return };
+            n.on_pointer_down = Some(Rc::new(f));
+        }
+        self.bump();
+    }
+
+    pub fn set_on_pointer_up(&self, id: ViewId, f: impl Fn() + 'static) {
+        {
+            let mut inner = self.0.borrow_mut();
+            let Some(n) = inner.nodes.get_mut(id) else { return };
+            n.on_pointer_up = Some(Rc::new(f));
+        }
+        self.bump();
+    }
+
+    pub fn pointer_down_handler(&self, id: ViewId) -> Option<Rc<dyn Fn()>> {
+        self.0.borrow().nodes.get(id).and_then(|n| n.on_pointer_down.clone())
+    }
+
+    pub fn pointer_up_handler(&self, id: ViewId) -> Option<Rc<dyn Fn()>> {
+        self.0.borrow().nodes.get(id).and_then(|n| n.on_pointer_up.clone())
     }
 
     /// 调试:把树 dump 成缩进文本
@@ -823,12 +931,12 @@ mod tests {
         doc.append(doc.root(), el);
         // 静态样式先落一笔
         doc.update_style(el, |s| s.gap = 3.0);
-        bind_style_patch(&doc, el, move |s| s.padding = size.get());
+        bind_style_patch(&doc, el, move |s| s.padding = size.get().into());
         let read = |f: fn(&Style) -> f32| doc.read(|inner| f(&inner.nodes[el].style));
-        assert_eq!(read(|s| s.padding), 10.0);
+        assert_eq!(read(|s| s.padding.left), 10.0);
         assert_eq!(read(|s| s.gap), 3.0, "patch 不应重置其它字段");
         size.set(20.0);
-        assert_eq!(read(|s| s.padding), 20.0, "patch 应响应式更新");
+        assert_eq!(read(|s| s.padding.left), 20.0, "patch 应响应式更新");
         assert_eq!(read(|s| s.gap), 3.0);
     }
 

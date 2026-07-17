@@ -41,6 +41,7 @@ struct App {
     placed: Vec<Placed>,
     cursor: (f64, f64),
     hovered: Option<ViewId>,
+    pressed: Option<ViewId>,
     epoch: std::time::Instant,
     proxy: winit::event_loop::EventLoopProxy<()>,
 }
@@ -102,6 +103,28 @@ impl App {
                 h();
             }
             self.hovered = target;
+        }
+        // cursor 属性:最上层设了 cursor 的节点决定光标
+        let icon = self
+            .placed
+            .iter()
+            .rev()
+            .find_map(|p| {
+                if !p.rect.contains(lx, ly) {
+                    return None;
+                }
+                self.doc.read(|inner| inner.nodes.get(p.id).and_then(|n| n.style.cursor))
+            })
+            .map(|c| match c {
+                sv_ui::Cursor::Pointer => winit::window::CursorIcon::Pointer,
+                sv_ui::Cursor::Text => winit::window::CursorIcon::Text,
+                sv_ui::Cursor::Grab => winit::window::CursorIcon::Grab,
+                sv_ui::Cursor::NotAllowed => winit::window::CursorIcon::NotAllowed,
+                sv_ui::Cursor::Default => winit::window::CursorIcon::Default,
+            })
+            .unwrap_or(winit::window::CursorIcon::Default);
+        if let Some(ws) = &self.win {
+            ws.window.set_cursor(winit::window::Cursor::Icon(icon));
         }
     }
 
@@ -169,7 +192,29 @@ impl ApplicationHandler for App {
                 self.update_hover();
             }
             WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
+                // :active / 按压回调:先派发 pointer_down,再派发点击
+                let Some(ws) = &self.win else { return };
+                let scale = ws.window.scale_factor();
+                let (lx, ly) = ((self.cursor.0 / scale) as f32, (self.cursor.1 / scale) as f32);
+                self.pressed = self
+                    .placed
+                    .iter()
+                    .rev()
+                    .find(|p| p.rect.contains(lx, ly) && self.doc.pointer_down_handler(p.id).is_some())
+                    .map(|p| p.id);
+                if let Some(id) = self.pressed
+                    && let Some(h) = self.doc.pointer_down_handler(id)
+                {
+                    h();
+                }
                 self.click();
+            }
+            WindowEvent::MouseInput { state: ElementState::Released, button: MouseButton::Left, .. } => {
+                if let Some(id) = self.pressed.take()
+                    && let Some(h) = self.doc.pointer_up_handler(id)
+                {
+                    h();
+                }
             }
             _ => {}
         }
@@ -192,6 +237,7 @@ pub fn run_app(
         placed: Vec::new(),
         cursor: (0.0, 0.0),
         hovered: None,
+        pressed: None,
         epoch: std::time::Instant::now(),
         proxy,
     };
@@ -240,7 +286,7 @@ mod tests {
         let (_, _scope) = create_root(|| {
             let root = doc.root();
             doc.update_style(root, |s| {
-                s.padding = 16.0;
+                s.padding = 16.0.into();
                 s.gap = 8.0;
             });
             let label = doc.create_text("");
@@ -249,7 +295,7 @@ mod tests {
             let btn = doc.create_button("+1");
             doc.append(root, btn);
             doc.update_style(btn, |s| {
-                s.padding = 8.0;
+                s.padding = 8.0.into();
                 s.bg = Some(sv_ui::Color::rgb(60, 120, 255));
             });
             doc.set_on_click(btn, move || count.update(|c| *c += 1));
