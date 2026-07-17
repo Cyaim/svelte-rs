@@ -4,8 +4,13 @@
 //!
 //! 对应关系:
 //! - `$state`   → [`state`] / [`Signal`]
-//! - `$derived` → [`derived`] / [`Derived`](惰性求值 + 值相等剪枝)
+//! - `$derived` → [`derived`] / [`Derived`](惰性求值 + 值相等剪枝;可写覆盖做乐观 UI)
 //! - `$effect`  → [`effect`](自动追踪依赖、重跑前自动清理子作用域)
+//! - `$effect.pre` → [`effect_pre`](同一轮 flush 内先于普通 effect)
+//! - `$effect.tracking()` → [`is_tracking`]
+//! - `$props.id()` → [`unique_id`]
+//! - `tick` → [`tick`]
+//! - `setContext` / `getContext` → [`provide_context`] / [`use_context`]
 //!
 //! ## 模型
 //!
@@ -23,8 +28,9 @@
 //! - derived 计算过程中禁止写 state(等价于 Svelte 的 `state_unsafe_mutation` 错误)。
 //! - `with` 回调执行期间对**同一个**节点的重入读取会 panic(读其它节点没问题)。
 
-use std::any::Any;
+use std::any::{Any, TypeId};
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::rc::Rc;
 
@@ -45,6 +51,15 @@ enum Dirtiness {
     Dirty,
 }
 
+/// effect 的调度相位。拆相位而不是拆节点类型:除了 flush 里的执行顺序,
+/// pre 与普通 effect 的其余行为(追踪、清理、销毁)完全一致
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EffectPhase {
+    /// 对应 Svelte 的 `$effect.pre`("渲染前"),每轮批处理先跑
+    Pre,
+    Normal,
+}
+
 enum NodeKind {
     Signal,
     Derived {
@@ -53,6 +68,7 @@ enum NodeKind {
     },
     Effect {
         f: Rc<RefCell<dyn FnMut()>>,
+        phase: EffectPhase,
     },
     /// 纯所有权作用域(create_root),只负责统一销毁
     Root,
@@ -70,6 +86,13 @@ struct Node {
     /// 运行期间创建的子节点,重跑/销毁时级联清理
     children: Vec<NodeId>,
     cleanups: Vec<Box<dyn FnOnce()>>,
+    /// **创建时**的所有权作用域(children 的反向边)。context 沿这条链向上查:
+    /// 记录创建时刻而非查找时刻,才能让 create_root 内的节点穿过 root 边界
+    /// 取到外层 context(keyed each 行作用域的关键)
+    owner: Option<NodeId>,
+    /// provide_context 挂在本作用域的上下文,按类型索引。
+    /// 惰性分配:绝大多数节点没有 context,别为它们付 HashMap 的开销
+    contexts: Option<HashMap<TypeId, Rc<dyn Any>>>,
 }
 
 #[derive(Default)]
@@ -82,6 +105,8 @@ struct Runtime {
     queue: Vec<NodeId>,
     batch_depth: usize,
     flushing: bool,
+    /// [`unique_id`] 的自增计数器(线程内单调)
+    next_unique_id: u64,
 }
 
 thread_local! {
@@ -108,6 +133,8 @@ fn create_node(
         subscribers: Vec::new(),
         children: Vec::new(),
         cleanups: Vec::new(),
+        owner,
+        contexts: None,
     });
     if let Some(o) = owner
         && let Some(n) = rt.nodes.get_mut(o)
@@ -221,7 +248,19 @@ fn flush(rtc: &RefCell<Runtime>) {
             passes <= MAX_FLUSH_PASSES,
             "sv-reactive: effect 更新超过 {MAX_FLUSH_PASSES} 轮仍未收敛,疑似在 effect 里循环写入 state"
         );
-        for id in batch {
+        // 两阶段:每轮批处理里 pre effect 先于普通 effect(对应 Svelte 的
+        // `$effect.pre` 在"渲染"前执行——本模型里普通 effect 承担渲染写入)。
+        // 每轮单独分相而不是全局排序:pre 里再触发的写入照常进下一轮
+        let (pre, normal): (Vec<NodeId>, Vec<NodeId>) = {
+            let rt = rtc.borrow();
+            batch.into_iter().partition(|id| {
+                matches!(
+                    rt.nodes.get(*id).map(|n| &n.kind),
+                    Some(NodeKind::Effect { phase: EffectPhase::Pre, .. })
+                )
+            })
+        };
+        for id in pre.into_iter().chain(normal) {
             update_if_necessary(rtc, id);
         }
     }
@@ -265,7 +304,7 @@ fn update_if_necessary(rtc: &RefCell<Runtime>, id: NodeId) {
 
 /// 重跑前清理:级联销毁子节点、执行 cleanup、退订旧依赖(节点本身保留)
 fn cleanup_node(rtc: &RefCell<Runtime>, id: NodeId) {
-    let (cleanups, children, sources) = {
+    let (cleanups, children, sources, contexts) = {
         let mut rt = rtc.borrow_mut();
         let Some(n) = rt.nodes.get_mut(id) else {
             return;
@@ -274,6 +313,9 @@ fn cleanup_node(rtc: &RefCell<Runtime>, id: NodeId) {
             std::mem::take(&mut n.cleanups),
             std::mem::take(&mut n.children),
             std::mem::take(&mut n.sources),
+            // 重跑会重新执行 provide_context,上一轮挂的 context 一并清掉,
+            // 否则本轮没再 provide 时后代会读到陈旧值
+            n.contexts.take(),
         )
     };
     {
@@ -291,6 +333,8 @@ fn cleanup_node(rtc: &RefCell<Runtime>, id: NodeId) {
     for c in cleanups {
         c();
     }
+    // context 值可能带用户 Drop 逻辑,同样在借用释放后丢弃
+    drop(contexts);
 }
 
 fn dispose_node(rtc: &RefCell<Runtime>, id: NodeId) {
@@ -324,7 +368,7 @@ fn run_node(rtc: &RefCell<Runtime>, id: NodeId) {
                 node.state = Dirtiness::Clean;
                 match &node.kind {
                     NodeKind::Derived { f, eq } => Some(Job::Derived(f.clone(), *eq)),
-                    NodeKind::Effect { f } => Some(Job::Effect(f.clone())),
+                    NodeKind::Effect { f, .. } => Some(Job::Effect(f.clone())),
                     _ => None,
                 }
             }
@@ -456,9 +500,20 @@ pub fn derived<T: PartialEq + 'static>(f: impl Fn() -> T + 'static) -> Derived<T
 /// 与 Svelte 的差异:Svelte 把 effect 推迟到微任务,这里为桌面场景选择
 /// **创建时同步首跑**;首跑视作一次原子刷新,期间写入的 state 在首跑结束后统一 flush。
 pub fn effect(f: impl FnMut() + 'static) -> EffectHandle {
+    create_effect(f, EffectPhase::Normal)
+}
+
+/// `$effect.pre`:pre 相位的 effect。与 [`effect`] 的唯一差别是调度顺序:
+/// 同一轮 flush 里所有 pre effect 先于普通 effect 执行(Svelte 里普通 effect
+/// 承担"渲染"写入,pre 用于在渲染前读取旧布局/滚动位置等)。创建时同样同步首跑
+pub fn effect_pre(f: impl FnMut() + 'static) -> EffectHandle {
+    create_effect(f, EffectPhase::Pre)
+}
+
+fn create_effect(f: impl FnMut() + 'static, phase: EffectPhase) -> EffectHandle {
     RT.with(|rtc| {
         let f: Rc<RefCell<dyn FnMut()>> = Rc::new(RefCell::new(f));
-        let id = create_node(rtc, NodeKind::Effect { f }, None, Dirtiness::Clean);
+        let id = create_node(rtc, NodeKind::Effect { f, phase }, None, Dirtiness::Clean);
         let was_flushing = {
             let mut rt = rtc.borrow_mut();
             std::mem::replace(&mut rt.flushing, true)
@@ -501,6 +556,91 @@ pub fn untrack<R>(f: impl FnOnce() -> R) -> R {
         }
         let _g = G(rtc, prev);
         f()
+    })
+}
+
+/// `$effect.tracking()`:当前是否处于依赖追踪上下文
+/// (effect 重跑或 derived 重算期间为 true;顶层与 [`untrack`] 内为 false)
+pub fn is_tracking() -> bool {
+    RT.with(|rtc| rtc.borrow().observer.is_some())
+}
+
+/// `$props.id()`:生成线程内唯一的自增 id("sv-1"、"sv-2"…),
+/// 供需要稳定唯一标识(无障碍属性、label 关联等)的场景使用
+pub fn unique_id() -> String {
+    RT.with(|rtc| {
+        let mut rt = rtc.borrow_mut();
+        rt.next_unique_id += 1;
+        format!("sv-{}", rt.next_unique_id)
+    })
+}
+
+/// `tick`:立即冲刷待决 effect。本模型写入后本就同步 flush,该函数主要为
+/// API 对齐保留;batch 内调用是 no-op(不破坏批处理原子性),batch 结束照常统一 flush
+pub fn tick() {
+    RT.with(|rtc| maybe_flush(rtc));
+}
+
+/// 在**无所有者、无追踪**环境下执行 `f`:期间创建的节点不挂进任何作用域,
+/// 永不随作用域销毁,期间的读取也不建立依赖。
+/// 用途:线程级单例信号(如异步桥的在途计数)——它们可能在某个 effect 运行
+/// 期间被惰性初始化,若不游离创建,会随那个 effect 的重跑被误销毁
+pub fn detached<R>(f: impl FnOnce() -> R) -> R {
+    RT.with(|rtc| {
+        let (prev_owner, prev_obs) = {
+            let mut rt = rtc.borrow_mut();
+            (rt.owner.take(), rt.observer.take())
+        };
+        struct G<'a>(&'a RefCell<Runtime>, Option<NodeId>, Option<NodeId>);
+        impl Drop for G<'_> {
+            fn drop(&mut self) {
+                let mut rt = self.0.borrow_mut();
+                rt.owner = self.1;
+                rt.observer = self.2;
+            }
+        }
+        let _g = G(rtc, prev_owner, prev_obs);
+        f()
+    })
+}
+
+/// `setContext`:把一份上下文按类型挂到**当前所有权作用域**(effect/root)上,
+/// 后代作用域用 [`use_context`] 读取。同一作用域重复 provide 同类型会覆盖;
+/// 作用域销毁/重跑时上下文一并清理
+pub fn provide_context<T: 'static>(value: T) {
+    RT.with(|rtc| {
+        let mut rt = rtc.borrow_mut();
+        if let Some(o) = rt.owner
+            && let Some(n) = rt.nodes.get_mut(o)
+        {
+            n.contexts
+                .get_or_insert_with(HashMap::new)
+                .insert(TypeId::of::<T>(), Rc::new(value) as Rc<dyn Any>);
+            return;
+        }
+        #[cfg(debug_assertions)]
+        eprintln!("sv-reactive: provide_context 在响应式作用域外调用,不会有任何效果");
+    })
+}
+
+/// `getContext`:从当前作用域沿 owner 链向上找**最近**一层提供的 `T`,
+/// 找不到返回 `None`。owner 记录的是节点创建时刻的作用域,所以查找能穿过
+/// create_root 边界——keyed each 的行作用域也能取到组件层的 context
+pub fn use_context<T: 'static>() -> Option<Rc<T>> {
+    RT.with(|rtc| {
+        let rt = rtc.borrow();
+        let mut cur = rt.owner;
+        while let Some(id) = cur {
+            let node = rt.nodes.get(id)?;
+            if let Some(map) = &node.contexts
+                && let Some(v) = map.get(&TypeId::of::<T>())
+            {
+                // clone 的是 Rc(引用计数),不触碰用户值,借用期间安全
+                return v.clone().downcast::<T>().ok();
+            }
+            cur = node.owner;
+        }
+        None
     })
 }
 
@@ -641,7 +781,8 @@ impl<T: 'static> Signal<T> {
     }
 }
 
-/// `$derived` 的句柄。`Copy`、`!Send`、只读
+/// `$derived` 的句柄。`Copy`、`!Send`;平时只读,
+/// 可用 [`Derived::set`]/[`Derived::update`] 临时覆盖(乐观 UI)
 pub struct Derived<T: 'static> {
     id: NodeId,
     _t: PhantomData<(fn() -> T, *const ())>,
@@ -687,6 +828,75 @@ impl<T: 'static> Derived<T> {
         T: Clone,
     {
         untrack(|| self.get())
+    }
+
+    /// **writable derived**(Svelte 5.25 的乐观 UI):手动覆盖派生值并通知下游,
+    /// 与当前派生值相等时剪枝(不惊动下游)。覆盖不是永久的:**任一依赖变化后**,
+    /// 现有的 mark → 重算机制会用重算结果盖回来,自动回退——这里只需写入值、
+    /// 清脏标记、mark 下游 Dirty,不需要额外状态。
+    ///
+    /// 在 derived 计算过程中调用仍会 panic(`assert_writable` 保护照旧);
+    /// 允许的是"从外部"写 derived。
+    pub fn set(&self, value: T) {
+        RT.with(|rtc| {
+            assert_writable(rtc);
+            // 先拉到最新:一是让相等剪枝对着**最新**派生值比较,二是确保依赖边
+            // 已建立——从未计算过的 derived 没有 sources,依赖变化收不到标记,
+            // 覆盖值将永远不回退
+            update_if_necessary(rtc, self.id);
+            let changed = {
+                let mut rt = rtc.borrow_mut();
+                let node = rt
+                    .nodes
+                    .get_mut(self.id)
+                    .expect("sv-reactive: derived 已随作用域销毁,不能再写入");
+                let eq = match &node.kind {
+                    NodeKind::Derived { eq, .. } => *eq,
+                    _ => unreachable!("sv-reactive: 内部错误——Derived 句柄指向非 derived 节点"),
+                };
+                let new_value: Box<dyn Any> = Box::new(value);
+                let changed = match &node.value {
+                    Some(old) => !eq(old.as_ref(), new_value.as_ref()),
+                    None => true,
+                };
+                node.value = Some(new_value);
+                // 覆盖后视为最新:清掉脏标记,后续读取返回覆盖值而不是触发重算
+                node.state = Dirtiness::Clean;
+                changed
+            };
+            if changed {
+                notify(rtc, self.id);
+            }
+        })
+    }
+
+    /// 在**最新派生值**的基础上原地修改覆盖值。与 [`Signal::update`] 一致
+    /// 不做相等剪枝:不 clone 拿不到旧值副本,无从比较
+    pub fn update(&self, f: impl FnOnce(&mut T)) {
+        RT.with(|rtc| {
+            assert_writable(rtc);
+            // 同 set:先算出最新值再就地修改(否则可能在陈旧值上改)
+            update_if_necessary(rtc, self.id);
+            let mut boxed = {
+                let mut rt = rtc.borrow_mut();
+                let node = rt
+                    .nodes
+                    .get_mut(self.id)
+                    .expect("sv-reactive: derived 已随作用域销毁,不能再写入");
+                node.value
+                    .take()
+                    .expect("sv-reactive: 检测到对同一个 derived 的重入访问")
+            };
+            f(boxed.downcast_mut::<T>().expect("sv-reactive: 内部错误——值类型不匹配"));
+            {
+                let mut rt = rtc.borrow_mut();
+                if let Some(node) = rt.nodes.get_mut(self.id) {
+                    node.value = Some(boxed);
+                    node.state = Dirtiness::Clean;
+                }
+            }
+            notify(rtc, self.id);
+        })
     }
 }
 
@@ -984,5 +1194,191 @@ mod tests {
         assert_eq!(c.get(), 20);
         a.set(4);
         assert_eq!(c.get(), 50);
+    }
+
+    // -- writable derived ---------------------------------------------------
+
+    #[test]
+    fn writable_derived_override_and_fallback() {
+        let a = state(1);
+        let d = derived(move || a.get() * 2);
+        let log: Rc<RefCell<Vec<i32>>> = Rc::default();
+        let l = log.clone();
+        effect(move || l.borrow_mut().push(d.get()));
+        assert_eq!(*log.borrow(), vec![2]);
+
+        d.set(100); // 乐观覆盖
+        assert_eq!(*log.borrow(), vec![2, 100], "下游应立即看到覆盖值");
+        assert_eq!(d.get_untracked(), 100);
+
+        a.set(5); // 任一依赖变化 → 重算盖回
+        assert_eq!(*log.borrow(), vec![2, 100, 10], "依赖变化后应回退为重算值");
+    }
+
+    #[test]
+    fn writable_derived_same_value_skips_downstream() {
+        let a = state(1);
+        let d = derived(move || a.get() * 2);
+        let runs = Rc::new(RefCell::new(0));
+        let r = runs.clone();
+        effect(move || {
+            d.get();
+            *r.borrow_mut() += 1;
+        });
+        assert_eq!(*runs.borrow(), 1);
+        d.set(2); // 与当前派生值相同
+        assert_eq!(*runs.borrow(), 1, "覆盖相同值不应惊动下游");
+        d.set(3);
+        assert_eq!(*runs.borrow(), 2);
+    }
+
+    #[test]
+    fn writable_derived_update_on_fresh_value() {
+        let a = state(1);
+        let d = derived(move || a.get() + 1);
+        // 从未读过也能 update:set/update 都会先算出最新值(顺带建立依赖边)
+        d.update(|v| *v *= 10);
+        assert_eq!(d.get(), 20);
+        a.set(5);
+        assert_eq!(d.get(), 6, "依赖变化后覆盖值应回退");
+    }
+
+    #[test]
+    #[should_panic(expected = "derived")]
+    fn write_derived_in_derived_panics() {
+        let a = state(1);
+        let d1 = derived(move || a.get());
+        let d2 = derived(move || {
+            d1.set(9); // derived 计算过程中写 derived 同样被拒
+            a.get()
+        });
+        d2.get();
+    }
+
+    // -- 两阶段 flush -------------------------------------------------------
+
+    #[test]
+    fn effect_pre_runs_before_normal_effects() {
+        let a = state(0);
+        let order: Rc<RefCell<Vec<&'static str>>> = Rc::default();
+        // 故意先注册普通 effect:验证靠的是相位而不是注册顺序
+        let o = order.clone();
+        effect(move || {
+            a.get();
+            o.borrow_mut().push("普通");
+        });
+        let o = order.clone();
+        let pre = effect_pre(move || {
+            a.get();
+            o.borrow_mut().push("pre");
+        });
+        order.borrow_mut().clear();
+        a.set(1);
+        assert_eq!(*order.borrow(), vec!["pre", "普通"], "同一轮 flush 里 pre 应先跑");
+        pre.dispose();
+        a.set(2);
+        assert_eq!(*order.borrow(), vec!["pre", "普通", "普通"]);
+    }
+
+    // -- is_tracking / unique_id / tick ------------------------------------
+
+    #[test]
+    fn is_tracking_reflects_observer() {
+        assert!(!is_tracking(), "作用域外不追踪");
+        let a = state(0);
+        let seen: Rc<RefCell<Vec<bool>>> = Rc::default();
+        let s = seen.clone();
+        effect(move || {
+            a.get();
+            s.borrow_mut().push(is_tracking());
+            s.borrow_mut().push(untrack(is_tracking));
+        });
+        assert_eq!(*seen.borrow(), vec![true, false], "effect 内 true、untrack 内 false");
+        // derived 计算过程中同样处于追踪上下文
+        let d = derived(is_tracking);
+        assert!(d.get());
+    }
+
+    #[test]
+    fn unique_id_is_incrementing() {
+        let a = unique_id();
+        let b = unique_id();
+        assert!(a.starts_with("sv-") && b.starts_with("sv-"));
+        let na: u64 = a["sv-".len()..].parse().unwrap();
+        let nb: u64 = b["sv-".len()..].parse().unwrap();
+        assert_eq!(nb, na + 1, "同线程内应自增,保证互不相同");
+    }
+
+    #[test]
+    fn tick_is_noop_in_batch_and_flushes_after() {
+        let a = state(0);
+        let runs = Rc::new(RefCell::new(0));
+        let r = runs.clone();
+        effect(move || {
+            a.get();
+            *r.borrow_mut() += 1;
+        });
+        assert_eq!(*runs.borrow(), 1);
+        let r = runs.clone();
+        batch(move || {
+            a.set(1);
+            tick(); // batch 内 no-op,不破坏批处理原子性
+            assert_eq!(*r.borrow(), 1, "batch 内 tick 不应提前触发 effect");
+        });
+        assert_eq!(*runs.borrow(), 2, "batch 结束照常 flush");
+        tick(); // 没有待决 effect 时调用无害
+        assert_eq!(*runs.borrow(), 2);
+    }
+
+    // -- context ------------------------------------------------------------
+
+    #[test]
+    fn context_provide_lookup_and_shadowing() {
+        struct Theme(&'static str);
+        struct Session;
+
+        // 作用域外取不到
+        assert!(use_context::<Theme>().is_none());
+
+        let (_, root) = create_root(|| {
+            provide_context(Theme("外层"));
+            assert_eq!(use_context::<Theme>().unwrap().0, "外层");
+            // 未提供过的类型返回 None
+            assert!(use_context::<Session>().is_none());
+
+            // 内层同类型就近覆盖,且不影响外层
+            let (got, inner) = create_root(|| {
+                provide_context(Theme("内层"));
+                provide_context(Session);
+                use_context::<Theme>().unwrap().0
+            });
+            assert_eq!(got, "内层", "同类型应就近覆盖");
+            // 挂在内层作用域的类型,外层沿链向上查不到(只向上、不向下)
+            assert!(use_context::<Session>().is_none());
+            inner.dispose();
+            assert_eq!(use_context::<Theme>().unwrap().0, "外层");
+        });
+        root.dispose();
+    }
+
+    #[test]
+    fn context_crosses_root_boundary() {
+        // keyed each 的行作用域 = effect 里再 create_root。节点记录的是
+        // **创建时**的 owner,所以查找要能穿过这个 root 边界
+        struct Theme(&'static str);
+        let seen: Rc<RefCell<Vec<&'static str>>> = Rc::default();
+        let s = seen.clone();
+        let (_, root) = create_root(move || {
+            provide_context(Theme("dark"));
+            effect(move || {
+                let s = s.clone();
+                let (_, _row) = create_root(move || {
+                    let got = use_context::<Theme>().map_or("取不到", |t| t.0);
+                    s.borrow_mut().push(got);
+                });
+            });
+        });
+        assert_eq!(*seen.borrow(), vec!["dark"], "create_root 内应取到外层 context");
+        root.dispose();
     }
 }
