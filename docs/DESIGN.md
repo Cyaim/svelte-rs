@@ -162,13 +162,13 @@ winit redraw 时机,鸿蒙接 OH_NativeVSync。目前原型是写入即同步 fl
    自写,lightningcss 作差分测试基准,C2 复评;MPL 依赖若引入需法务口径确认。
 
 **分阶段路线**(C1 3–5 人周;C2 +6–10 人周踩 M1 taffy;C3 可选):
-- **C1 语法真化**:标准属性名 + 简写展开(padding 四值)+ 单位(px/em/rem/%)+
-  全颜色格式 + 状态伪类(:hover/:active/:focus/:disabled)+ **默认继承子集**
-  (color/font-*/line-height)+ :root{--x} 编译期常量;超子集报错带 .sv 行列与
-  did-you-mean。**已落地的首期原型**:标准属性名别名(background-color/color/
-  border-radius/flex-direction)、px 单位(其它单位引导报错)、rgb()/rgba()/颜色名、
-  `.类:hover`(编译期自动生成悬停状态 + 指针事件接线 + 与用户回调合成),
-  见 `css_compat_names_units_hover` 测试与 showcase。
+- **C1 语法真化 ✅ 已落地(2026-07-18)**:标准属性名、padding/margin 四值简写与
+  长手(Edges 盒模型)、border 实线、rem、hsl()/hwb()/现代颜色语法/#hex-alpha/
+  命名色 ~60、**继承管线**(color/font-size 哨兵 + 渲染期父链解析、currentColor)、
+  :root{--x}+var()、CSS 嵌套 &:pseudo、:hover/:active 双状态接线、元素类型规则、
+  cursor。em/%/:focus/:disabled 留 C2(动态基准/taffy/焦点链)。
+  证据:`css_c1_box_model_vars_nesting` 等测试 + showcase;逐项见
+  [CSS-SUPPORT.md](CSS-SUPPORT.md) "C1 已落地"节。
 - **C2 行为完备(= 迁移无感线)**:margin/border/box-sizing(缺省 border-box)、
   flex/grid 属性面 taffy 直通、CSS 自定义属性 + var() 继承做主题(撤销 09 的
   @theme 自造语法)、transition 属性(与 transition:fade 指令双轨正交:属性变化 vs
