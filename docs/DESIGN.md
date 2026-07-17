@@ -138,6 +138,46 @@ winit redraw 时机,鸿蒙接 OH_NativeVSync。目前原型是写入即同步 fl
 现状是整块重建(`sv_ui::each_block`)。目标形态:每项持有 `Signal<Item>`,内容变化走
 原地 set,reconcile 只处理 key 的增删移;seen-set 启发式 vs LIS 待场景树搬移成本基准后定。
 
+### ADR-8(2026-07-17)CSS 无缝支持策略:真语法封闭子集 + 编译期样式表,永不引入运行时选择器引擎
+> 问题:Svelte 开发者在浏览器写真 CSS(级联/继承/选择器/伪类/单位),桌面端如何
+> 最小化心智迁移?依据调研 11(业界五档光谱 + Rust 基建)与 12(语义逐项映射)。
+
+**核心判断**:
+1. 业界口碑分界线在**"真 CSS 语法 + 选择器 + 状态伪类 + 变量 + 动画"**(Lynx 档),
+   不在完备性;RN 的"属性名对象"档留下大量迁移吐槽,Flutter 的零 CSS 是心智断崖。
+   Svelte 的 scoped-by-default 又把实际需求压缩到:扁平类规则、状态伪类、盒模型、
+   变量、@media、继承子集、transition、简写展开——**八条**。
+2. **继承是最重要的隐形单项**(color/font-* 沿树继承是 CSS 直觉的地基,开发者
+   意识不到自己在依赖它):实现为 layout 前一次 O(n) 自顶向下 resolve 遍历
+   (InheritedContext 顺路下传,产出 ComputedStyle),**不进响应式图**,失效靠既有
+   doc 版本号——不造浏览器式失效引擎。
+3. **不做 specificity 计数与 !important**:组件内规则用"声明序 + 通道优先级"
+   (类 < 内联 style < 条件类 < 伪类 < style: 指令)——与 CSS 同 specificity 时的
+   声明序规则一致;Svelte 自己也用 `:where` 压平 specificity,佐证该心智可接受。
+4. **选择器匹配全部编译期做掉**(模板树编译期已知):后代/结构伪类编译成布尔条件
+   patch,保持"类=编译期样式表索引、零运行时选择器"的架构差异化;stylo 全引擎
+   (Blitz 路线)与此相斥,仅列 C3 可选项(触发条件:未来要渲染任意 HTML)。
+5. 解析器:两份调研分歧点——11 号推荐换 lightningcss(规范级解析,MPL-2.0),
+   12 号推荐**继续自写**(封闭属性集错误定位统一、零许可证复杂度)。裁决:C1 期
+   自写,lightningcss 作差分测试基准,C2 复评;MPL 依赖若引入需法务口径确认。
+
+**分阶段路线**(C1 3–5 人周;C2 +6–10 人周踩 M1 taffy;C3 可选):
+- **C1 语法真化**:标准属性名 + 简写展开(padding 四值)+ 单位(px/em/rem/%)+
+  全颜色格式 + 状态伪类(:hover/:active/:focus/:disabled)+ **默认继承子集**
+  (color/font-*/line-height)+ :root{--x} 编译期常量;超子集报错带 .sv 行列与
+  did-you-mean。**已落地的首期原型**:标准属性名别名(background-color/color/
+  border-radius/flex-direction)、px 单位(其它单位引导报错)、rgb()/rgba()/颜色名、
+  `.类:hover`(编译期自动生成悬停状态 + 指针事件接线 + 与用户回调合成),
+  见 `css_compat_names_units_hover` 测试与 showcase。
+- **C2 行为完备(= 迁移无感线)**:margin/border/box-sizing(缺省 border-box)、
+  flex/grid 属性面 taffy 直通、CSS 自定义属性 + var() 继承做主题(撤销 09 的
+  @theme 自造语法)、transition 属性(与 transition:fade 指令双轨正交:属性变化 vs
+  进出场)、@media(窗口尺寸 + prefers-color-scheme)、组件内后代组合子(编译期
+  静态匹配)。
+- **永不支持清单**(文档化 + 替代写法):伪元素、:global、:nth-child 结构伪类
+  (P2 复评)、!important、inherit 关键字、@layer/@supports——业界共识裁剪与
+  Svelte 低频使用面双重印证。
+
 ## 4. 原型现状(本仓库,全部测试绿)
 
 | crate | 内容 | 测试 |
@@ -191,3 +231,7 @@ winit redraw 时机,鸿蒙接 OH_NativeVSync。目前原型是写入即同步 fl
 - [08 runes 源变换语义与健全性(变换规则 + 拒绝清单)](research/08-sv-runes-transform.md)
 - [09 .sv 格式设计 + 热重载架构(数据面/代码面)](research/09-sv-sfc-format-hotreload.md)
 - [10 双路线动手实证对比(本仓库原型)](research/10-route-comparison-hands-on.md)
+
+第三轮(CSS 无缝支持专题,2026-07-17):
+- [11 业界桌面/跨端框架 CSS 策略光谱 + Rust 基建](research/11-css-industry-strategies.md)
+- [12 CSS 语义逐项映射设计(继承/伪类/盒模型/@media/心智兼容表)](research/12-css-semantics-mapping.md)
