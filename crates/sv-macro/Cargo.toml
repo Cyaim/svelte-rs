@@ -1,0 +1,18 @@
+[package]
+name = "sv-macro"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "view! 过程宏:把 Svelte 风味模板编译成 sv-ui 细粒度绑定调用"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2", features = ["full", "extra-traits"] }
+quote = "1"
+proc-macro2 = "1"
+
+[dev-dependencies]
+sv-reactive = { workspace = true }
+sv-ui = { workspace = true }
