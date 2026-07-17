@@ -76,14 +76,33 @@ $inspect(count);
 </view>
 
 <style>
-/* CSS 兼容层演示:标准属性名、px 单位、rgb()/颜色名、:hover 伪类 */
+/* C1 演示::root 变量、rem、简写、嵌套伪类、border、margin、cursor、继承 */
+:root { --accent: rgb(255, 62, 0); --accent-alt: #3c78ff; --btn-pad: 8px 14px; }
+
+view { color: #223344; } /* 元素规则:组件内文本色统一打底(color 沿树继承) */
+
 .page { padding: 24px; gap: 12px; }
-.h1 { font-size: 28px; }
+.h1 { font-size: 1.75rem; }
 .row { flex-direction: row; gap: 8px; }
-.muted { color: #666677; }
-.tiny { font-size: 12px; color: #9999aa; }
-.btn { padding: 8px; border-radius: 6px; background-color: rgb(255, 62, 0); color: white; }
-.btn:hover { background-color: orange; }
-.btn-alt { padding: 8px; border-radius: 6px; background-color: #3c78ff; color: white; }
-.btn-alt:hover { opacity: 0.8; }
+.muted { color: #667; }
+.tiny { font-size: 12px; color: #99a; }
+.btn {
+  padding: var(--btn-pad);
+  border-radius: 6px;
+  background-color: var(--accent);
+  color: white;
+  cursor: pointer;
+  &:hover { background-color: orange; }
+  &:active { opacity: 0.7; }
+}
+.btn-alt {
+  padding: var(--btn-pad);
+  margin: 0px 0px 0px 4px;
+  border: 2px solid navy;
+  border-radius: 6px;
+  background-color: var(--accent-alt);
+  color: white;
+  cursor: pointer;
+  &:hover { opacity: 0.85; }
+}
 </style>

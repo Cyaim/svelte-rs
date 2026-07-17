@@ -17,7 +17,7 @@ use syn::parse::Parser as _;
 
 use crate::script::{self, ScriptOutput, collect_pat_idents};
 use crate::template::{Arm, Attr, AttrValue, ExprSrc, Node, Segment, Tag};
-use crate::style::ClassStyle;
+use crate::style::StyleSheet;
 use crate::{CompileError, PropsRegistry, style};
 
 /// 模板一处作用域
@@ -39,7 +39,7 @@ pub fn generate(
     script: &ScriptOutput,
     nodes: &[Node],
     registry: &PropsRegistry,
-    classes: &HashMap<String, ClassStyle>,
+    sheet: &StyleSheet,
 ) -> Result<String, CompileError> {
     let mut root_scope = Scope::default();
     root_scope.plain.extend(script.plain_vars.iter().cloned());
@@ -87,7 +87,7 @@ pub fn generate(
         None => (TokenStream::new(), TokenStream::new(), TokenStream::new()),
     };
 
-    let mut cg = Cg { source, script, registry, classes, n: 0 };
+    let mut cg = Cg { source, script, registry, sheet, n: 0 };
     let body = cg.emit_nodes(nodes, &root_scope)?;
     let script_stmts = &script.stmts;
     let fn_ident = format_ident!("{fn_name}");
@@ -162,8 +162,8 @@ struct Cg<'a> {
     source: &'a str,
     script: &'a ScriptOutput,
     registry: &'a PropsRegistry,
-    /// `<style>` 块编译出的类(基础 + :hover 变体)
-    classes: &'a HashMap<String, ClassStyle>,
+    /// `<style>` 块编译产物(类 + 元素规则,含伪类变体)
+    sheet: &'a StyleSheet,
     n: usize,
 }
 
@@ -458,14 +458,32 @@ impl Cg<'_> {
 
         // ---- 静态样式源(优先级:class 类 < style=""/简写,后写覆盖) ----
         let mut style_setters = TokenStream::new();
-        // :hover 变体收集(CSS 伪类 → 内部 hover 状态 + 指针事件接线)
+        // 伪类变体收集(→ 内部状态 + 指针事件接线)
         let mut hover_static: Vec<TokenStream> = Vec::new();
         let mut hover_conds: Vec<(TokenStream, TokenStream)> = Vec::new();
+        let mut active_static: Vec<TokenStream> = Vec::new();
+        // 元素类型规则打底(specificity 直觉:元素 < 类)
+        let tag_name = match tag {
+            Tag::View => "view",
+            Tag::Text => "text",
+            Tag::Button => "button",
+            Tag::Checkbox => "checkbox",
+            Tag::Component(_) => unreachable!(),
+        };
+        if let Some(entry) = self.sheet.elements.get(tag_name) {
+            style_setters.extend(entry.base.clone());
+            if let Some(h) = &entry.hover {
+                hover_static.push(h.clone());
+            }
+            if let Some(a) = &entry.active {
+                active_static.push(a.clone());
+            }
+        }
         for attr in attrs.iter().filter(|a| a.name == "class") {
             match &attr.value {
                 AttrValue::Str { value, offset } => {
                     for cls in value.split_whitespace() {
-                        let entry = self.classes.get(cls).ok_or_else(|| {
+                        let entry = self.sheet.classes.get(cls).ok_or_else(|| {
                             CompileError::at_offset(
                                 self.source,
                                 *offset,
@@ -475,6 +493,9 @@ impl Cg<'_> {
                         style_setters.extend(entry.base.clone());
                         if let Some(h) = &entry.hover {
                             hover_static.push(h.clone());
+                        }
+                        if let Some(a) = &entry.active {
+                            active_static.push(a.clone());
                         }
                     }
                 }
@@ -536,7 +557,7 @@ impl Cg<'_> {
         let mut style_directives: Vec<TokenStream> = Vec::new();
         for attr in attrs {
             if let Some(cls) = attr.name.strip_prefix("class:") {
-                let entry = self.classes.get(cls).cloned().ok_or_else(|| {
+                let entry = self.sheet.classes.get(cls).cloned().ok_or_else(|| {
                     CompileError::at_offset(
                         self.source,
                         attr.offset,
@@ -588,10 +609,12 @@ impl Cg<'_> {
         }
 
         let has_hover = !hover_static.is_empty() || !hover_conds.is_empty();
+        let has_active = !active_static.is_empty();
+        let has_state = has_hover || has_active;
         // 用户自己的指针回调(有 :hover 时与内部状态接线合成,避免互相覆盖)
         let user_enter = attrs.iter().find(|a| a.name == "onpointerenter");
         let user_leave = attrs.iter().find(|a| a.name == "onpointerleave");
-        if class_conds.is_empty() && !has_hover {
+        if class_conds.is_empty() && !has_state {
             if !style_setters.is_empty() {
                 // 静态样式:创建时设置一次,零 effect
                 ts.extend(quote! { __doc.update_style(#el, |s| { #style_setters }); });
@@ -608,6 +631,12 @@ impl Cg<'_> {
             let hover_arms = hover_conds.iter().map(|(c, h)| quote! { if #c && __hv.get() { #h } });
             let hover_block = if has_hover {
                 quote! { if __hv.get() { #(#hover_static)* } #(#hover_arms)* }
+            } else {
+                TokenStream::new()
+            };
+            // :active 排在 :hover 后(CSS 惯例:LVHA 声明序,按压态最终生效)
+            let active_block = if has_active {
+                quote! { if __ac.get() { #(#active_static)* } }
             } else {
                 TokenStream::new()
             };
@@ -654,16 +683,32 @@ impl Cg<'_> {
             } else {
                 TokenStream::new()
             };
+            let ac_decl = if has_active {
+                quote! { let __ac = ::sv_reactive::state(false); }
+            } else {
+                TokenStream::new()
+            };
+            let ac_wiring = if has_active {
+                quote! {
+                    __doc.set_on_pointer_down(#el, move || __ac.set(true));
+                    __doc.set_on_pointer_up(#el, move || __ac.set(false));
+                }
+            } else {
+                TokenStream::new()
+            };
             ts.extend(quote! {
                 {
                     #hv_decl
+                    #ac_decl
                     ::sv_ui::bind_style(&__doc, #el, move |s| {
                         #style_setters
                         #(#arms)*
                         #hover_block
+                        #active_block
                         #(#style_directives)*
                     });
                     #wiring
+                    #ac_wiring
                 }
             });
         }
@@ -1179,7 +1224,8 @@ struct EachParts<'a> {
 /// `style:字段` → Style 字段赋值(值是任意 Rust 表达式,类型由字段决定)
 fn style_directive_setter(key: &str, expr: &syn::Expr) -> Option<TokenStream> {
     Some(match key {
-        "padding" => quote! { s.padding = #expr; },
+        "padding" => quote! { s.padding = ::sv_ui::Edges::all(#expr); },
+        "margin" => quote! { s.margin = ::sv_ui::Edges::all(#expr); },
         "gap" => quote! { s.gap = #expr; },
         "font-size" | "font_size" => quote! { s.font_size = #expr; },
         "radius" | "corner-radius" => quote! { s.corner_radius = #expr; },

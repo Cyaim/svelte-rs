@@ -239,14 +239,14 @@ fn reactive_style() {
     let doc = Doc::new();
     let count = state(0);
     view! { &doc, doc.root() =>
-        <view style(move |s| { s.padding = count.get() as f32; })>
+        <view style(move |s| { s.padding = (count.get() as f32).into(); })>
             <text>"styled"</text>
         </view>
     };
     let vid = doc.read(|inner| inner.nodes[inner.root].children[0]);
-    assert_eq!(doc.read(|inner| inner.nodes[vid].style.padding), 0.0);
+    assert_eq!(doc.read(|inner| inner.nodes[vid].style.padding.left), 0.0);
     count.set(4);
-    assert_eq!(doc.read(|inner| inner.nodes[vid].style.padding), 4.0, "样式应随 signal 更新");
+    assert_eq!(doc.read(|inner| inner.nodes[vid].style.padding.left), 4.0, "样式应随 signal 更新");
 }
 
 #[test]
@@ -255,7 +255,7 @@ fn style_in_each_row_captures_row_scope() {
     let unit = state(1.0f32);
     view! { &doc, doc.root() =>
         for _n, i in vec![0, 0] {
-            <view style(move |s| { s.padding = unit.get() * (i as f32 + 1.0); }) />
+            <view style(move |s| { s.padding = (unit.get() * (i as f32 + 1.0)).into(); }) />
         }
     };
     // root -> each 容器 -> 两个行 view
@@ -265,7 +265,7 @@ fn style_in_each_row_captures_row_scope() {
     });
     assert_eq!(rows.len(), 2);
     let pads = |doc: &Doc| {
-        doc.read(|inner| rows.iter().map(|id| inner.nodes[*id].style.padding).collect::<Vec<_>>())
+        doc.read(|inner| rows.iter().map(|id| inner.nodes[*id].style.padding.left).collect::<Vec<_>>())
     };
     assert_eq!(pads(&doc), vec![1.0, 2.0], "style 闭包应捕获行索引");
     unit.set(2.0);

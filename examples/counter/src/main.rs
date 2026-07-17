@@ -11,12 +11,12 @@ fn build(doc: &Doc, root: ViewId) {
     let count = state(0i32);
 
     doc.update_style(root, |s| {
-        s.padding = 24.0;
+        s.padding = 24.0.into();
         s.gap = 12.0;
     });
 
     let btn = |s: &mut Style| {
-        s.padding = 10.0;
+        s.padding = 10.0.into();
         s.corner_radius = 8.0;
         s.bg = Some(Color::rgb(255, 62, 0));
         s.fg = Some(Color::WHITE);

@@ -120,12 +120,12 @@ pub fn compile_sv_with(
         Some(block) => script::transform(source, block)?,
         None => script::ScriptOutput::empty(),
     };
-    let classes = match &sfc.style {
+    let sheet = match &sfc.style {
         Some(span) => style::parse_style_block(source, span.text(source), span.start)?,
-        None => std::collections::HashMap::new(),
+        None => style::StyleSheet::default(),
     };
     let nodes = template::parse(source, &sfc.template)?;
-    codegen::generate(source, fn_name, &script, &nodes, registry, &classes)
+    codegen::generate(source, fn_name, &script, &nodes, registry, &sheet)
 }
 
 /// 编译单个 .sv 文件,组件函数名取自文件名(snake_case 化)
@@ -395,7 +395,7 @@ let size = $state(10.0f32);
 "#;
         let code = compile_sv(src, "c").expect("应编译成功");
         assert!(code.contains("bind_style_patch"), "style: 指令应编译成 patch 绑定:\n{code}");
-        assert!(code.contains("s.padding = size.get() * 2.0"), "读应改写:\n{code}");
+        assert!(code.contains("Edges::all(size.get() * 2.0)"), "读应改写:\n{code}");
         assert!(code.contains("s.gap = 3f32"), "静态 style 属性应共存:\n{code}");
         syn::parse_file(&code).unwrap();
     }
@@ -679,8 +679,8 @@ let items = $state(vec![(1i32, String::from("甲"))]);
         assert!(code.contains("s.corner_radius = 6f32"), "\n{code}");
         // style="" 在类之后:padding 应被 99 覆盖(后写胜出)
         let btn_zone = code.split("create_button").nth(1).unwrap();
-        let p8 = btn_zone.find("s.padding = 8f32").expect("类的 padding");
-        let p99 = btn_zone.find("s.padding = 99f32").expect("style 的 padding");
+        let p8 = btn_zone.find("top: 8f32").expect("类的 padding");
+        let p99 = btn_zone.find("top: 99f32").expect("style 的 padding");
         assert!(p8 < p99, "内联 style 应覆盖类:\n{code}");
         syn::parse_file(&code).unwrap();
 
@@ -785,7 +785,7 @@ let big = $state(true);
         assert!(code.contains("::sv_ui::bind_style"), "有条件类应整体重算:\n{code}");
         assert!(code.contains("if muted.get()"), "简写条件即同名变量:\n{code}");
         assert!(code.contains("if big.get()"), "\n{code}");
-        assert!(code.contains("s.padding = 4.0f32"), "style: 指令应并入同一闭包:\n{code}");
+        assert!(code.contains("Edges::all(4.0f32)"), "style: 指令应并入同一闭包:\n{code}");
         assert!(!code.contains("bind_style_patch"), "并入后不应再有独立 patch:\n{code}");
         syn::parse_file(&code).unwrap();
     }
@@ -921,6 +921,58 @@ let optimistic = || d = 99;
             "snippet 名作 prop 应自动包 Rc:\n{code}"
         );
         syn::parse_file(&code).unwrap();
+    }
+
+    #[test]
+    fn css_c1_box_model_vars_nesting() {
+        let src = r##"<view>
+  <button class="btn">按钮</button>
+  <text>正文继承字号</text>
+</view>
+
+<style>
+:root { --accent: hsl(16, 100%, 50%); --pad: 8px 16px; }
+text { font-size: 1.25rem; color: #334; }
+.btn {
+  padding: var(--pad);
+  margin: 4px 8px 12px 16px;
+  border: 2px solid var(--accent, red);
+  cursor: pointer;
+  &:hover { opacity: 0.9; }
+  &:active { background-color: hwb(16 10% 10%); }
+}
+</style>
+"##;
+        let code = compile_sv(src, "c").expect("C1 语法应编译成功");
+        // padding 简写 via var():8px 16px → 上下 8 左右 16
+        assert!(
+            code.contains("top: 8f32") && code.contains("right: 16f32"),
+            "var() + 四值简写:\n{code}"
+        );
+        // margin 四值
+        assert!(code.contains("bottom: 12f32") && code.contains("left: 16f32"), "margin 四值:\n{code}");
+        // border + hsl 折叠(hsl(16,100%,50%) ≈ rgb(255,68,0))
+        assert!(code.contains("::sv_ui::Border"), "border 简写:\n{code}");
+        assert!(code.contains("Color::rgba(255u8, 68u8, 0u8, 255u8)"), "hsl 编译期折叠:\n{code}");
+        // cursor
+        assert!(code.contains("Cursor::Pointer"), "cursor:\n{code}");
+        // 嵌套伪类:hover + active 双状态接线
+        assert!(code.contains("__hv") && code.contains("__ac"), "嵌套 &:hover/&:active:\n{code}");
+        assert!(
+            code.contains("set_on_pointer_down") && code.contains("set_on_pointer_up"),
+            ":active 应接按压事件:\n{code}"
+        );
+        // 元素类型规则:rem 折叠(1.25rem=20)+ text 元素打底
+        assert!(code.contains("s.font_size = 20f32"), "rem × 16:\n{code}");
+        syn::parse_file(&code).unwrap();
+
+        // 未定义变量报错
+        let err = compile_sv(
+            "<view><text style=\"color: var(--nope)\">x</text></view>",
+            "c",
+        )
+        .unwrap_err();
+        assert!(err.message.contains("--nope"), "{err}");
     }
 
     #[test]
