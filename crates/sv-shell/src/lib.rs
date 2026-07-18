@@ -1,6 +1,6 @@
 //! # sv-shell
 //!
-//! 桌面渲染壳(原型):winit 窗口 + 纯 CPU 自绘(softbuffer + tiny-skia + fontdue)。
+//! 桌面渲染壳(原型):winit 窗口 + 纯 CPU 自绘(softbuffer + tiny-skia + swash)。
 //!
 //! 定位:先用最稳的 CPU 栈跑通「signal → 场景树 → 像素」闭环;
 //! 后续按调研结论迁移到 wgpu/vello + parley,并把窗口层抽成窄 trait
@@ -15,7 +15,7 @@ mod render;
 #[cfg(feature = "backend-vello")]
 mod vello_backend;
 
-pub use paint::{GlyphPos, PaintCmd, Painter, PainterCaps, RecordingPainter, TinySkiaPainter};
+pub use paint::{GlyphKey, GlyphPos, PaintCmd, Painter, PainterCaps, RecordingPainter, TinySkiaPainter};
 pub use render::{Placed, Rect, hit_click_target, layout_tree, paint_tree, render_frame};
 #[cfg(feature = "backend-vello")]
 pub use vello_backend::{VelloPainter, VelloWin, render_frame_vello};
@@ -103,6 +103,12 @@ struct App {
     hovered: Option<ViewId>,
     pressed: Option<ViewId>,
     epoch: std::time::Instant,
+    /// 上一帧的 (版本, 宽, 高, scale位):静止帧跳过重绘制
+    last_frame_key: Option<(u64, u32, u32, u32)>,
+    /// SV_SHOW_FPS=1:连续重绘 + 每 60 帧打印帧率(基准/诊断用)
+    show_fps: bool,
+    fps_frames: u32,
+    fps_t0: std::time::Instant,
     proxy: winit::event_loop::EventLoopProxy<()>,
 }
 
@@ -118,6 +124,14 @@ impl App {
             return;
         }
         let scale = ws.window.scale_factor() as f32;
+        // 静止帧短路:版本/尺寸/缩放全没变 → 不重绘制(呈现内容仍在 surface 上)。
+        // 细粒度更新模型下"静止"是常态,这一步把静止功耗归零
+        let frame_key = (self.doc.version(), size.width, size.height, scale.to_bits());
+        let unchanged = self.last_frame_key == Some(frame_key);
+        if unchanged && !animating && !self.show_fps {
+            return;
+        }
+        self.last_frame_key = Some(frame_key);
         match &mut ws.presenter {
             Presenter::Cpu { surface, .. } => {
                 let (pixmap, placed) = render_frame(&self.doc, size.width, size.height, scale);
@@ -138,13 +152,25 @@ impl App {
             #[cfg(feature = "backend-vello")]
             Presenter::Vello(vw) => {
                 vw.resize(size.width, size.height);
-                let (placed, presented) = vw.render(&self.doc, scale);
+                // 静止帧(FPS 模式下仍在跑):跳过场景重编码,只重呈现
+                let (placed, presented) = vw.render_cached(&self.doc, scale, unchanged);
                 self.placed = placed;
                 if !presented {
                     // surface 过期/被遮挡等:下一帧重试(与 vello 官方示例一致)
                     ws.window.request_redraw();
                 }
             }
+        }
+        // 帧率计数(SV_SHOW_FPS=1):连续重绘,每 120 帧打印一次
+        if self.show_fps {
+            self.fps_frames += 1;
+            if self.fps_frames >= 30 {
+                let dt = self.fps_t0.elapsed().as_secs_f64();
+                println!("FPS {:.0}", self.fps_frames as f64 / dt);
+                self.fps_frames = 0;
+                self.fps_t0 = std::time::Instant::now();
+            }
+            ws.window.request_redraw();
         }
         if animating {
             ws.window.request_redraw();
@@ -327,6 +353,10 @@ pub fn run_app(
         hovered: None,
         pressed: None,
         epoch: std::time::Instant::now(),
+        last_frame_key: None,
+        show_fps: std::env::var("SV_SHOW_FPS").is_ok_and(|v| v == "1"),
+        fps_frames: 0,
+        fps_t0: std::time::Instant::now(),
         proxy,
     };
     event_loop.run_app(&mut app)?;

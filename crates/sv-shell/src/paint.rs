@@ -5,28 +5,49 @@
 //!   免费获得金样测试(零像素、零 GPU),未来可升级为帧间 diff 载体;
 //! - 词汇对齐 vello `Scene` 的动词(fill/stroke/glyph run/layer),M2 接
 //!   vello 时 1:1 映射;
-//! - **文本走定位好的 glyph run**:shaping 在上层(text 门面),光栅在
-//!   backend 内(CPU 端按字形 id 光栅,GPU 端走 atlas)——painter 不拿
-//!   字符串也不拿位图(Slint 软件渲染器与 GPU 灾难的双重教训);
+//! - **文本走定位好的 glyph run**:shaping 在上层(render 的 shape_text),
+//!   光栅在 backend 内(CPU 端按 [`GlyphKey`] 走 swash 光栅,GPU 端走
+//!   draw_glyphs)——painter 不拿字符串也不拿位图(Slint 软件渲染器与
+//!   GPU 灾难的双重教训);
 //! - `dyn` 只存在于 sv-shell 边界内,严禁类型参数上浮到 sv-ui/编译器产物
 //!   (tachys 泛型爆炸的教训;这里每帧低千级动态调用 ≈ 个位数 µs)。
 //!
 //! 坐标:物理像素(调用方已乘 scale)。
 
-use fontdue::Font;
-use fontdue::layout::GlyphRasterConfig;
 use sv_ui::Color;
 use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, PremultipliedColorU8, Stroke, Transform};
 
+/// 字形光栅键:字形 id + 字号(f32 以位模式存储,保 Hash/Eq)。
+/// 单字体前提下这两项唯一决定一张覆盖度位图(HiDPI 已把 scale 乘进 px)
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct GlyphKey {
+    /// 字形 id(swash charmap 映射;TTC 内 collection index 0 的字体)
+    pub id: u16,
+    /// 字号的 f32 位模式(`f32::to_bits`)
+    pub px_bits: u32,
+}
+
+impl GlyphKey {
+    pub fn new(id: u16, px: f32) -> Self {
+        Self { id, px_bits: px.to_bits() }
+    }
+
+    /// 字号(vello 端 `font_size` / CPU 端 scaler size 用)
+    pub fn px(&self) -> f32 {
+        f32::from_bits(self.px_bits)
+    }
+}
+
 /// 一枚已定位字形(物理坐标)。
-/// CPU 路径用 (key, x, y):位图左上角 + 光栅配置;
-/// GPU 路径用 (id, ox, oy):字形 id + **基线原点**(vello draw_glyphs 语义)
+/// CPU 路径用 (key, x, y):光栅键 + **基线原点**(位图左上角由光栅返回的
+/// Placement 换算:bitmap_x = x + left,bitmap_y = y - top);
+/// GPU 路径用 (id, ox, oy):字形 id + 基线原点(vello draw_glyphs 语义)
 #[derive(Clone, Copy, Debug)]
 pub struct GlyphPos {
-    pub key: GlyphRasterConfig,
-    /// 位图左上角 x(CPU 光栅路径)
+    pub key: GlyphKey,
+    /// 基线原点 x(CPU 光栅路径)
     pub x: f32,
-    /// 位图左上角 y(CPU 光栅路径)
+    /// 基线原点 y(CPU 光栅路径)
     pub y: f32,
     /// 字形 id(GPU 路径)
     pub id: u16,
@@ -34,6 +55,13 @@ pub struct GlyphPos {
     pub ox: f32,
     /// 基线原点 y(GPU 路径)
     pub oy: f32,
+}
+
+impl GlyphPos {
+    /// 字号(一段 run 内一致)
+    pub fn px(&self) -> f32 {
+        self.key.px()
+    }
 }
 
 /// 后端能力协商(调研 15:为 3D 复合预留通道,避免 M2 设计堵路)
@@ -62,8 +90,9 @@ pub trait Painter {
         width: f32,
         color: Color,
     );
-    /// 一段已定位字形(shaping 已完成;backend 只负责光栅/上屏)
-    fn glyph_run(&mut self, font: &Font, glyphs: &[GlyphPos], color: Color);
+    /// 一段已定位字形(shaping 已完成;backend 只负责光栅/上屏。
+    /// 字体是全局单字体 UI 字体——`font::ui_font()` / vello FontData 各自持有)
+    fn glyph_run(&mut self, glyphs: &[GlyphPos], color: Color);
 }
 
 // ---------------------------------------------------------------------------
@@ -107,7 +136,7 @@ impl Painter for RecordingPainter {
         });
     }
 
-    fn glyph_run(&mut self, _font: &Font, glyphs: &[GlyphPos], color: Color) {
+    fn glyph_run(&mut self, glyphs: &[GlyphPos], color: Color) {
         self.cmds.push(PaintCmd::Glyphs { count: glyphs.len(), color });
     }
 }
@@ -120,39 +149,64 @@ pub struct TinySkiaPainter<'a> {
     pub pixmap: &'a mut Pixmap,
 }
 
-/// 字形覆盖度 LRU(线程级):同一字形同字号只光栅一次。
+/// 字形覆盖度缓存(线程级):同一字形同字号只光栅一次。
+/// swash ScaleContext 线程级复用(其内部按 CacheKey 缓存字体状态)。
 /// 上限按条目数粗控(每条 ≈ 字号² 字节;2048 条 @16px ≈ 1.3MB)
 mod glyph_cache {
     use std::cell::RefCell;
     use std::collections::HashMap;
 
-    use fontdue::Metrics;
-    use fontdue::layout::GlyphRasterConfig;
+    use swash::scale::{Render, ScaleContext, Source};
+    use swash::zeno::{Format, Placement};
+
+    use super::GlyphKey;
 
     const CAP: usize = 2048;
 
     thread_local! {
-        static CACHE: RefCell<HashMap<GlyphRasterConfig, (Metrics, Vec<u8>)>> =
+        static CTX: RefCell<ScaleContext> = RefCell::new(ScaleContext::new());
+        static HOT: RefCell<HashMap<GlyphKey, (Placement, Vec<u8>)>> =
+            RefCell::new(HashMap::new());
+        static COLD: RefCell<HashMap<GlyphKey, (Placement, Vec<u8>)>> =
             RefCell::new(HashMap::new());
     }
 
-    pub fn with<R>(
-        font: &fontdue::Font,
-        key: GlyphRasterConfig,
-        f: impl FnOnce(&Metrics, &[u8]) -> R,
-    ) -> R {
-        CACHE.with(|c| {
-            let mut cache = c.borrow_mut();
-            if !cache.contains_key(&key) {
-                // 简化淘汰:超限整体清空(避免逐条 LRU 记账;
-                // 稳态 UI 的工作集远小于上限,清空是罕见事件)
-                if cache.len() >= CAP {
-                    cache.clear();
+    fn rasterize(key: GlyphKey) -> (Placement, Vec<u8>) {
+        CTX.with(|ctx| {
+            let mut ctx = ctx.borrow_mut();
+            let mut scaler = ctx
+                .builder(crate::font::ui_font())
+                .size(key.px())
+                .hint(false)
+                .build();
+            // Outline → alpha 覆盖度位图;Placement 的 top 是基线上方距离
+            Render::new(&[Source::Outline])
+                .format(Format::Alpha)
+                .render(&mut scaler, key.id)
+                .map(|img| (img.placement, img.data))
+                .unwrap_or((Placement { left: 0, top: 0, width: 0, height: 0 }, Vec::new()))
+        })
+    }
+
+    pub fn with<R>(key: GlyphKey, f: impl FnOnce(&Placement, &[u8]) -> R) -> R {
+        HOT.with(|h| {
+            let mut hot = h.borrow_mut();
+            if !hot.contains_key(&key) {
+                let entry = COLD
+                    .with(|c| c.borrow_mut().remove(&key))
+                    .unwrap_or_else(|| rasterize(key));
+                // 分代淘汰:热代满则整代降为冷代(旧冷代随之丢弃)。
+                // 活跃字形要么在热代、要么下次命中从冷代无成本晋升,
+                // 单帧最多重光栅"整代未用"的字形——不会像整体清空那样
+                // 把当前工作集也打掉(帧时长尖峰,伤 1% low)
+                if hot.len() >= CAP {
+                    let demoted = std::mem::take(&mut *hot);
+                    COLD.with(|c| *c.borrow_mut() = demoted);
                 }
-                cache.insert(key, font.rasterize_config(key));
+                hot.insert(key, entry);
             }
-            let (m, cov) = &cache[&key];
-            f(m, cov)
+            let (p, cov) = &hot[&key];
+            f(p, cov)
         })
     }
 }
@@ -227,26 +281,22 @@ impl Painter for TinySkiaPainter<'_> {
         }
     }
 
-    fn glyph_run(&mut self, font: &Font, glyphs: &[GlyphPos], color: Color) {
+    fn glyph_run(&mut self, glyphs: &[GlyphPos], color: Color) {
         let (pw, ph) = (self.pixmap.width(), self.pixmap.height());
         let data = self.pixmap.pixels_mut();
         for g in glyphs {
-            glyph_cache::with(font, g.key, |metrics, coverage| {
-                for yy in 0..metrics.height {
-                    for xx in 0..metrics.width {
-                        let cov = coverage[yy * metrics.width + xx];
+            glyph_cache::with(g.key, |placement, coverage| {
+                // 基线原点 → 位图左上角(top 是基线到位图顶的距离,向上为正)
+                let x0 = g.x.round() as i32 + placement.left;
+                let y0 = g.y.round() as i32 - placement.top;
+                let (w, h) = (placement.width as usize, placement.height as usize);
+                for yy in 0..h {
+                    for xx in 0..w {
+                        let cov = coverage[yy * w + xx];
                         if cov == 0 {
                             continue;
                         }
-                        blend_pixel(
-                            data,
-                            pw,
-                            ph,
-                            g.x.round() as i32 + xx as i32,
-                            g.y.round() as i32 + yy as i32,
-                            color,
-                            cov,
-                        );
+                        blend_pixel(data, pw, ph, x0 + xx as i32, y0 + yy as i32, color, cov);
                     }
                 }
             });
