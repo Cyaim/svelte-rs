@@ -12,12 +12,16 @@
 mod font;
 mod paint;
 mod render;
+#[cfg(feature = "backend-vello")]
+mod vello_backend;
 
-pub use paint::{GlyphPos, PaintCmd, Painter, RecordingPainter, TinySkiaPainter};
+pub use paint::{GlyphPos, PaintCmd, Painter, PainterCaps, RecordingPainter, TinySkiaPainter};
 pub use render::{Placed, Rect, hit_click_target, layout_tree, paint_tree, render_frame};
+#[cfg(feature = "backend-vello")]
+pub use vello_backend::{VelloPainter, VelloWin, render_frame_vello};
 
 use std::num::NonZeroU32;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -28,10 +32,63 @@ use winit::window::{Window, WindowId};
 use sv_reactive::{RootHandle, create_root};
 use sv_ui::{Doc, ViewId};
 
+/// 渲染后端(ADR-3b:多后端;默认 CPU,vello 走 feature + 运行时探测)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Backend {
+    Cpu,
+    #[cfg(feature = "backend-vello")]
+    Vello,
+}
+
+/// 选择逻辑:SV_RENDERER=cpu|vello 显式覆盖 → feature 开启时探测 adapter
+/// (拿不到静默回退 Cpu)→ 默认 Cpu
+fn select_backend() -> Backend {
+    match std::env::var("SV_RENDERER").ok().as_deref() {
+        Some("cpu") => Backend::Cpu,
+        Some("vello") => vello_or_fallback(true),
+        _ => vello_or_fallback(false),
+    }
+}
+
+#[cfg(feature = "backend-vello")]
+fn vello_or_fallback(explicit: bool) -> Backend {
+    // 显式指定不预探测:开窗时建 surface 失败会再回退一次
+    if explicit || vello_backend::probe_adapter() {
+        Backend::Vello
+    } else {
+        eprintln!("sv-shell: 未探测到可用 GPU adapter,回退 CPU 渲染后端");
+        Backend::Cpu
+    }
+}
+
+#[cfg(not(feature = "backend-vello"))]
+fn vello_or_fallback(explicit: bool) -> Backend {
+    if explicit {
+        eprintln!("sv-shell: SV_RENDERER=vello 需要 backend-vello feature,回退 CPU 渲染后端");
+    }
+    Backend::Cpu
+}
+
+/// 窗口呈现器:CPU(softbuffer)或 GPU(vello/wgpu)
+enum Presenter {
+    Cpu {
+        surface: softbuffer::Surface<Arc<Window>, Arc<Window>>,
+        _context: softbuffer::Context<Arc<Window>>,
+    },
+    #[cfg(feature = "backend-vello")]
+    Vello(vello_backend::VelloWin),
+}
+
+fn cpu_presenter(window: &Arc<Window>) -> Presenter {
+    let context = softbuffer::Context::new(window.clone()).expect("sv-shell: 创建绘图上下文失败");
+    let surface =
+        softbuffer::Surface::new(&context, window.clone()).expect("sv-shell: 创建 surface 失败");
+    Presenter::Cpu { surface, _context: context }
+}
+
 struct WinState {
-    window: Rc<Window>,
-    surface: softbuffer::Surface<Rc<Window>, Rc<Window>>,
-    _context: softbuffer::Context<Rc<Window>>,
+    window: Arc<Window>,
+    presenter: Presenter,
 }
 
 struct App {
@@ -39,6 +96,7 @@ struct App {
     doc: Doc,
     build: Option<Box<dyn FnOnce(&Doc, ViewId)>>,
     _scope: Option<RootHandle>,
+    backend: Backend,
     win: Option<WinState>,
     placed: Vec<Placed>,
     cursor: (f64, f64),
@@ -60,19 +118,34 @@ impl App {
             return;
         }
         let scale = ws.window.scale_factor() as f32;
-        let (pixmap, placed) = render_frame(&self.doc, size.width, size.height, scale);
-        self.placed = placed;
+        match &mut ws.presenter {
+            Presenter::Cpu { surface, .. } => {
+                let (pixmap, placed) = render_frame(&self.doc, size.width, size.height, scale);
+                self.placed = placed;
 
-        let (Some(w), Some(h)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height)) else {
-            return;
-        };
-        ws.surface.resize(w, h).expect("sv-shell: surface resize 失败");
-        let mut buffer = ws.surface.buffer_mut().expect("sv-shell: 取帧缓冲失败");
-        for (dst, src) in buffer.iter_mut().zip(pixmap.pixels()) {
-            let c = src.demultiply();
-            *dst = ((c.red() as u32) << 16) | ((c.green() as u32) << 8) | (c.blue() as u32);
+                let (Some(w), Some(h)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
+                else {
+                    return;
+                };
+                surface.resize(w, h).expect("sv-shell: surface resize 失败");
+                let mut buffer = surface.buffer_mut().expect("sv-shell: 取帧缓冲失败");
+                for (dst, src) in buffer.iter_mut().zip(pixmap.pixels()) {
+                    let c = src.demultiply();
+                    *dst = ((c.red() as u32) << 16) | ((c.green() as u32) << 8) | (c.blue() as u32);
+                }
+                buffer.present().expect("sv-shell: present 失败");
+            }
+            #[cfg(feature = "backend-vello")]
+            Presenter::Vello(vw) => {
+                vw.resize(size.width, size.height);
+                let (placed, presented) = vw.render(&self.doc, scale);
+                self.placed = placed;
+                if !presented {
+                    // surface 过期/被遮挡等:下一帧重试(与 vello 官方示例一致)
+                    ws.window.request_redraw();
+                }
+            }
         }
-        buffer.present().expect("sv-shell: present 失败");
         if animating {
             ws.window.request_redraw();
         }
@@ -151,10 +224,22 @@ impl ApplicationHandler for App {
         let attrs = Window::default_attributes()
             .with_title(self.title.clone())
             .with_inner_size(LogicalSize::new(480.0, 400.0));
-        let window = Rc::new(event_loop.create_window(attrs).expect("sv-shell: 创建窗口失败"));
-        let context = softbuffer::Context::new(window.clone()).expect("sv-shell: 创建绘图上下文失败");
-        let surface =
-            softbuffer::Surface::new(&context, window.clone()).expect("sv-shell: 创建 surface 失败");
+        let window = Arc::new(event_loop.create_window(attrs).expect("sv-shell: 创建窗口失败"));
+        let presenter = match self.backend {
+            #[cfg(feature = "backend-vello")]
+            Backend::Vello => {
+                let size = window.inner_size();
+                match vello_backend::VelloWin::new(window.clone(), size.width, size.height) {
+                    Ok(vw) => Presenter::Vello(vw),
+                    Err(e) => {
+                        eprintln!("sv-shell: vello 初始化失败({e}),回退 CPU 渲染后端");
+                        self.backend = Backend::Cpu;
+                        cpu_presenter(&window)
+                    }
+                }
+            }
+            Backend::Cpu => cpu_presenter(&window),
+        };
 
         // 首次 resumed 时才构建 UI(此后 signal → 树 → 重绘的链路开始工作)
         if let Some(build) = self.build.take() {
@@ -169,7 +254,7 @@ impl ApplicationHandler for App {
             let _ = proxy.send_event(());
         });
 
-        self.win = Some(WinState { window, surface, _context: context });
+        self.win = Some(WinState { window, presenter });
     }
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: ()) {
@@ -235,6 +320,7 @@ pub fn run_app(
         doc: Doc::new(),
         build: Some(Box::new(build)),
         _scope: None,
+        backend: select_backend(),
         win: None,
         placed: Vec::new(),
         cursor: (0.0, 0.0),
@@ -359,6 +445,53 @@ mod tests {
         let mut rec2 = RecordingPainter::default();
         paint_tree(&doc, &placed, &mut rec2, 1.0);
         assert_eq!(rec.cmds, rec2.cmds, "命令流应确定性可重放");
+    }
+
+    /// GPU/CPU 离屏对拍:同一 Doc 各自出图,非白像素数应同数量级
+    /// (字体光栅路径不同,不做逐像素对比;无 GPU adapter 时跳过)
+    #[cfg(feature = "backend-vello")]
+    #[test]
+    fn vello_offscreen_parity() {
+        let doc = Doc::new();
+        let (_, _scope) = create_root(|| {
+            let card = doc.create_view();
+            doc.append(doc.root(), card);
+            doc.update_style(card, |s| {
+                s.bg = Some(sv_ui::Color::rgb(240, 240, 246));
+                s.corner_radius = 10.0;
+                s.border = Some(sv_ui::Border { width: 2.0, color: sv_ui::Color::rgb(0, 0, 128) });
+                s.padding = 12.0.into();
+            });
+            let t = doc.create_text("你好,vello!");
+            doc.append(card, t);
+        });
+
+        let (w, h, scale) = (240u32, 120u32, 1.0f32);
+        let Some(gpu) = render_frame_vello(&doc, w, h, scale) else {
+            println!("跳过 vello_offscreen_parity:无可用 GPU adapter(回退路径已由 CPU 测试覆盖)");
+            return;
+        };
+        assert_eq!(gpu.len(), (w * h * 4) as usize, "回读字节数应为 w*h*4");
+        let (pixmap, _) = render_frame(&doc, w, h, scale);
+
+        let non_white = |r: u8, g: u8, b: u8| r < 250 || g < 250 || b < 250;
+        let gpu_count = gpu.chunks_exact(4).filter(|p| non_white(p[0], p[1], p[2])).count();
+        let cpu_count = pixmap
+            .pixels()
+            .iter()
+            .filter(|p| {
+                let c = p.demultiply();
+                non_white(c.red(), c.green(), c.blue())
+            })
+            .count();
+        assert!(gpu_count > 0, "vello 应画出非白像素");
+        assert!(cpu_count > 0, "CPU 应画出非白像素");
+        let ratio = gpu_count as f64 / cpu_count as f64;
+        println!("vello_offscreen_parity: gpu={gpu_count} cpu={cpu_count} ratio={ratio:.3}");
+        assert!(
+            (0.5..=2.0).contains(&ratio),
+            "两后端非白像素数应同数量级:gpu={gpu_count} cpu={cpu_count} ratio={ratio:.3}"
+        );
     }
 
     #[test]
