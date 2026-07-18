@@ -255,6 +255,11 @@ impl Doc {
         self.0.borrow().version
     }
 
+    /// 本树的身份标识(布局/绘制缓存键;同一棵树的所有 Doc 克隆同值)
+    pub fn identity(&self) -> usize {
+        Rc::as_ptr(&self.0) as usize
+    }
+
     /// 树被修改后的回调(渲染壳用它接 request_redraw)
     pub fn set_on_mutate(&self, f: impl Fn() + 'static) {
         self.0.borrow_mut().on_mutate = Some(Box::new(f));
@@ -648,6 +653,46 @@ pub fn each_block_keyed<T, K>(
     });
 }
 
+/// 虚拟列表(百万级列表的正解,ADR/调研 18):**逻辑 N 行、实例化只有视口**。
+///
+/// 结构:固定 `viewport_rows` 个槽位,每槽一次性建行 + 一个 `Signal<Option<T>>`;
+/// 滚动(offset 变化)= 逐槽 `set` 新数据 → 行内绑定原地更新,
+/// **零节点创建/销毁、零布局结构变化**——这是 1% low 稳定性的来源。
+/// `item_at` 惰性取数:总量百万也不物化整表。
+/// 槽值为 `None` 表示越界空槽(行内自行渲染空态)。
+pub fn virtual_list<T: Clone + 'static>(
+    doc: &Doc,
+    parent: ViewId,
+    count: impl Fn() -> usize + 'static,
+    offset: sv_reactive::Signal<usize>,
+    viewport_rows: usize,
+    item_at: impl Fn(usize) -> T + 'static,
+    row: impl Fn(&Doc, ViewId, sv_reactive::Signal<Option<T>>, usize) + 'static,
+) {
+    use sv_reactive::state;
+
+    let container = doc.create_view();
+    doc.append(parent, container);
+
+    // 槽位一次性建行(行内容绑定到槽信号,之后只走数据更新)
+    let mut slots: Vec<sv_reactive::Signal<Option<T>>> = Vec::with_capacity(viewport_rows);
+    for i in 0..viewport_rows {
+        let slot = state::<Option<T>>(None);
+        row(doc, container, slot, i);
+        slots.push(slot);
+    }
+
+    // 数据填充:offset/count 任一变化 → 逐槽写入(细粒度,无结构变化)
+    effect(move || {
+        let off = offset.get();
+        let n = count();
+        for (i, slot) in slots.iter().enumerate() {
+            let idx = off + i;
+            slot.set(if idx < n { Some(item_at(idx)) } else { None });
+        }
+    });
+}
+
 /// `{#key expr} ... {/key}`:key 值(PartialEq)变化时销毁重建整块,
 /// 块内状态随之重置——与 Svelte 的 {#key} 语义一致
 pub fn key_block<K: PartialEq + 'static>(
@@ -827,6 +872,45 @@ mod tests {
         });
         let dump = doc.dump();
         assert!(!dump.contains(":a") && dump.contains("0:b") && dump.contains("1:c"));
+    }
+
+    #[test]
+    fn virtual_list_million_rows_few_nodes() {
+        let doc = Doc::new();
+        let offset = state(0usize);
+        let (_, _scope) = create_root(|| {
+            virtual_list(
+                &doc,
+                doc.root(),
+                || 1_000_000usize, // 逻辑百万行
+                offset,
+                30, // 视口只有 30 槽
+                |i| format!("行 {i}"),
+                |doc, parent, slot, _i| {
+                    let t = doc.create_text("");
+                    doc.append(parent, t);
+                    bind_text(doc, t, move || {
+                        slot.get().unwrap_or_else(|| "空".into())
+                    });
+                },
+            );
+        });
+        // 百万逻辑行,场景树只有 视口槽位 + 容器 + root
+        let nodes = doc.read(|inner| inner.nodes.len());
+        assert!(nodes <= 32 + 2, "虚拟化应只实例化视口:{nodes} 节点");
+        assert!(doc.dump().contains("行 0") && doc.dump().contains("行 29"));
+
+        // 滚动到 50 万:同一批节点原地更新,零结构变化
+        let before = nodes;
+        offset.set(500_000);
+        let dump = doc.dump();
+        assert!(dump.contains("行 500000") && dump.contains("行 500029"), "\n{dump}");
+        assert_eq!(doc.read(|inner| inner.nodes.len()), before, "滚动不应增删节点");
+
+        // 滚到尾部越界:空槽显示空态
+        offset.set(999_990);
+        let dump = doc.dump();
+        assert!(dump.contains("行 999999") && dump.contains("空"), "\n{dump}");
     }
 
     #[test]
