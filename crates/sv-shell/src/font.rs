@@ -79,18 +79,23 @@ pub struct FontHandle {
 }
 
 impl FontHandle {
-    /// 按 key 解析 swash FontRef(CPU 光栅/度量用)
+    /// 按 key 解析 swash FontRef(CPU 光栅/度量用)。
+    /// key=0 是内置 UI 字体(TextInput 旧线性路径,P3 随 PlainEditor 切换);
+    /// 其余键出自 TextEngine 的 fontique 注册表(调研 24 P1)
     pub fn font_ref(&self) -> FontRef<'static> {
-        // 单字体阶段:key 0 即 UI 字体;fontique 落地后换注册表查询
-        debug_assert_eq!(self.key, 0, "多字体注册表随 fontique 落地(调研 24 P1)");
-        ui_font()
+        if self.key == 0 {
+            return ui_font();
+        }
+        crate::text::font_ref_of(self.key).expect("sv-shell: 未注册的字体键")
     }
 
     /// 原始字节 + collection index(GPU 端构造 peniko::FontData 用)
     #[cfg_attr(not(feature = "backend-vello"), allow(dead_code))]
     pub fn data(&self) -> (&'static [u8], u32) {
-        debug_assert_eq!(self.key, 0);
-        ui_font_data()
+        if self.key == 0 {
+            return ui_font_data();
+        }
+        crate::text::font_bytes_of(self.key).expect("sv-shell: 未注册的字体键")
     }
 }
 

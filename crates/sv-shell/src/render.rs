@@ -104,6 +104,9 @@ fn line_metrics(font: &FontRef, px: f32) -> (f32, f32) {
     (m.ascent, m.ascent + m.descent + m.leading)
 }
 
+/// 单行线性度量(TextInput 旧路径与测试用;Text/Button 已走 TextEngine,
+/// P3 PlainEditor 落地后本函数随线性路径一并退役)
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn measure_text(font: &FontRef, text: &str, px: f32) -> (f32, f32) {
     let (_, line_h) = line_metrics(font, px);
     if text.is_empty() {
@@ -113,170 +116,6 @@ pub fn measure_text(font: &FontRef, text: &str, px: f32) -> (f32, f32) {
     let gm = font.glyph_metrics(&[]).scale(px);
     let w: f32 = text.chars().map(|c| gm.advance_width(charmap.map(c))).sum();
     (w, line_h)
-}
-
-/// 折行测量(swash 线性排版 + UAX #14 断点,Slint 同款依赖;调研 23 T2。
-/// **计划内报废**:M2 Parley 落地时整体换门面)。`wrap_w=None` 即单行。
-/// 返回 (最宽行宽, 总高, 行字节区间);断点带 CJK 规则与标点禁则,
-/// 超长不可断段(长 URL)按字符强制断
-pub fn measure_text_wrapped(
-    font: &FontRef,
-    text: &str,
-    px: f32,
-    wrap_w: Option<f32>,
-) -> (f32, f32, Vec<std::ops::Range<usize>>) {
-    use std::cell::RefCell;
-    type Cached = (f32, f32, Vec<std::ops::Range<usize>>);
-    thread_local! {
-        static HOT: RefCell<HashMap<(u64, u32, u32), Cached>> = RefCell::new(HashMap::new());
-        static COLD: RefCell<HashMap<(u64, u32, u32), Cached>> = RefCell::new(HashMap::new());
-    }
-    const CAP: usize = 1024;
-    let key = {
-        use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        text.hash(&mut h);
-        (
-            h.finish(),
-            px.to_bits(),
-            wrap_w.map_or(u32::MAX, f32::to_bits),
-        )
-    };
-    if let Some(hit) = HOT.with(|c| c.borrow().get(&key).cloned()) {
-        return hit;
-    }
-    if let Some(hit) = COLD.with(|c| c.borrow_mut().remove(&key)) {
-        HOT.with(|c| c.borrow_mut().insert(key, hit.clone()));
-        return hit;
-    }
-
-    let result = compute_wrapped(font, text, px, wrap_w);
-    HOT.with(|c| {
-        let mut hot = c.borrow_mut();
-        if hot.len() >= CAP {
-            // 分代淘汰(与 glyph_cache 同款):热代满则整代降冷
-            let demoted = std::mem::take(&mut *hot);
-            COLD.with(|cold| *cold.borrow_mut() = demoted);
-        }
-        hot.insert(key, result.clone());
-    });
-    result
-}
-
-fn compute_wrapped(
-    font: &FontRef,
-    text: &str,
-    px: f32,
-    wrap_w: Option<f32>,
-) -> (f32, f32, Vec<std::ops::Range<usize>>) {
-    let (_, line_h) = line_metrics(font, px);
-    if text.is_empty() {
-        return (0.0, line_h, Vec::from([0..0]));
-    }
-    let Some(wrap_w) = wrap_w else {
-        let (w, h) = measure_text(font, text, px);
-        return (w, h, Vec::from([0..text.len()]));
-    };
-    let charmap = font.charmap();
-    let gm = font.glyph_metrics(&[]).scale(px);
-    let advance = |c: char| gm.advance_width(charmap.map(c));
-    let width_of = |r: std::ops::Range<usize>| -> f32 { text[r].chars().map(advance).sum() };
-
-    // UAX #14:linebreaks 产出 (断点后首字节偏移, 强制/可选);
-    // 相邻断点之间即"不可断段"。段尾空白**悬挂**:不参与行宽判定
-    // (CSS 同款,否则 "hello " 恰好放不下会把空格挤成一行)
-    let mut lines: Vec<std::ops::Range<usize>> = Vec::new();
-    let mut line_start = 0usize;
-    let mut pen = 0.0f32; // 含段尾空白的推进量
-    let mut pen_trim = 0.0f32; // 到最后一个非空白为止的行宽
-    let mut max_w = 0.0f32;
-    let mut prev = 0usize;
-    for (idx, op) in unicode_linebreak::linebreaks(text) {
-        let seg = prev..idx;
-        let seg_str = &text[seg.clone()];
-        let fit_end = seg.start + seg_str.trim_end().len();
-        let fit_w = width_of(seg.start..fit_end);
-        if pen > 0.0 && pen + fit_w > wrap_w {
-            // 段放不下 → 在段前断行
-            lines.push(line_start..seg.start);
-            max_w = max_w.max(pen_trim);
-            line_start = seg.start;
-            pen = 0.0;
-        }
-        if fit_w > wrap_w {
-            // 超长不可断段:字符级强制断(仅非空白部分)
-            for (ci, c) in text[seg.start..fit_end].char_indices() {
-                let abs = seg.start + ci;
-                let cw = advance(c);
-                if pen > 0.0 && pen + cw > wrap_w {
-                    lines.push(line_start..abs);
-                    max_w = max_w.max(pen);
-                    line_start = abs;
-                    pen = 0.0;
-                }
-                pen += cw;
-            }
-            pen_trim = pen;
-            pen += width_of(fit_end..seg.end); // 尾部空白悬挂推进
-        } else {
-            pen_trim = pen + fit_w;
-            pen += width_of(seg.clone());
-        }
-        // 强制断(\n;文末的 Mandatory 不产生空行)
-        if op == unicode_linebreak::BreakOpportunity::Mandatory && idx < text.len() {
-            lines.push(line_start..idx);
-            max_w = max_w.max(pen_trim);
-            line_start = idx;
-            pen = 0.0;
-            pen_trim = 0.0;
-        }
-        prev = idx;
-    }
-    if line_start < text.len() || lines.is_empty() {
-        lines.push(line_start..text.len());
-        max_w = max_w.max(pen_trim);
-    }
-    (max_w, lines.len() as f32 * line_h, lines)
-}
-
-/// 折行 shaping:逐行 shape + text-align 逐行 x 偏移。
-/// 断行判定在**逻辑坐标**做(与布局同源,HiDPI 下不会画/量各断各的),
-/// 字形坐标按物理 px 产出
-#[allow(clippy::too_many_arguments)]
-fn shape_text_wrapped(
-    font: crate::font::FontHandle,
-    text: &str,
-    px_logical: f32,
-    wrap_w_logical: Option<f32>,
-    align: sv_ui::TextAlign,
-    ox: f32,
-    oy: f32,
-    box_w_phys: f32,
-    scale: f32,
-) -> Vec<GlyphPos> {
-    let px_phys = px_logical * scale;
-    let fref = font.font_ref();
-    let (_, line_h_phys) = line_metrics(&fref, px_phys);
-    let (_, _, lines) = measure_text_wrapped(&fref, text, px_logical, wrap_w_logical);
-    let mut out = Vec::new();
-    for (li, r) in lines.iter().enumerate() {
-        let line = text[r.clone()].trim_end_matches(['\n', '\r']);
-        let x0 = match align {
-            sv_ui::TextAlign::Left => ox,
-            sv_ui::TextAlign::Center => {
-                ox + (box_w_phys - measure_text(&fref, line, px_phys).0) / 2.0
-            }
-            sv_ui::TextAlign::Right => ox + box_w_phys - measure_text(&fref, line, px_phys).0,
-        };
-        out.extend(shape_text(
-            font,
-            line,
-            px_phys,
-            x0,
-            oy + li as f32 * line_h_phys,
-        ));
-    }
-    out
 }
 
 // ---------------------------------------------------------------------------
@@ -464,14 +303,14 @@ fn measure_leaf(
                     (None, taffy::AvailableSpace::MaxContent) => None,
                 }
             };
-            let (w, h, _) = measure_text_wrapped(font, &ctx.text, ctx.px, wrap_w);
+            let (w, h) = crate::text::measure(&ctx.text, ctx.px, wrap_w);
             taffy::Size {
                 width: w,
                 height: h,
             }
         }
         ElementKind::Button => {
-            let (w, h) = measure_text(font, &ctx.text, ctx.px);
+            let (w, h) = crate::text::measure(&ctx.text, ctx.px, None);
             taffy::Size {
                 width: w,
                 height: h,
@@ -789,29 +628,40 @@ pub fn paint_tree(doc: &Doc, placed: &[Placed], painter: &mut dyn Painter, scale
             match n.kind {
                 ElementKind::Text => {
                     let fg = with_opacity(resolve_fg(inner, p.id), op);
-                    // 断行在逻辑坐标做,与布局(taffy measure)同源
+                    // 断行在逻辑坐标做,与布局(taffy measure)同源;
+                    // fallback 混排 = 多字体 run(P0 载体在此兑现)
                     let fs_logical = resolve_font_size(inner, p.id);
                     let content_w_logical = p.rect.w - s.padding.horizontal() - bw * 2.0;
                     let wrap_w =
                         (s.text_wrap == sv_ui::TextWrap::Wrap).then_some(content_w_logical);
-                    let run = shape_text_wrapped(
-                        fh,
+                    for run in crate::text::shape(
                         &n.text,
                         fs_logical,
                         wrap_w,
                         s.text_align,
                         x + inset,
                         y + inset_top,
-                        content_w_logical * scale,
                         scale,
-                    );
-                    painter.glyph_run(fh, &run, fg);
+                    ) {
+                        painter.glyph_run(run.font, &run.glyphs, fg);
+                    }
                 }
                 ElementKind::Button => {
                     let fg = with_opacity(s.fg.unwrap_or(Color::WHITE), op);
-                    let (tw, th) = measure_text(&font, &n.text, fs);
-                    let run = shape_text(fh, &n.text, fs, x + (w - tw) / 2.0, y + (h - th) / 2.0);
-                    painter.glyph_run(fh, &run, fg);
+                    let fs_logical = resolve_font_size(inner, p.id);
+                    let (tw_l, th_l) = crate::text::measure(&n.text, fs_logical, None);
+                    let (tw, th) = (tw_l * scale, th_l * scale);
+                    for run in crate::text::shape(
+                        &n.text,
+                        fs_logical,
+                        None,
+                        sv_ui::TextAlign::Left,
+                        x + (w - tw) / 2.0,
+                        y + (h - th) / 2.0,
+                        scale,
+                    ) {
+                        painter.glyph_run(run.font, &run.glyphs, fg);
+                    }
                 }
                 ElementKind::Checkbox => {
                     let boxc = with_opacity(s.bg.unwrap_or(Color::rgb(221, 221, 234)), op);
