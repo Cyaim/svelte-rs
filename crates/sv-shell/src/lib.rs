@@ -10,9 +10,11 @@
 //! - [`render_to_png`]:离屏渲染一帧存 PNG(CI / 可视化验证用,不需要窗口)。
 
 mod font;
+mod paint;
 mod render;
 
-pub use render::{Placed, Rect, hit_click_target, layout_tree, render_frame};
+pub use paint::{GlyphPos, PaintCmd, Painter, RecordingPainter, TinySkiaPainter};
+pub use render::{Placed, Rect, hit_click_target, layout_tree, paint_tree, render_frame};
 
 use std::num::NonZeroU32;
 use std::rc::Rc;
@@ -315,6 +317,48 @@ mod tests {
         let target = hit_click_target(&doc, &placed, cx, cy).expect("按钮中心应命中");
         doc.click_handler(target).unwrap()();
         assert!(doc.dump().contains("Count: 1"), "点击后应精准更新:\n{}", doc.dump());
+    }
+
+    /// 可切换后端的支点验证:同一 paint_tree 对记录型后端产出稳定命令流
+    /// (金样测试:零像素、零 GPU;未来新后端先对拍这条命令流)
+    #[test]
+    fn recording_painter_golden() {
+        let doc = Doc::new();
+        let (_, _scope) = create_root(|| {
+            let card = doc.create_view();
+            doc.append(doc.root(), card);
+            doc.update_style(card, |s| {
+                s.bg = Some(sv_ui::Color::rgb(240, 240, 246));
+                s.corner_radius = 10.0;
+                s.border = Some(sv_ui::Border { width: 2.0, color: sv_ui::Color::rgb(0, 0, 128) });
+                s.padding = 8.0.into();
+            });
+            let t = doc.create_text("你好");
+            doc.append(card, t);
+        });
+        let placed = layout_tree(&doc, 200.0, 100.0);
+        let mut rec = RecordingPainter::default();
+        paint_tree(&doc, &placed, &mut rec, 1.0);
+        // 期望命令流:卡片底色填充 → 边框描边 → 文本字形
+        assert!(
+            matches!(rec.cmds[0], PaintCmd::FillRect { radius: 10, .. }),
+            "第一条应为卡片填充:{:?}",
+            rec.cmds
+        );
+        assert!(
+            matches!(rec.cmds[1], PaintCmd::StrokeRect { width: 2, .. }),
+            "第二条应为边框:{:?}",
+            rec.cmds
+        );
+        assert!(
+            matches!(rec.cmds[2], PaintCmd::Glyphs { count: 2, .. }),
+            "第三条应为两枚字形:{:?}",
+            rec.cmds
+        );
+        // 同一命令流可稳定重放(缓存/对拍的前提)
+        let mut rec2 = RecordingPainter::default();
+        paint_tree(&doc, &placed, &mut rec2, 1.0);
+        assert_eq!(rec.cmds, rec2.cmds, "命令流应确定性可重放");
     }
 
     #[test]

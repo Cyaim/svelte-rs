@@ -11,11 +11,12 @@ use std::collections::HashMap;
 
 use fontdue::Font;
 use fontdue::layout::{CoordinateSystem, Layout, TextStyle};
-use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, PremultipliedColorU8, Stroke, Transform};
+use tiny_skia::Pixmap;
 
 use sv_ui::{Color, Direction, Doc, DocumentInner, ElementKind, ViewId};
 
 use crate::font::ui_font;
+use crate::paint::{GlyphPos, Painter, TinySkiaPainter};
 
 #[derive(Clone, Copy, Debug)]
 pub struct Rect {
@@ -215,16 +216,13 @@ pub fn layout_tree(doc: &Doc, logical_w: f32, logical_h: f32) -> Vec<Placed> {
     })
 }
 
-fn skia_color(c: Color) -> tiny_skia::Color {
-    tiny_skia::Color::from_rgba8(c.r, c.g, c.b, c.a)
-}
-
 /// 把节点的不透明度乘进颜色 alpha
 fn with_opacity(c: Color, o: f32) -> Color {
     Color::rgba(c.r, c.g, c.b, (c.a as f32 * o.clamp(0.0, 1.0)) as u8)
 }
 
-/// 有效不透明度 = 自身 × 祖先链乘积(近似组透明,v0 无合成层)
+/// 有效不透明度 = 自身 × 祖先链乘积(近似组透明,v0 无合成层;
+/// 换 vello 后由 push_layer/pop_layer 天然正确)
 fn effective_opacity(inner: &DocumentInner, id: ViewId) -> f32 {
     let mut o = 1.0f32;
     let mut cur = Some(id);
@@ -236,115 +234,27 @@ fn effective_opacity(inner: &DocumentInner, id: ViewId) -> f32 {
     o
 }
 
-fn rounded_rect(pb: &mut PathBuilder, x: f32, y: f32, w: f32, h: f32, r: f32) {
-    let r = r.min(w / 2.0).min(h / 2.0);
-    if r <= 0.5 {
-        if let Some(rect) = tiny_skia::Rect::from_xywh(x, y, w, h) {
-            pb.push_rect(rect);
-        }
-        return;
-    }
-    const K: f32 = 0.552_284_8;
-    pb.move_to(x + r, y);
-    pb.line_to(x + w - r, y);
-    pb.cubic_to(x + w - r + K * r, y, x + w, y + r - K * r, x + w, y + r);
-    pb.line_to(x + w, y + h - r);
-    pb.cubic_to(x + w, y + h - r + K * r, x + w - r + K * r, y + h, x + w - r, y + h);
-    pb.line_to(x + r, y + h);
-    pb.cubic_to(x + r - K * r, y + h, x, y + h - r + K * r, x, y + h - r);
-    pb.line_to(x, y + r);
-    pb.cubic_to(x, y + r - K * r, x + r - K * r, y, x + r, y);
-    pb.close();
-}
-
-fn fill_rounded(pixmap: &mut Pixmap, x: f32, y: f32, w: f32, h: f32, r: f32, c: Color) {
-    let mut pb = PathBuilder::new();
-    rounded_rect(&mut pb, x, y, w, h, r);
-    if let Some(path) = pb.finish() {
-        let mut paint = Paint::default();
-        paint.set_color(skia_color(c));
-        paint.anti_alias = true;
-        pixmap.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
-    }
-}
-
-fn stroke_rounded(pixmap: &mut Pixmap, x: f32, y: f32, w: f32, h: f32, r: f32, width: f32, c: Color) {
-    // 沿边框中心线描边(内缩半宽),视觉上贴合 border-box
-    let half = width / 2.0;
-    let mut pb = PathBuilder::new();
-    rounded_rect(&mut pb, x + half, y + half, w - width, h - width, (r - half).max(0.0));
-    if let Some(path) = pb.finish() {
-        let mut paint = Paint::default();
-        paint.set_color(skia_color(c));
-        paint.anti_alias = true;
-        let stroke = Stroke { width, ..Stroke::default() };
-        pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
-    }
-}
-
-fn blend_pixel(data: &mut [PremultipliedColorU8], pw: u32, ph: u32, x: i32, y: i32, c: Color, cov: u8) {
-    if x < 0 || y < 0 || x >= pw as i32 || y >= ph as i32 {
-        return;
-    }
-    let idx = (y as u32 * pw + x as u32) as usize;
-    let dst = data[idx];
-    let a = (cov as f32 / 255.0) * (c.a as f32 / 255.0);
-    let inv = 1.0 - a;
-    let na = (255.0 * a + dst.alpha() as f32 * inv).round().min(255.0);
-    let nr = (c.r as f32 * a + dst.red() as f32 * inv).round().min(na);
-    let ng = (c.g as f32 * a + dst.green() as f32 * inv).round().min(na);
-    let nb = (c.b as f32 * a + dst.blue() as f32 * inv).round().min(na);
-    if let Some(px) = PremultipliedColorU8::from_rgba(nr as u8, ng as u8, nb as u8, na as u8) {
-        data[idx] = px;
-    }
-}
-
-fn draw_text(pixmap: &mut Pixmap, font: &Font, text: &str, px: f32, color: Color, ox: f32, oy: f32) {
+/// shaping:文本 → 已定位字形(物理坐标)。painter 只拿 glyph run
+fn shape_text(font: &Font, text: &str, px: f32, ox: f32, oy: f32) -> Vec<GlyphPos> {
     if text.is_empty() {
-        return;
+        return Vec::new();
     }
-    let (pw, ph) = (pixmap.width(), pixmap.height());
     let mut layout = Layout::new(CoordinateSystem::PositiveYDown);
     layout.append(&[font], &TextStyle::new(text, px, 0));
-    let glyphs: Vec<_> = layout.glyphs().to_vec();
-    let data = pixmap.pixels_mut();
-    for g in glyphs {
-        if g.width == 0 {
-            continue;
-        }
-        let (metrics, coverage) = font.rasterize_config(g.key);
-        for yy in 0..metrics.height {
-            for xx in 0..metrics.width {
-                let cov = coverage[yy * metrics.width + xx];
-                if cov == 0 {
-                    continue;
-                }
-                blend_pixel(
-                    data,
-                    pw,
-                    ph,
-                    (ox + g.x).round() as i32 + xx as i32,
-                    (oy + g.y).round() as i32 + yy as i32,
-                    color,
-                    cov,
-                );
-            }
-        }
-    }
+    layout
+        .glyphs()
+        .iter()
+        .filter(|g| g.width > 0)
+        .map(|g| GlyphPos { key: g.key, x: ox + g.x, y: oy + g.y })
+        .collect()
 }
 
-/// 渲染一帧:布局(逻辑坐标)+ 绘制(物理坐标)。返回像素与命中测试用的布局
-pub fn render_frame(doc: &Doc, phys_w: u32, phys_h: u32, scale: f32) -> (Pixmap, Vec<Placed>) {
+/// 共享绘制遍历:对任意 Painter 后端发出同一命令流。
+/// 这是"可切换渲染后端"的支点(调研 14):后端只实现 Painter 三个动词
+pub fn paint_tree(doc: &Doc, placed: &[Placed], painter: &mut dyn Painter, scale: f32) {
     let font = ui_font();
-    let logical_w = phys_w as f32 / scale;
-    let logical_h = phys_h as f32 / scale;
-    let placed = layout_tree(doc, logical_w, logical_h);
-
-    let mut pixmap = Pixmap::new(phys_w.max(1), phys_h.max(1)).expect("sv-shell: 创建 pixmap 失败");
-    pixmap.fill(skia_color(Color::WHITE));
-
     doc.read(|inner| {
-        for p in &placed {
+        for p in placed {
             let Some(n) = inner.nodes.get(p.id) else { continue };
             let s = &n.style;
             let op = effective_opacity(inner, p.id);
@@ -355,11 +265,10 @@ pub fn render_frame(doc: &Doc, phys_w: u32, phys_h: u32, scale: f32) -> (Pixmap,
             let inset_top = (s.padding.top + bw) * scale;
 
             if let Some(bg) = s.bg {
-                fill_rounded(&mut pixmap, x, y, w, h, s.corner_radius * scale, with_opacity(bg, op));
+                painter.fill_rounded_rect(x, y, w, h, s.corner_radius * scale, with_opacity(bg, op));
             }
             if let Some(b) = s.border {
-                stroke_rounded(
-                    &mut pixmap,
+                painter.stroke_rounded_rect(
                     x,
                     y,
                     w,
@@ -373,28 +282,48 @@ pub fn render_frame(doc: &Doc, phys_w: u32, phys_h: u32, scale: f32) -> (Pixmap,
             match n.kind {
                 ElementKind::Text => {
                     let fg = with_opacity(resolve_fg(inner, p.id), op);
-                    draw_text(&mut pixmap, font, &n.text, fs, fg, x + inset, y + inset_top);
+                    let run = shape_text(font, &n.text, fs, x + inset, y + inset_top);
+                    painter.glyph_run(font, &run, fg);
                 }
                 ElementKind::Button => {
-                    // 按钮文本默认白(未显式设置且不走继承——按钮底色语境)
                     let fg = with_opacity(s.fg.unwrap_or(Color::WHITE), op);
                     let (tw, th) = measure_text(font, &n.text, fs);
-                    draw_text(&mut pixmap, font, &n.text, fs, fg, x + (w - tw) / 2.0, y + (h - th) / 2.0);
+                    let run = shape_text(font, &n.text, fs, x + (w - tw) / 2.0, y + (h - th) / 2.0);
+                    painter.glyph_run(font, &run, fg);
                 }
                 ElementKind::Checkbox => {
                     let boxc = with_opacity(s.bg.unwrap_or(Color::rgb(221, 221, 234)), op);
                     let r = if s.corner_radius > 0.0 { s.corner_radius } else { 4.0 };
-                    fill_rounded(&mut pixmap, x, y, w, h, r * scale, boxc);
+                    painter.fill_rounded_rect(x, y, w, h, r * scale, boxc);
                     if n.checked {
                         let accent = with_opacity(s.fg.unwrap_or(Color::rgb(255, 62, 0)), op);
                         let ins = w * 0.25;
-                        fill_rounded(&mut pixmap, x + ins, y + ins, w - ins * 2.0, h - ins * 2.0, 2.0 * scale, accent);
+                        painter.fill_rounded_rect(
+                            x + ins,
+                            y + ins,
+                            w - ins * 2.0,
+                            h - ins * 2.0,
+                            2.0 * scale,
+                            accent,
+                        );
                     }
                 }
                 ElementKind::View => {}
             }
         }
     });
+}
+
+/// 渲染一帧:布局(逻辑坐标)+ 绘制(物理坐标)。返回像素与命中测试用的布局
+pub fn render_frame(doc: &Doc, phys_w: u32, phys_h: u32, scale: f32) -> (Pixmap, Vec<Placed>) {
+    let logical_w = phys_w as f32 / scale;
+    let logical_h = phys_h as f32 / scale;
+    let placed = layout_tree(doc, logical_w, logical_h);
+
+    let mut pixmap = Pixmap::new(phys_w.max(1), phys_h.max(1)).expect("sv-shell: 创建 pixmap 失败");
+    pixmap.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+    let mut painter = TinySkiaPainter { pixmap: &mut pixmap };
+    paint_tree(doc, &placed, &mut painter, scale);
 
     (pixmap, placed)
 }
