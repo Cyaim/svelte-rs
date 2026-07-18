@@ -486,11 +486,15 @@ impl Cg<'_> {
         if let Tag::Component(name) = tag {
             return self.emit_component(name, attrs, children, offset, scope);
         }
+        if *tag == Tag::Overlay {
+            return self.emit_overlay(attrs, children, offset, scope);
+        }
         let el = self.fresh("el");
         let mut ts = match tag {
             Tag::View => quote! { let #el = __doc.create_view(); },
             Tag::Checkbox => quote! { let #el = __doc.create_checkbox(); },
             Tag::Input => quote! { let #el = __doc.create_text_input(); },
+            Tag::Overlay => unreachable!("overlay 在 emit_element 顶部拦截"),
             Tag::Text | Tag::Button => {
                 let segments: &[Segment] = match children.first() {
                     Some(Node::Text { segments }) => segments,
@@ -515,6 +519,7 @@ impl Cg<'_> {
             Tag::Button => "button",
             Tag::Checkbox => "checkbox",
             Tag::Input => "input",
+            Tag::Overlay => unreachable!(),
             Tag::Component(_) => unreachable!(),
         };
         if let Some(entry) = self.sheet.elements.get(tag_name) {
@@ -1392,6 +1397,186 @@ impl Cg<'_> {
             });
         });
         Ok(ts)
+    }
+
+    /// `<overlay open={..} anchor="below" gap="4" modal close="outside"
+    /// ondismiss={..} style="..">children</overlay>`(调研 25 O6)。
+    /// 锚定到**父容器元素**(触发钮与 overlay 包在同一 view 即得下拉形态);
+    /// children 编译成 overlay_block 的 build 闭包
+    fn emit_overlay(
+        &mut self,
+        attrs: &[Attr],
+        children: &[Node],
+        offset: usize,
+        scope: &Scope,
+    ) -> Result<TokenStream, CompileError> {
+        let mut open_ts = None;
+        let mut side = "below".to_string();
+        let mut gap = 4.0f32;
+        let mut modal = false;
+        let mut close: Option<String> = None;
+        let mut dismiss_ts = quote! { None };
+        let mut style_setters = TokenStream::new();
+        for attr in attrs {
+            match attr.name.as_str() {
+                "open" => {
+                    let AttrValue::Expr(e) = &attr.value else {
+                        return Err(CompileError::at_offset(
+                            self.source,
+                            attr.offset,
+                            "open 的值应为 {布尔表达式}",
+                        ));
+                    };
+                    open_ts = Some(self.expr(e, scope, false)?);
+                }
+                "anchor" => {
+                    let AttrValue::Str { value, offset } = &attr.value else {
+                        return Err(CompileError::at_offset(
+                            self.source,
+                            attr.offset,
+                            "anchor 应为静态字符串",
+                        ));
+                    };
+                    match value.as_str() {
+                        "below" | "above" | "left" | "right" | "center" => side = value.clone(),
+                        other => {
+                            return Err(CompileError::at_offset(
+                                self.source,
+                                *offset,
+                                format!("anchor 支持 below/above/left/right/center,收到 `{other}`"),
+                            ));
+                        }
+                    }
+                }
+                "gap" => {
+                    let AttrValue::Str { value, offset } = &attr.value else {
+                        return Err(CompileError::at_offset(
+                            self.source,
+                            attr.offset,
+                            "gap 应为数字",
+                        ));
+                    };
+                    gap = value.trim().parse().map_err(|_| {
+                        CompileError::at_offset(
+                            self.source,
+                            *offset,
+                            format!("gap `{value}` 不是数字"),
+                        )
+                    })?;
+                }
+                "modal" => modal = true,
+                "close" => {
+                    let AttrValue::Str { value, offset } = &attr.value else {
+                        return Err(CompileError::at_offset(
+                            self.source,
+                            attr.offset,
+                            "close 应为静态字符串",
+                        ));
+                    };
+                    match value.as_str() {
+                        "outside" | "any" | "none" => close = Some(value.clone()),
+                        other => {
+                            return Err(CompileError::at_offset(
+                                self.source,
+                                *offset,
+                                format!("close 支持 outside/any/none,收到 `{other}`"),
+                            ));
+                        }
+                    }
+                }
+                "ondismiss" => {
+                    let AttrValue::Expr(e) = &attr.value else {
+                        return Err(CompileError::at_offset(
+                            self.source,
+                            attr.offset,
+                            "ondismiss 应为 {闭包表达式}",
+                        ));
+                    };
+                    let h = self.expr(e, scope, true)?;
+                    dismiss_ts = quote! { Some(::std::rc::Rc::new(#h)) };
+                }
+                "style" => {
+                    let AttrValue::Str { value, offset } = &attr.value else {
+                        return Err(CompileError::at_offset(
+                            self.source,
+                            attr.offset,
+                            "overlay 的 style 只支持静态字符串",
+                        ));
+                    };
+                    style_setters.extend(style::parse_style(self.source, value, *offset)?);
+                }
+                other => {
+                    return Err(CompileError::at_offset(
+                        self.source,
+                        attr.offset,
+                        format!(
+                            "overlay 支持 open/anchor/gap/modal/close/ondismiss/style,收到 `{other}`"
+                        ),
+                    ));
+                }
+            }
+        }
+        let Some(open) = open_ts else {
+            return Err(CompileError::at_offset(
+                self.source,
+                offset,
+                "overlay 缺少必填属性 open={布尔表达式}",
+            ));
+        };
+        // 缺省关闭策略:普通弹层点外关;modal 只能程序关
+        let close_str = close.unwrap_or_else(|| {
+            if modal {
+                "none".to_string()
+            } else {
+                "outside".to_string()
+            }
+        });
+        let close_ts = match close_str.as_str() {
+            "outside" => quote! { ::sv_ui::CloseBehavior::OnClickOutside },
+            "any" => quote! { ::sv_ui::CloseBehavior::OnAnyClick },
+            _ => quote! { ::sv_ui::CloseBehavior::None },
+        };
+        let anchor_ts = match side.as_str() {
+            "center" => quote! { ::sv_ui::Anchor::WindowCenter },
+            s => {
+                let side_ident = match s {
+                    "below" => quote! { Below },
+                    "above" => quote! { Above },
+                    "left" => quote! { Left },
+                    _ => quote! { Right },
+                };
+                quote! {
+                    ::sv_ui::Anchor::Node {
+                        id: __anchor_el,
+                        side: ::sv_ui::Side::#side_ident,
+                        gap: #gap,
+                    }
+                }
+            }
+        };
+        let children_ts = self.emit_nodes(children, scope)?;
+        let body = quote! {
+            __doc.update_style(__parent, |s| { #style_setters });
+            #children_ts
+        };
+        let build = self.rebuild_closure(body, scope);
+        Ok(quote! {
+            {
+                let __anchor_el = __parent;
+                ::sv_ui::overlay_block(
+                    &__doc,
+                    move || #open,
+                    move || #anchor_ts,
+                    ::sv_ui::OverlayOpts {
+                        layer: ::sv_ui::OverlayLayer::Popup,
+                        modal: #modal,
+                        close: #close_ts,
+                        on_dismiss: #dismiss_ts,
+                    },
+                    #build,
+                );
+            }
+        })
     }
 
     fn emit_if(

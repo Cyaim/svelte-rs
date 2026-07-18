@@ -2046,6 +2046,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "overlay-demo"
+version = "0.0.1"
+dependencies = [
+ "sv-compiler",
+ "sv-reactive",
+ "sv-shell",
+ "sv-ui",
+]
+
+[[package]]
 name = "owned_ttf_parser"
 version = "0.25.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

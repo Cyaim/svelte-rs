@@ -112,6 +112,21 @@ impl Doc {
         }
     }
 
+    /// 节点所在弹层的层(沿父链上溯到弹层根;不在弹层返回 None)。
+    /// 菜单方向键导航(调研 25 O4)据此把 ArrowDown/Up 映射为焦点移动
+    pub fn overlay_layer_of(&self, id: ViewId) -> Option<OverlayLayer> {
+        self.read(|inner| {
+            let mut cur = Some(id);
+            while let Some(c) = cur {
+                if let Some(e) = inner.overlays.iter().find(|e| e.root == c) {
+                    return Some(e.layer);
+                }
+                cur = inner.nodes.get(c).and_then(|n| n.parent);
+            }
+            None
+        })
+    }
+
     /// 关闭指定弹层(渲染壳 click-outside 手势用;只回写 signal)
     pub fn dismiss_overlay(&self, root: ViewId) -> bool {
         let cb = self.read(|inner| {
@@ -130,16 +145,17 @@ impl Doc {
         }
     }
 
-    /// Esc/程序性关闭:调最上层可自动关闭弹层的 on_dismiss(LIFO;
-    /// 只回写 signal,不直接拆)。返回是否有弹层消费
+    /// Esc/程序性关闭:调最上层**带 on_dismiss** 弹层的回调(LIFO;
+    /// 只回写 signal,不直接拆)。注意语义分工:[`CloseBehavior`] 只管
+    /// 指针手势(点外/任意点),Esc 看是否提供了 on_dismiss——模态对话框
+    /// 惯例是"点外不关、Esc 可关"。返回是否有弹层消费
     pub fn dismiss_topmost_overlay(&self) -> bool {
         let cb = self.read(|inner| {
             inner
                 .overlays
                 .iter()
                 .rev()
-                .find(|e| e.close != CloseBehavior::None)
-                .and_then(|e| e.on_dismiss.clone())
+                .find_map(|e| e.on_dismiss.clone())
         });
         match cb {
             Some(cb) => {

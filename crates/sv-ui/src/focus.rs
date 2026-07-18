@@ -171,6 +171,27 @@ pub fn dispatch_key(doc: &Doc, e: &KeyEvent) -> bool {
             doc.focus_prev();
             return true;
         }
+        // 菜单方向键(调研 25 O4):焦点在 Popup 弹层内时,上下键即焦点
+        // 移动——菜单/下拉免费获得方向键导航(TextInput 的方向键已被
+        // 编辑段先消费,不冲突)
+        Key::ArrowDown
+            if e.mods == Mods::NONE
+                && doc.focused().is_some_and(|f| {
+                    doc.overlay_layer_of(f) == Some(crate::OverlayLayer::Popup)
+                }) =>
+        {
+            doc.focus_next();
+            return true;
+        }
+        Key::ArrowUp
+            if e.mods == Mods::NONE
+                && doc.focused().is_some_and(|f| {
+                    doc.overlay_layer_of(f) == Some(crate::OverlayLayer::Popup)
+                }) =>
+        {
+            doc.focus_prev();
+            return true;
+        }
         Key::Escape if e.mods == Mods::NONE => {
             // 弹层优先(调研 25 O2:LIFO,嵌套弹层逐层关);其次失焦
             if doc.dismiss_topmost_overlay() {
