@@ -23,7 +23,7 @@ use sv_ui::{Color, Doc};
 
 use crate::font::ui_font_data;
 use crate::paint::{GlyphPos, Painter, PainterCaps};
-use crate::render::{Placed, layout_tree, paint_tree};
+use crate::render::{Placed, paint_tree};
 
 fn pcolor(c: Color) -> vello::peniko::Color {
     vello::peniko::Color::from_rgba8(c.r, c.g, c.b, c.a)
@@ -54,7 +54,8 @@ pub struct VelloPainter {
 impl VelloPainter {
     pub fn new() -> Self {
         let (bytes, index) = ui_font_data();
-        // 与 fontdue 共用同一份 'static 字节;Blob 只包一层 Arc<&[u8]>,零拷贝
+        // 与 CPU 端 swash 共用同一份 'static 字节;Blob 只包一层 Arc<&[u8]>,零拷贝。
+        // glyph id 语义一致:swash FontRef::from_index(0) 与这里的 index 0 同一字体
         let font = FontData::new(Blob::new(Arc::new(bytes)), index);
         Self { scene: Scene::new(), font }
     }
@@ -103,10 +104,10 @@ impl Painter for VelloPainter {
         );
     }
 
-    fn glyph_run(&mut self, _font: &fontdue::Font, glyphs: &[GlyphPos], color: Color) {
+    fn glyph_run(&mut self, glyphs: &[GlyphPos], color: Color) {
         let Some(first) = glyphs.first() else { return };
         // 一段 run 内字号一致(paint_tree 按节点发射);px 语义 = font size
-        let px = first.key.px;
+        let px = first.px();
         self.scene
             .draw_glyphs(&self.font)
             .font_size(px)
@@ -161,12 +162,19 @@ impl VelloWin {
     /// 渲染一帧到窗口。返回 (布局结果, 是否已成功呈现);
     /// 未呈现(surface 过期/被遮挡等)时调用方应 request_redraw 重试
     pub fn render(&mut self, doc: &Doc, scale: f32) -> (Vec<Placed>, bool) {
+        self.render_cached(doc, scale, false)
+    }
+
+    /// `scene_unchanged=true` 时跳过场景重编码(布局走版本缓存),只重渲染呈现
+    pub fn render_cached(&mut self, doc: &Doc, scale: f32, scene_unchanged: bool) -> (Vec<Placed>, bool) {
         let width = self.surface.config.width;
         let height = self.surface.config.height;
-        let placed = layout_tree(doc, width as f32 / scale, height as f32 / scale);
+        let placed = crate::render::layout_tree_cached(doc, width as f32 / scale, height as f32 / scale);
 
-        self.painter.scene.reset();
-        paint_tree(doc, &placed, &mut self.painter, scale);
+        if !scene_unchanged {
+            self.painter.scene.reset();
+            paint_tree(doc, &placed, &mut self.painter, scale);
+        }
 
         let device_handle = &self.context.devices[self.surface.dev_id];
         if let Err(e) = self.renderer.render_to_texture(
@@ -233,9 +241,13 @@ pub fn probe_adapter() -> bool {
 
 /// 离屏上下文缓存:device/renderer 建一次,目标纹理与回读缓冲按尺寸复用。
 /// (基准测试与连续离屏渲染的帧率口径需要稳态,而非每帧重建管线)
+///
+/// 不走 vello `RenderContext`(其 device 固定 `Limits::default()`,
+/// 128MB 存储绑定上限在 10 万控件档会被 scene buffer 撑爆,调研 17):
+/// 离屏无 surface 兼容性约束,自建 device 并按 adapter 实际能力抬高上限。
 struct Offscreen {
-    context: RenderContext,
-    device_id: usize,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
     renderer: Renderer,
     target: wgpu::Texture,
     view: wgpu::TextureView,
@@ -249,6 +261,36 @@ thread_local! {
     // wgpu-core 自己已销毁的 TLS(LockTrace)而 abort——刻意泄漏以避开
     static OFFSCREEN: std::cell::RefCell<Option<std::mem::ManuallyDrop<Offscreen>>> =
         const { std::cell::RefCell::new(None) };
+}
+
+/// 自建离屏 device:存储缓冲绑定上限抬到 adapter 实际能力
+/// (vello scene buffer 随控件数线性膨胀,100k 档 ≈192MB)
+fn create_offscreen_device() -> Option<(wgpu::Device, wgpu::Queue)> {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        display: None,
+        backends: wgpu::Backends::from_env().unwrap_or_default(),
+        flags: wgpu::InstanceFlags::from_build_config().with_env(),
+        memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
+        backend_options: wgpu::BackendOptions::from_env_or_default(),
+    });
+    let adapter = pollster::block_on(wgpu::util::initialize_adapter_from_env_or_default(
+        &instance, None,
+    ))
+    .ok()?;
+    let caps = adapter.limits();
+    let limits = wgpu::Limits {
+        max_storage_buffer_binding_size: caps.max_storage_buffer_binding_size,
+        max_buffer_size: caps.max_buffer_size,
+        ..wgpu::Limits::default()
+    };
+    let maybe = wgpu::Features::CLEAR_TEXTURE | wgpu::Features::PIPELINE_CACHE;
+    pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        label: Some("sv-shell offscreen"),
+        required_features: adapter.features() & maybe,
+        required_limits: limits,
+        ..Default::default()
+    }))
+    .ok()
 }
 
 fn offscreen_targets(
@@ -287,20 +329,18 @@ pub fn render_frame_vello(doc: &Doc, phys_w: u32, phys_h: u32, scale: f32) -> Op
         let mut slot = cell.borrow_mut();
         // 惰性建上下文;尺寸变化只重建纹理/缓冲
         if slot.is_none() {
-            let mut context = RenderContext::new();
-            let device_id = pollster::block_on(context.device(None))?;
-            let device = &context.devices[device_id].device;
-            let renderer = match Renderer::new(device, RendererOptions::default()) {
+            let (device, queue) = create_offscreen_device()?;
+            let renderer = match Renderer::new(&device, RendererOptions::default()) {
                 Ok(r) => r,
                 Err(e) => {
                     eprintln!("sv-shell: vello Renderer 创建失败: {e}");
                     return None;
                 }
             };
-            let (target, view, buffer, padded) = offscreen_targets(device, width, height);
+            let (target, view, buffer, padded) = offscreen_targets(&device, width, height);
             *slot = Some(std::mem::ManuallyDrop::new(Offscreen {
-                context,
-                device_id,
+                device,
+                queue,
                 renderer,
                 target,
                 view,
@@ -311,8 +351,7 @@ pub fn render_frame_vello(doc: &Doc, phys_w: u32, phys_h: u32, scale: f32) -> Op
         }
         let off = slot.as_mut().unwrap();
         if off.size != (width, height) {
-            let device = &off.context.devices[off.device_id].device;
-            let (target, view, buffer, padded) = offscreen_targets(device, width, height);
+            let (target, view, buffer, padded) = offscreen_targets(&off.device, width, height);
             off.target = target;
             off.view = view;
             off.buffer = buffer;
@@ -330,8 +369,8 @@ fn render_offscreen_frame(
     height: u32,
     scale: f32,
 ) -> Option<Vec<u8>> {
-    let device = &off.context.devices[off.device_id].device;
-    let queue = &off.context.devices[off.device_id].queue;
+    let device = &off.device;
+    let queue = &off.queue;
     let renderer = &mut off.renderer;
     let target = &off.target;
     let view = &off.view;
@@ -339,7 +378,7 @@ fn render_offscreen_frame(
     let padded_bytes_per_row = off.padded_bytes_per_row;
     let size = wgpu::Extent3d { width, height, depth_or_array_layers: 1 };
 
-    let placed = layout_tree(doc, width as f32 / scale, height as f32 / scale);
+    let placed = crate::render::layout_tree_cached(doc, width as f32 / scale, height as f32 / scale);
     let mut painter = VelloPainter::new();
     paint_tree(doc, &placed, &mut painter, scale);
 

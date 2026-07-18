@@ -5,18 +5,19 @@
 //! **继承**:`fg=None` / `font_size=NAN` 沿父链解析(color/font-size 白名单,
 //! ADR-8 C1),根 fallback BLACK/16。measure 自顶向下携带解析值,
 //! paint 对平铺列表做 O(depth) 父链回溯。
-//! 绘制走 tiny-skia + fontdue;逻辑坐标布局、物理坐标绘制(乘 scale)。
+//! 绘制走 tiny-skia + swash;逻辑坐标布局、物理坐标绘制(乘 scale)。
+//! 文本 shaping 为简化线性排版:charmap 逐字映射 + advance 推进(无 kerning/
+//! 连字;能力与原 fontdue 持平,M2 换 Parley/HarfRust)。
 
 use std::collections::HashMap;
 
-use fontdue::Font;
-use fontdue::layout::{CoordinateSystem, Layout, TextStyle};
+use swash::FontRef;
 use tiny_skia::Pixmap;
 
 use sv_ui::{Color, Direction, Doc, DocumentInner, ElementKind, ViewId};
 
 use crate::font::ui_font;
-use crate::paint::{GlyphPos, Painter, TinySkiaPainter};
+use crate::paint::{GlyphKey, GlyphPos, Painter, TinySkiaPainter};
 
 #[derive(Clone, Copy, Debug)]
 pub struct Rect {
@@ -66,25 +67,28 @@ fn resolve_fg(inner: &DocumentInner, id: ViewId) -> Color {
     Color::BLACK
 }
 
-pub fn measure_text(font: &Font, text: &str, px: f32) -> (f32, f32) {
+/// 行度量:(基线距行顶, 行高)。font.metrics 按 px 缩放(ascent/descent/leading)
+fn line_metrics(font: &FontRef, px: f32) -> (f32, f32) {
+    let m = font.metrics(&[]).scale(px);
+    (m.ascent, m.ascent + m.descent + m.leading)
+}
+
+pub fn measure_text(font: &FontRef, text: &str, px: f32) -> (f32, f32) {
+    let (_, line_h) = line_metrics(font, px);
     if text.is_empty() {
-        return (0.0, px * 1.25);
+        return (0.0, line_h);
     }
-    let mut layout = Layout::new(CoordinateSystem::PositiveYDown);
-    layout.append(&[font], &TextStyle::new(text, px, 0));
-    let w = layout
-        .glyphs()
-        .iter()
-        .map(|g| g.x + g.width as f32)
-        .fold(0.0f32, f32::max);
-    (w, layout.height())
+    let charmap = font.charmap();
+    let gm = font.glyph_metrics(&[]).scale(px);
+    let w: f32 = text.chars().map(|c| gm.advance_width(charmap.map(c))).sum();
+    (w, line_h)
 }
 
 /// 返回 border-box 尺寸(不含 margin;margin 由父容器计入间距)。
 /// `inherited_font`:父链解析到本节点的字号(自身未设时生效)
 fn measure(
     inner: &DocumentInner,
-    font: &Font,
+    font: &FontRef,
     id: ViewId,
     cache: &mut HashMap<ViewId, (f32, f32)>,
     inherited_font: f32,
@@ -159,7 +163,7 @@ fn measure(
 #[allow(clippy::too_many_arguments)]
 fn place(
     inner: &DocumentInner,
-    font: &Font,
+    font: &FontRef,
     cache: &mut HashMap<ViewId, (f32, f32)>,
     id: ViewId,
     x: f32,
@@ -195,6 +199,28 @@ fn place(
     }
 }
 
+/// 版本键控布局缓存:同一 Doc、同版本、同尺寸 → 直接复用上次布局。
+/// 静止帧的 O(n) measure/place 归零(细粒度更新模型下,静止是常态)
+pub fn layout_tree_cached(doc: &Doc, logical_w: f32, logical_h: f32) -> Vec<Placed> {
+    use std::cell::RefCell;
+    thread_local! {
+        static CACHE: RefCell<Option<(usize, u64, u32, u32, Vec<Placed>)>> =
+            const { RefCell::new(None) };
+    }
+    let key = (doc.identity(), doc.version(), logical_w.to_bits(), logical_h.to_bits());
+    CACHE.with(|c| {
+        let mut slot = c.borrow_mut();
+        if let Some((id, ver, w, h, placed)) = slot.as_ref()
+            && (*id, *ver, *w, *h) == key
+        {
+            return placed.clone();
+        }
+        let placed = layout_tree(doc, logical_w, logical_h);
+        *slot = Some((key.0, key.1, key.2, key.3, placed.clone()));
+        placed
+    })
+}
+
 /// 布局整棵树。root 强制占满窗口逻辑尺寸
 pub fn layout_tree(doc: &Doc, logical_w: f32, logical_h: f32) -> Vec<Placed> {
     let font = ui_font();
@@ -203,7 +229,7 @@ pub fn layout_tree(doc: &Doc, logical_w: f32, logical_h: f32) -> Vec<Placed> {
         let mut out = Vec::new();
         place(
             inner,
-            font,
+            &font,
             &mut cache,
             inner.root,
             0.0,
@@ -234,31 +260,37 @@ fn effective_opacity(inner: &DocumentInner, id: ViewId) -> f32 {
     o
 }
 
-/// shaping:文本 → 已定位字形(物理坐标)。painter 只拿 glyph run
-fn shape_text(font: &Font, text: &str, px: f32, ox: f32, oy: f32) -> Vec<GlyphPos> {
+/// shaping:文本 → 已定位字形(物理坐标)。painter 只拿 glyph run。
+/// 简化线性排版:charmap 逐字映射 + advance 推进(无 kerning/连字)。
+/// `oy` 是文本框顶,基线 = oy + ascent;x/y 与 ox/oy 都是基线原点
+/// (CPU 端由光栅 Placement 换算位图左上角,GPU 端直接喂 draw_glyphs)
+fn shape_text(font: &FontRef, text: &str, px: f32, ox: f32, oy: f32) -> Vec<GlyphPos> {
     if text.is_empty() {
         return Vec::new();
     }
-    let mut layout = Layout::new(CoordinateSystem::PositiveYDown);
-    layout.append(&[font], &TextStyle::new(text, px, 0));
-    layout
-        .glyphs()
-        .iter()
-        .filter(|g| g.width > 0)
-        .map(|g| {
-            // 反推基线原点:fontdue 给位图左上角,GPU 后端要 pen origin
-            // (bitmap_left = pen_x + xmin;bitmap_top = baseline - height - ymin)
-            let m = font.metrics_indexed(g.key.glyph_index, px);
-            GlyphPos {
-                key: g.key,
-                x: ox + g.x,
-                y: oy + g.y,
-                id: g.key.glyph_index,
-                ox: ox + g.x - m.xmin as f32,
-                oy: oy + g.y + m.height as f32 + m.ymin as f32,
-            }
-        })
-        .collect()
+    let (ascent, _) = line_metrics(font, px);
+    let baseline = oy + ascent;
+    let charmap = font.charmap();
+    let gm = font.glyph_metrics(&[]).scale(px);
+    let mut pen = ox;
+    let mut out = Vec::new();
+    for c in text.chars() {
+        let id = charmap.map(c);
+        let adv = gm.advance_width(id);
+        // 空白字符只推进 pen,不产出字形(与原 fontdue 过滤零宽位图语义一致)
+        if !c.is_whitespace() {
+            out.push(GlyphPos {
+                key: GlyphKey::new(id, px),
+                x: pen,
+                y: baseline,
+                id,
+                ox: pen,
+                oy: baseline,
+            });
+        }
+        pen += adv;
+    }
+    out
 }
 
 /// 共享绘制遍历:对任意 Painter 后端发出同一命令流。
@@ -294,14 +326,14 @@ pub fn paint_tree(doc: &Doc, placed: &[Placed], painter: &mut dyn Painter, scale
             match n.kind {
                 ElementKind::Text => {
                     let fg = with_opacity(resolve_fg(inner, p.id), op);
-                    let run = shape_text(font, &n.text, fs, x + inset, y + inset_top);
-                    painter.glyph_run(font, &run, fg);
+                    let run = shape_text(&font, &n.text, fs, x + inset, y + inset_top);
+                    painter.glyph_run(&run, fg);
                 }
                 ElementKind::Button => {
                     let fg = with_opacity(s.fg.unwrap_or(Color::WHITE), op);
-                    let (tw, th) = measure_text(font, &n.text, fs);
-                    let run = shape_text(font, &n.text, fs, x + (w - tw) / 2.0, y + (h - th) / 2.0);
-                    painter.glyph_run(font, &run, fg);
+                    let (tw, th) = measure_text(&font, &n.text, fs);
+                    let run = shape_text(&font, &n.text, fs, x + (w - tw) / 2.0, y + (h - th) / 2.0);
+                    painter.glyph_run(&run, fg);
                 }
                 ElementKind::Checkbox => {
                     let boxc = with_opacity(s.bg.unwrap_or(Color::rgb(221, 221, 234)), op);
@@ -330,7 +362,7 @@ pub fn paint_tree(doc: &Doc, placed: &[Placed], painter: &mut dyn Painter, scale
 pub fn render_frame(doc: &Doc, phys_w: u32, phys_h: u32, scale: f32) -> (Pixmap, Vec<Placed>) {
     let logical_w = phys_w as f32 / scale;
     let logical_h = phys_h as f32 / scale;
-    let placed = layout_tree(doc, logical_w, logical_h);
+    let placed = layout_tree_cached(doc, logical_w, logical_h);
 
     let mut pixmap = Pixmap::new(phys_w.max(1), phys_h.max(1)).expect("sv-shell: 创建 pixmap 失败");
     pixmap.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
