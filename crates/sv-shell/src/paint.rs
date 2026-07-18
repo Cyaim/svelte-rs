@@ -96,6 +96,10 @@ pub trait Painter {
     /// 一段已定位字形(shaping 已完成;backend 只负责光栅/上屏。
     /// 字体是全局单字体 UI 字体——`font::ui_font()` / vello FontData 各自持有)
     fn glyph_run(&mut self, glyphs: &[GlyphPos], color: Color);
+    /// 压入矩形裁剪(嵌套取交集;TextInput 溢出裁剪用,同时是滚动体系的
+    /// 前置——调研 21 §2.3。物理像素坐标)
+    fn push_clip(&mut self, x: f32, y: f32, w: f32, h: f32);
+    fn pop_clip(&mut self);
 }
 
 // ---------------------------------------------------------------------------
@@ -125,6 +129,13 @@ pub enum PaintCmd {
         count: usize,
         color: Color,
     },
+    PushClip {
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+    },
+    PopClip,
 }
 
 #[derive(Default)]
@@ -171,6 +182,19 @@ impl Painter for RecordingPainter {
             color,
         });
     }
+
+    fn push_clip(&mut self, x: f32, y: f32, w: f32, h: f32) {
+        self.cmds.push(PaintCmd::PushClip {
+            x: x as i32,
+            y: y as i32,
+            w: w as i32,
+            h: h as i32,
+        });
+    }
+
+    fn pop_clip(&mut self) {
+        self.cmds.push(PaintCmd::PopClip);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -178,7 +202,36 @@ impl Painter for RecordingPainter {
 // ---------------------------------------------------------------------------
 
 pub struct TinySkiaPainter<'a> {
-    pub pixmap: &'a mut Pixmap,
+    pixmap: &'a mut Pixmap,
+    /// 累积交集后的裁剪矩形栈(物理像素;top 即当前生效裁剪)
+    clips: Vec<[f32; 4]>,
+    /// 当前裁剪的 Mask(fill/stroke 用;无裁剪时 None 走快路径)
+    mask: Option<tiny_skia::Mask>,
+}
+
+impl<'a> TinySkiaPainter<'a> {
+    pub fn new(pixmap: &'a mut Pixmap) -> Self {
+        Self {
+            pixmap,
+            clips: Vec::new(),
+            mask: None,
+        }
+    }
+
+    fn rebuild_mask(&mut self) {
+        self.mask = self.clips.last().map(|[x, y, w, h]| {
+            let mut mask = tiny_skia::Mask::new(self.pixmap.width(), self.pixmap.height())
+                .expect("sv-shell: 创建裁剪 mask 失败");
+            let mut pb = PathBuilder::new();
+            if let Some(r) = tiny_skia::Rect::from_xywh(*x, *y, *w, *h) {
+                pb.push_rect(r);
+            }
+            if let Some(path) = pb.finish() {
+                mask.fill_path(&path, FillRule::Winding, true, Transform::identity());
+            }
+            mask
+        });
+    }
 }
 
 /// 字形覆盖度缓存(线程级):同一字形同字号只光栅一次。
@@ -321,7 +374,7 @@ impl Painter for TinySkiaPainter<'_> {
                 &paint,
                 FillRule::Winding,
                 Transform::identity(),
-                None,
+                self.mask.as_ref(),
             );
         }
     }
@@ -355,12 +408,26 @@ impl Painter for TinySkiaPainter<'_> {
                 width,
                 ..Stroke::default()
             };
-            self.pixmap
-                .stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+            self.pixmap.stroke_path(
+                &path,
+                &paint,
+                &stroke,
+                Transform::identity(),
+                self.mask.as_ref(),
+            );
         }
     }
 
     fn glyph_run(&mut self, glyphs: &[GlyphPos], color: Color) {
+        // 字形走手动混合,mask 不经过 fill_path——用裁剪矩形逐像素判界
+        let clip = self.clips.last().map(|c| {
+            [
+                c[0].floor() as i32,
+                c[1].floor() as i32,
+                (c[0] + c[2]).ceil() as i32,
+                (c[1] + c[3]).ceil() as i32,
+            ]
+        });
         let (pw, ph) = (self.pixmap.width(), self.pixmap.height());
         let data = self.pixmap.pixels_mut();
         for g in glyphs {
@@ -375,10 +442,36 @@ impl Painter for TinySkiaPainter<'_> {
                         if cov == 0 {
                             continue;
                         }
-                        blend_pixel(data, pw, ph, x0 + xx as i32, y0 + yy as i32, color, cov);
+                        let (px, py) = (x0 + xx as i32, y0 + yy as i32);
+                        if let Some([cx0, cy0, cx1, cy1]) = clip
+                            && (px < cx0 || px >= cx1 || py < cy0 || py >= cy1)
+                        {
+                            continue;
+                        }
+                        blend_pixel(data, pw, ph, px, py, color, cov);
                     }
                 }
             });
         }
+    }
+
+    fn push_clip(&mut self, x: f32, y: f32, w: f32, h: f32) {
+        let rect = match self.clips.last() {
+            Some([px, py, pw, ph]) => {
+                let x0 = x.max(*px);
+                let y0 = y.max(*py);
+                let x1 = (x + w).min(px + pw);
+                let y1 = (y + h).min(py + ph);
+                [x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0)]
+            }
+            None => [x, y, w, h],
+        };
+        self.clips.push(rect);
+        self.rebuild_mask();
+    }
+
+    fn pop_clip(&mut self) {
+        self.clips.pop();
+        self.rebuild_mask();
     }
 }

@@ -41,6 +41,9 @@ pub struct LeafElem {
 pub enum LeafKind {
     Text,
     Button,
+    /// `<input placeholder(...) bind_value(sig) on_input(...) on_submit(...) />`
+    /// (叶子无文本段:value 走绑定,不走内容)
+    Input,
 }
 
 pub struct Attr {
@@ -59,6 +62,13 @@ pub enum AttrKind {
     /// `on_focus(闭包)` / `on_blur(闭包)` → 合成进单一 `set_on_focus_change`
     OnFocus,
     OnBlur,
+    /// `placeholder("...")` → `__doc.set_placeholder(el, ...)`(仅 input)
+    Placeholder,
+    /// `bind_value(signal)` → effect 写 + `set_on_input` 读(仅 input)
+    BindValue,
+    /// `on_input(闭包)` / `on_submit(闭包)`(仅 input,签名 Fn(&str))
+    OnInput,
+    OnSubmit,
 }
 
 /// 文本段:字符串字面量或 `{表达式}` 插值

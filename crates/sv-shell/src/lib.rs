@@ -18,7 +18,10 @@ mod vello_backend;
 pub use paint::{
     GlyphKey, GlyphPos, PaintCmd, Painter, PainterCaps, RecordingPainter, TinySkiaPainter,
 };
-pub use render::{Placed, Rect, hit_click_target, layout_tree, paint_tree, render_frame};
+pub use render::{
+    Placed, Rect, caret_index_at, caret_x, hit_click_target, ime_caret_rect, input_caret_at,
+    layout_tree, paint_tree, render_frame,
+};
 #[cfg(feature = "backend-vello")]
 pub use vello_backend::{VelloPainter, VelloWin, render_frame_vello};
 
@@ -110,6 +113,8 @@ struct App {
     pressed: Option<ViewId>,
     /// 当前修饰键状态(winit 单独派发 ModifiersChanged,应用自存)
     mods: ModifiersState,
+    /// IME 会话开关镜像(焦点落在 accepts_text 节点时开;避免重复系统调用)
+    ime_allowed: bool,
     epoch: std::time::Instant,
     /// 上一帧的 (版本, 宽, 高, scale位):静止帧跳过重绘制
     last_frame_key: Option<(u64, u32, u32, u32)>,
@@ -169,6 +174,16 @@ impl App {
                     ws.window.request_redraw();
                 }
             }
+        }
+        // IME 候选窗跟随光标(调研 21:cursor_area 上报是候选窗定位的全部机制;
+        // 光标一动 bump → 重绘 → 重报,与版本键控布局缓存天然一致)
+        if self.ime_allowed
+            && let Some((cx, cy, cw, ch)) = ime_caret_rect(&self.doc, &self.placed, scale)
+        {
+            ws.window.set_ime_cursor_area(
+                winit::dpi::PhysicalPosition::new(cx as f64, cy as f64),
+                winit::dpi::PhysicalSize::new(cw as f64, ch as f64),
+            );
         }
         // 帧率计数(SV_SHOW_FPS=1):连续重绘,每 120 帧打印一次
         if self.show_fps {
@@ -242,6 +257,20 @@ impl App {
         }
     }
 
+    /// 焦点 ↔ IME 会话同步:焦点在 accepts_text 节点上才开 IME
+    /// (Masonry `accepts_text_input` 语义;开关有系统成本,镜像位去重)
+    fn sync_ime(&mut self) {
+        let Some(ws) = &self.win else { return };
+        let want = self.doc.focused().is_some_and(|id| {
+            self.doc
+                .read(|inner| inner.nodes.get(id).is_some_and(|n| n.accepts_text))
+        });
+        if want != self.ime_allowed {
+            ws.window.set_ime_allowed(want);
+            self.ime_allowed = want;
+        }
+    }
+
     fn click(&mut self) {
         let Some(ws) = &self.win else { return };
         let scale = ws.window.scale_factor();
@@ -256,6 +285,40 @@ impl App {
             handler();
         }
     }
+}
+
+/// arboard 剪贴板(懒建:首次用到才建实例;失败静默降级为无剪贴板)
+#[derive(Default)]
+struct ShellClipboard(Option<arboard::Clipboard>);
+
+impl ShellClipboard {
+    fn ensure(&mut self) -> Option<&mut arboard::Clipboard> {
+        if self.0.is_none() {
+            self.0 = arboard::Clipboard::new().ok();
+        }
+        self.0.as_mut()
+    }
+}
+
+impl sv_ui::Clipboard for ShellClipboard {
+    fn get_text(&mut self) -> Option<String> {
+        self.ensure()?.get_text().ok()
+    }
+    fn set_text(&mut self, text: &str) {
+        if let Some(c) = self.ensure() {
+            let _ = c.set_text(text.to_string());
+        }
+    }
+}
+
+/// 读系统剪贴板文本(业务按钮用;run_app 外调用需先 `sv_ui::set_clipboard`)
+pub fn clipboard_text() -> Option<String> {
+    sv_ui::clipboard_get()
+}
+
+/// 写系统剪贴板文本
+pub fn set_clipboard_text(text: &str) {
+    sv_ui::clipboard_set(text);
 }
 
 /// winit 键盘事件 → sv-ui 自有 [`sv_ui::KeyEvent`](ADR-4:事件类型归 sv-ui,
@@ -404,8 +467,26 @@ impl ApplicationHandler for App {
                     event.repeat,
                     self.mods,
                 ) {
-                    // 四段路由(冒泡/导航/激活/快捷键)在 sv-ui,离屏可测
+                    // 路由(冒泡/编辑/导航/激活/快捷键)在 sv-ui,离屏可测
                     sv_ui::dispatch_key(&self.doc, &e);
+                    // Tab/Esc 可能移焦进出输入框
+                    self.sync_ime();
+                }
+            }
+            WindowEvent::Ime(ime) => {
+                // 预编辑期间 winit 抑制 KeyboardInput,与编辑段无竞争
+                if let Some(id) = self.doc.focused()
+                    && self
+                        .doc
+                        .read(|inner| inner.nodes.get(id).is_some_and(|n| n.accepts_text))
+                {
+                    let ev = match ime {
+                        winit::event::Ime::Enabled => sv_ui::ImeEvent::Enabled,
+                        winit::event::Ime::Preedit(s, range) => sv_ui::ImeEvent::Preedit(s, range),
+                        winit::event::Ime::Commit(s) => sv_ui::ImeEvent::Commit(s),
+                        winit::event::Ime::Disabled => sv_ui::ImeEvent::Disabled,
+                    };
+                    sv_ui::handle_ime(&self.doc, id, ev);
                 }
             }
             WindowEvent::MouseInput {
@@ -435,15 +516,26 @@ impl ApplicationHandler for App {
                 }
                 // 点击设焦(Slint focus-on-click 同款);
                 // 空白区点击不清焦点(桌面惯例)
-                if let Some(id) = self
+                if let Some(p) = self
                     .placed
                     .iter()
                     .rev()
                     .find(|p| p.rect.contains(lx, ly) && self.doc.focusable(p.id))
-                    .map(|p| p.id)
+                    .copied()
                 {
-                    self.doc.focus(id);
+                    self.doc.focus(p.id);
+                    // 输入框:点击处换算字节偏移定光标
+                    if self.doc.read(|inner| {
+                        inner
+                            .nodes
+                            .get(p.id)
+                            .is_some_and(|n| n.kind == sv_ui::ElementKind::TextInput)
+                    }) {
+                        let byte = input_caret_at(&self.doc, &p, lx);
+                        self.doc.set_caret(p.id, byte, false);
+                    }
                 }
+                self.sync_ime();
                 self.click();
             }
             WindowEvent::MouseInput {
@@ -469,6 +561,8 @@ pub fn run_app(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let event_loop = EventLoop::new()?;
     let proxy = event_loop.create_proxy();
+    // 系统剪贴板接入编辑内核(Ctrl+C/X/V;测试路径注入假实现,互不相扰)
+    sv_ui::set_clipboard(ShellClipboard::default());
     let mut app = App {
         title: title.to_string(),
         doc: Doc::new(),
@@ -481,6 +575,7 @@ pub fn run_app(
         hovered: None,
         pressed: None,
         mods: ModifiersState::empty(),
+        ime_allowed: false,
         epoch: std::time::Instant::now(),
         last_frame_key: None,
         show_fps: std::env::var("SV_SHOW_FPS").is_ok_and(|v| v == "1"),
@@ -759,6 +854,135 @@ mod tests {
         let mut blurred = RecordingPainter::default();
         paint_tree(&doc, &placed, &mut blurred, 1.0);
         assert_eq!(blurred.cmds, plain.cmds, "失焦后命令流应回到无环原样");
+    }
+
+    /// TextInput 金样:焦点框命令流 = 默认底/边 → PushClip → Glyphs(值)→
+    /// 光标矩形 → PopClip;失焦无光标;选区时多一条高亮矩形
+    #[test]
+    fn input_paint_golden() {
+        use sv_ui::{Caret, EditOp, apply_edit};
+        let doc = Doc::new();
+        let (_, _scope) = create_root(|| {
+            let input = doc.create_text_input();
+            doc.append(doc.root(), input);
+            doc.set_placeholder(input, "请输入");
+        });
+        let input = doc.read(|inner| inner.nodes[inner.root].children[0]);
+        let placed = layout_tree(&doc, 480.0, 100.0);
+
+        // 未获焦 + 空值:底/边 + 裁剪内 placeholder 字形,无光标
+        let mut rec = RecordingPainter::default();
+        paint_tree(&doc, &placed, &mut rec, 1.0);
+        assert!(
+            matches!(
+                rec.cmds.as_slice(),
+                [
+                    PaintCmd::FillRect { .. },   // 默认底
+                    PaintCmd::StrokeRect { .. }, // 默认边
+                    PaintCmd::PushClip { .. },
+                    PaintCmd::Glyphs { .. }, // placeholder
+                    PaintCmd::PopClip,
+                ]
+            ),
+            "未获焦空值命令流:{:?}",
+            rec.cmds
+        );
+
+        // 获焦 + 键入 + 选区:多出选区矩形与光标,外加默认焦点环
+        doc.focus(input);
+        apply_edit(&doc, input, EditOp::InsertStr("你好".into()));
+        apply_edit(&doc, input, EditOp::Move(Caret::Left, true)); // Shift+Left 选"好"
+        let mut rec = RecordingPainter::default();
+        paint_tree(&doc, &placed, &mut rec, 1.0);
+        assert!(
+            matches!(
+                rec.cmds.as_slice(),
+                [
+                    PaintCmd::FillRect { .. },   // 默认底
+                    PaintCmd::StrokeRect { .. }, // 默认边
+                    PaintCmd::PushClip { .. },
+                    PaintCmd::FillRect { .. }, // 选区高亮
+                    PaintCmd::Glyphs { count: 2, .. },
+                    PaintCmd::FillRect { .. }, // 光标
+                    PaintCmd::PopClip,
+                    PaintCmd::StrokeRect { width: 2, .. }, // 默认焦点环
+                ]
+            ),
+            "获焦选区命令流:{:?}",
+            rec.cmds
+        );
+
+        // 预编辑:组合文本上屏前可见(字形数=值2+预编辑2),带 2px 下划线
+        sv_ui::handle_ime(
+            &doc,
+            input,
+            sv_ui::ImeEvent::Preedit("shi".into(), Some((3, 3))),
+        );
+        let mut rec = RecordingPainter::default();
+        paint_tree(&doc, &placed, &mut rec, 1.0);
+        let glyphs: usize = rec
+            .cmds
+            .iter()
+            .filter_map(|c| match c {
+                PaintCmd::Glyphs { count, .. } => Some(*count),
+                _ => None,
+            })
+            .sum();
+        assert_eq!(glyphs, 5, "显示串应为 值(2) + 预编辑(shi=3):{:?}", rec.cmds);
+    }
+
+    /// 光标几何互逆:任意 char 边界 caret_x → caret_index_at 回到原位;
+    /// caret_x 单调不减
+    #[test]
+    fn caret_geometry_roundtrip() {
+        use crate::render::{caret_index_at, caret_x};
+        let font = crate::font::ui_font();
+        let text = "a你b好c!";
+        let px = 16.0;
+        let mut last = -1.0f32;
+        for (i, _) in text.char_indices().chain([(text.len(), ' ')]) {
+            let x = caret_x(&font, text, px, i);
+            assert!(x >= last, "caret_x 应单调:{i}");
+            last = x;
+            assert_eq!(
+                caret_index_at(&font, text, px, x + 0.1),
+                i,
+                "caret_x({i}) 处点击应回到 {i}"
+            );
+        }
+        // 远超行尾 → 末尾;负数 → 0
+        assert_eq!(caret_index_at(&font, text, px, 10_000.0), text.len());
+        assert_eq!(caret_index_at(&font, text, px, -5.0), 0);
+    }
+
+    /// IME 光标区域上报:随键入右移、随 HiDPI 缩放、无焦点输入框时为 None
+    #[test]
+    fn ime_cursor_area_tracks_caret() {
+        use sv_ui::{EditOp, apply_edit};
+        let doc = Doc::new();
+        let (_, _scope) = create_root(|| {
+            let input = doc.create_text_input();
+            doc.append(doc.root(), input);
+        });
+        let input = doc.read(|inner| inner.nodes[inner.root].children[0]);
+        let placed = layout_tree(&doc, 480.0, 100.0);
+
+        assert!(
+            ime_caret_rect(&doc, &placed, 1.0).is_none(),
+            "无焦点时不应上报光标区域"
+        );
+        doc.focus(input);
+        let (x0, _, _, h) = ime_caret_rect(&doc, &placed, 1.0).unwrap();
+        apply_edit(&doc, input, EditOp::InsertStr("你好".into()));
+        let (x1, _, _, _) = ime_caret_rect(&doc, &placed, 1.0).unwrap();
+        assert!(x1 > x0, "键入后光标区域应右移:{x0} → {x1}");
+        assert!(h > 0.0);
+        // HiDPI:2x 缩放下 x 坐标同步放大
+        let (x2, _, _, _) = ime_caret_rect(&doc, &placed, 2.0).unwrap();
+        assert!(
+            (x2 - x1 * 2.0).abs() < 2.0,
+            "2x 缩放光标 x 应约为 1x 的两倍:{x1} vs {x2}"
+        );
     }
 
     #[test]

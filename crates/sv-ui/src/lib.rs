@@ -18,10 +18,15 @@ use sv_reactive::{RootHandle, create_root, derived, effect, on_cleanup, untrack}
 
 pub mod anim;
 pub mod focus;
+pub mod input;
 pub mod shortcuts;
 pub mod tasks;
 
 pub use focus::{Key, KeyEvent, Mods, dispatch_key};
+pub use input::{
+    Caret, Clipboard, EditOp, ImeEvent, InputState, apply_edit, clipboard_get, clipboard_set,
+    handle_ime, set_clipboard,
+};
 pub use shortcuts::{Shortcut, register_shortcut};
 
 /// 组件 children / 具名 snippet 的类型:接收 (doc, 挂载点) 的可复用构建闭包
@@ -192,6 +197,8 @@ pub enum ElementKind {
     Button,
     /// 复选框叶子(勾选状态在 [`ViewNode::checked`],label 复用 text 字段)
     Checkbox,
+    /// 单行文本输入(value 复用 text 字段,编辑态在 [`ViewNode::input`])
+    TextInput,
 }
 
 pub struct ViewNode {
@@ -217,6 +224,8 @@ pub struct ViewNode {
     pub on_key: Option<KeyHandler>,
     /// 焦点变化回调(true=获焦,false=失焦;`:focus` 伪类接线用)
     pub on_focus_change: Option<Rc<dyn Fn(bool)>>,
+    /// TextInput 的编辑态(其它元素恒 None;Box 控制节点大小预算)
+    pub input: Option<Box<input::InputState>>,
 }
 
 pub struct DocumentInner {
@@ -258,6 +267,7 @@ impl Doc {
             on_pointer_leave: None,
             on_key: None,
             on_focus_change: None,
+            input: None,
         });
         Doc(Rc::new(RefCell::new(DocumentInner {
             nodes,
@@ -311,8 +321,12 @@ impl Doc {
             checked: false,
             // 交互叶子默认可获焦(floem 教训:不自动设位是新手第一坑);
             // View/Text 用 set_focusable 手动开
-            focusable: matches!(kind, ElementKind::Button | ElementKind::Checkbox),
-            accepts_text: false,
+            focusable: matches!(
+                kind,
+                ElementKind::Button | ElementKind::Checkbox | ElementKind::TextInput
+            ),
+            // 获焦即开 IME 会话的位(Masonry accepts_text_input 同款)
+            accepts_text: kind == ElementKind::TextInput,
             style: Style::default(),
             parent: None,
             children: Vec::new(),
@@ -323,6 +337,7 @@ impl Doc {
             on_pointer_leave: None,
             on_key: None,
             on_focus_change: None,
+            input: (kind == ElementKind::TextInput).then(Default::default),
         });
         self.bump();
         id
@@ -343,6 +358,17 @@ impl Doc {
     /// label 用 [`Doc::set_text`] 设置,勾选状态用 [`Doc::set_checked`]
     pub fn create_checkbox(&self) -> ViewId {
         self.create(ElementKind::Checkbox, "")
+    }
+
+    /// 单行文本输入(value 复用 text 字段;focusable + accepts_text 默认开,
+    /// 编辑操作走 [`input::apply_edit`],IME 走 [`input::handle_ime`])
+    pub fn create_text_input(&self) -> ViewId {
+        self.create(ElementKind::TextInput, "")
+    }
+
+    /// 可变访问树(crate 内部:编辑内核用;借用期间不得调用户回调)
+    pub(crate) fn with_inner_mut<R>(&self, f: impl FnOnce(&mut DocumentInner) -> R) -> R {
+        f(&mut self.0.borrow_mut())
     }
 
     pub fn append(&self, parent: ViewId, child: ViewId) {
@@ -738,6 +764,112 @@ impl Doc {
         self.focus(prev);
     }
 
+    // -----------------------------------------------------------------------
+    // TextInput(调研 21;编辑操作在 input 模块,这里是树侧存取器)
+    // -----------------------------------------------------------------------
+
+    pub fn set_placeholder(&self, id: ViewId, placeholder: &str) {
+        {
+            let mut inner = self.0.borrow_mut();
+            let Some(input) = inner.nodes.get_mut(id).and_then(|n| n.input.as_deref_mut()) else {
+                return;
+            };
+            if input.placeholder == placeholder {
+                return;
+            }
+            input.placeholder = placeholder.to_string();
+        }
+        self.bump();
+    }
+
+    /// 输入框当前值(非 TextInput 返回 None)
+    pub fn input_value(&self, id: ViewId) -> Option<String> {
+        self.0
+            .borrow()
+            .nodes
+            .get(id)
+            .filter(|n| n.kind == ElementKind::TextInput)
+            .map(|n| n.text.clone())
+    }
+
+    /// bind:value 写端:相等剪枝;外部写入清预编辑(调研 21 风险 5 裁决)、
+    /// 光标钳制到新值内的 char 边界——防 effect↔回调回声
+    pub fn set_input_value(&self, id: ViewId, value: &str) {
+        {
+            let mut inner = self.0.borrow_mut();
+            let Some(n) = inner.nodes.get_mut(id) else {
+                return;
+            };
+            if n.kind != ElementKind::TextInput || n.text == value {
+                return;
+            }
+            n.text = value.to_string();
+            if let Some(input) = n.input.as_deref_mut() {
+                input.preedit = None;
+                input.cursor = snap_boundary(&n.text, input.cursor);
+                input.anchor = snap_boundary(&n.text, input.anchor);
+            }
+        }
+        self.bump();
+    }
+
+    /// 当前选中文本(无选区返回 Some("");非 TextInput 返回 None)
+    pub fn selected_text(&self, id: ViewId) -> Option<String> {
+        let inner = self.0.borrow();
+        let n = inner.nodes.get(id)?;
+        let input = n.input.as_deref()?;
+        let (lo, hi) = (
+            input.cursor.min(input.anchor),
+            input.cursor.max(input.anchor),
+        );
+        Some(n.text[lo..hi].to_string())
+    }
+
+    /// 定光标(渲染壳点击命中后换算字节偏移调用;extend = 拖选)
+    pub fn set_caret(&self, id: ViewId, byte: usize, extend: bool) {
+        let changed = {
+            let mut inner = self.0.borrow_mut();
+            let Some(n) = inner.nodes.get_mut(id) else {
+                return;
+            };
+            let text_len_snap = snap_boundary(&n.text, byte.min(n.text.len()));
+            let Some(input) = n.input.as_deref_mut() else {
+                return;
+            };
+            let before = (input.cursor, input.anchor);
+            input.cursor = text_len_snap;
+            if !extend {
+                input.anchor = input.cursor;
+            }
+            (input.cursor, input.anchor) != before
+        };
+        if changed {
+            self.bump();
+        }
+    }
+
+    pub fn set_on_input(&self, id: ViewId, f: impl Fn(&str) + 'static) {
+        {
+            let mut inner = self.0.borrow_mut();
+            let Some(input) = inner.nodes.get_mut(id).and_then(|n| n.input.as_deref_mut()) else {
+                return;
+            };
+            input.on_input = Some(Rc::new(f));
+        }
+        self.bump();
+    }
+
+    pub fn set_on_submit(&self, id: ViewId, f: impl Fn(&str) + 'static) {
+        {
+            let mut inner = self.0.borrow_mut();
+            let Some(input) = inner.nodes.get_mut(id).and_then(|n| n.input.as_deref_mut()) else {
+                return;
+            };
+            input.on_submit = Some(Rc::new(f));
+        }
+        self.bump();
+    }
+
     /// 调试:把树 dump 成缩进文本
     pub fn dump(&self) -> String {
         fn walk(inner: &DocumentInner, id: ViewId, depth: usize, out: &mut String) {
@@ -752,6 +884,7 @@ impl Doc {
                     if n.checked { "[x]" } else { "[ ]" },
                     n.text
                 )),
+                ElementKind::TextInput => out.push_str(&format!("{pad}[input \"{}\"]\n", n.text)),
             }
             for c in &n.children {
                 walk(inner, *c, depth + 1, out);
@@ -762,6 +895,15 @@ impl Doc {
         walk(&inner, inner.root, 0, &mut out);
         out
     }
+}
+
+/// 把字节偏移吸附到 ≤ 它的最近 char 边界(并钳制进字符串长度)
+fn snap_boundary(s: &str, i: usize) -> usize {
+    let mut i = i.min(s.len());
+    while !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
 }
 
 // ---------------------------------------------------------------------------

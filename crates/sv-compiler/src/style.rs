@@ -35,7 +35,7 @@ pub struct StyleSheet {
     pub elements: HashMap<String, ClassStyle>,
 }
 
-const ELEMENT_NAMES: &[&str] = &["view", "text", "button", "checkbox"];
+const ELEMENT_NAMES: &[&str] = &["view", "text", "button", "checkbox", "input"];
 const REM: f32 = 16.0;
 
 struct BlockParser<'a> {

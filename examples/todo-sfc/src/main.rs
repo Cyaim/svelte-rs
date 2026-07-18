@@ -128,4 +128,55 @@ mod tests {
             doc.dump()
         );
     }
+
+    /// R1 验收(调研 21):TodoMVC 键入新条目——Tab 落焦输入框、逐键键入、
+    /// Enter 提交入列表、bind:value 双向清空
+    #[test]
+    fn todo_keyboard_entry_acceptance() {
+        use sv_ui::{Key, KeyEvent, Mods, dispatch_key};
+        let doc = Doc::new();
+        let d = doc.clone();
+        let (_, _scope) = sv_reactive::create_root(move || todo(&d, d.root()));
+
+        // Tab:树序第一个 focusable 是输入框
+        dispatch_key(&doc, &KeyEvent::new(Key::Tab, Mods::NONE));
+        let focused = doc.focused().expect("Tab 应聚焦输入框");
+        assert!(
+            doc.read(|inner| inner.nodes[focused].kind == ElementKind::TextInput),
+            "树序第一个 focusable 应是 <input>"
+        );
+
+        // 键入"买 牛奶"(含空格与 CJK)+ Enter 提交
+        for (key, text) in [
+            (Key::Char('买'), "买"),
+            (Key::Space, " "),
+            (Key::Char('牛'), "牛"),
+            (Key::Char('奶'), "奶"),
+        ] {
+            let e = KeyEvent::new(key, Mods::NONE).with_text(text);
+            dispatch_key(&doc, &e);
+        }
+        assert_eq!(doc.input_value(focused).unwrap(), "买 牛奶");
+        dispatch_key(&doc, &KeyEvent::new(Key::Enter, Mods::NONE));
+        let dump = doc.dump();
+        assert!(dump.contains("1. 买 牛奶"), "提交应入列表:\n{dump}");
+        assert!(dump.contains("共 1 项"));
+        assert_eq!(
+            doc.input_value(focused).unwrap(),
+            "",
+            "提交后 bind:value 应清空输入框"
+        );
+
+        // IME 路径:预编辑 → 上屏 → Enter
+        sv_ui::handle_ime(
+            &doc,
+            focused,
+            sv_ui::ImeEvent::Preedit("xizao".into(), Some((5, 5))),
+        );
+        assert_eq!(doc.input_value(focused).unwrap(), "", "组合中不进 value");
+        sv_ui::handle_ime(&doc, focused, sv_ui::ImeEvent::Preedit(String::new(), None));
+        sv_ui::handle_ime(&doc, focused, sv_ui::ImeEvent::Commit("洗澡".into()));
+        dispatch_key(&doc, &KeyEvent::new(Key::Enter, Mods::NONE));
+        assert!(doc.dump().contains("2. 洗澡"), "\n{}", doc.dump());
+    }
 }

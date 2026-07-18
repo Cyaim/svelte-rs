@@ -11,6 +11,7 @@ members = [
     "examples/todo-sfc",
     "examples/showcase",
     "examples/membench",
+    "examples/input-demo",
 ]
 
 [workspace.package]

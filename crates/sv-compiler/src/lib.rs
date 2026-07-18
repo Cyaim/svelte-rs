@@ -495,6 +495,51 @@ let n = $state(0i32);
     }
 
     #[test]
+    fn input_bind_value_two_way() {
+        let src = r#"<script>
+let name = $state(String::new());
+</script>
+<view>
+  <input placeholder="请输入姓名" bind:value={name} />
+  <text>你好,{name}</text>
+</view>
+"#;
+        let code = compile_sv(src, "c").expect("应编译成功");
+        assert!(
+            code.contains("create_text_input"),
+            "<input> 应编译成 create_text_input:\n{code}"
+        );
+        assert!(
+            code.contains("set_placeholder"),
+            "placeholder 应落地:\n{code}"
+        );
+        assert!(
+            code.contains("set_input_value") && code.contains("set_on_input"),
+            "bind:value 应展开为 effect 写 + on_input 读:\n{code}"
+        );
+        syn::parse_file(&code).unwrap();
+    }
+
+    #[test]
+    fn input_events_compile() {
+        let src = r#"<script>
+let last = $state(String::new());
+</script>
+<view>
+  <input oninput={|v| last = v.to_string()} onsubmit={|v| last = format!("提交:{}", v)} />
+</view>
+"#;
+        let code = compile_sv(src, "c").expect("应编译成功");
+        assert!(code.contains("set_on_input"), "oninput:\n{code}");
+        assert!(code.contains("set_on_submit"), "onsubmit:\n{code}");
+        syn::parse_file(&code).unwrap();
+        // bind:value 用在非 input 上应报错
+        let bad = "<view><button bind:value={x}>钮</button></view>";
+        let err = compile_sv(bad, "c").unwrap_err();
+        assert!(err.message.contains("input"), "{err}");
+    }
+
+    #[test]
     fn on_keydown_legacy_form_rejected_with_hint() {
         let src = "<view on:keydown={|e| ()}>x</view>";
         let err = compile_sv(src, "c").unwrap_err();

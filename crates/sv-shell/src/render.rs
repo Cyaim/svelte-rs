@@ -119,6 +119,14 @@ fn measure(
                 side + s.padding.vertical() + bw * 2.0,
             )
         }
+        ElementKind::TextInput => {
+            // 宽不随内容变(业界一致);默认 200 逻辑 px,style.width 覆盖
+            let (_, line_h) = line_metrics(font, fs);
+            (
+                200.0 + s.padding.horizontal() + bw * 2.0,
+                line_h + s.padding.vertical() + bw * 2.0,
+            )
+        }
         ElementKind::View => {
             let mut main = 0.0f32;
             let mut cross = 0.0f32;
@@ -329,6 +337,32 @@ fn shape_text(font: &FontRef, text: &str, px: f32, ox: f32, oy: f32) -> Vec<Glyp
     out
 }
 
+/// 光标 x 偏移(逻辑 px,相对文本起点):`byte_idx` 前所有字符的 advance 和。
+/// 与 [`shape_text`] 同一 advance 逻辑——保证"画的"和"点的"一致
+pub fn caret_x(font: &FontRef, text: &str, px: f32, byte_idx: usize) -> f32 {
+    let charmap = font.charmap();
+    let gm = font.glyph_metrics(&[]).scale(px);
+    text[..byte_idx.min(text.len())]
+        .chars()
+        .map(|c| gm.advance_width(charmap.map(c)))
+        .sum()
+}
+
+/// 点击 x 坐标(相对文本起点)→ 最近 char 边界的字节偏移(与 caret_x 互逆)
+pub fn caret_index_at(font: &FontRef, text: &str, px: f32, x: f32) -> usize {
+    let charmap = font.charmap();
+    let gm = font.glyph_metrics(&[]).scale(px);
+    let mut pen = 0.0f32;
+    for (i, c) in text.char_indices() {
+        let adv = gm.advance_width(charmap.map(c));
+        if x < pen + adv / 2.0 {
+            return i;
+        }
+        pen += adv;
+    }
+    text.len()
+}
+
 /// 共享绘制遍历:对任意 Painter 后端发出同一命令流。
 /// 这是"可切换渲染后端"的支点(调研 14):后端只实现 Painter 三个动词
 pub fn paint_tree(doc: &Doc, placed: &[Placed], painter: &mut dyn Painter, scale: f32) {
@@ -407,6 +441,111 @@ pub fn paint_tree(doc: &Doc, placed: &[Placed], painter: &mut dyn Painter, scale
                         );
                     }
                 }
+                ElementKind::TextInput => {
+                    let Some(input) = n.input.as_deref() else {
+                        continue;
+                    };
+                    let focused = inner.focused == Some(p.id);
+                    // 默认底/边(style 设了 bg/border 则上面已统一画过,不重复)
+                    let radius = if s.corner_radius > 0.0 {
+                        s.corner_radius
+                    } else {
+                        4.0
+                    };
+                    if s.bg.is_none() {
+                        painter.fill_rounded_rect(
+                            x,
+                            y,
+                            w,
+                            h,
+                            radius * scale,
+                            with_opacity(Color::rgb(248, 248, 252), op),
+                        );
+                    }
+                    if s.border.is_none() {
+                        painter.stroke_rounded_rect(
+                            x,
+                            y,
+                            w,
+                            h,
+                            radius * scale,
+                            1.0 * scale,
+                            with_opacity(Color::rgb(200, 200, 212), op),
+                        );
+                    }
+
+                    let content_x = x + inset;
+                    let content_y = y + inset_top;
+                    let content_w = w - (s.padding.horizontal() + bw * 2.0) * scale;
+                    let content_h = h - (s.padding.vertical() + bw * 2.0) * scale;
+
+                    // 显示串 = value[..cursor] + 预编辑 + value[cursor..]
+                    // (仅绘制层拼接,ViewNode.text 不含半成品组合文本)
+                    let value = &n.text;
+                    let (display, caret_byte, preedit_range) =
+                        sv_ui::input::display_text(value, input);
+
+                    // 光标跟随:每帧无状态计算横向滚移(fs 已含 scale,均物理 px)
+                    let caret_px = caret_x(&font, &display, fs, caret_byte);
+                    let scroll = (caret_px - (content_w - 2.0 * scale)).max(0.0);
+                    let text_x = content_x - scroll;
+
+                    painter.push_clip(content_x - scale, y, content_w + 2.0 * scale, h);
+
+                    // 选区高亮(组合中隐藏选区,IME 惯例)
+                    if focused && input.preedit.is_none() && input.cursor != input.anchor {
+                        let lo = caret_x(&font, value, fs, input.cursor.min(input.anchor));
+                        let hi = caret_x(&font, value, fs, input.cursor.max(input.anchor));
+                        painter.fill_rounded_rect(
+                            text_x + lo,
+                            content_y,
+                            hi - lo,
+                            content_h,
+                            0.0,
+                            with_opacity(Color::rgba(60, 120, 255, 80), op),
+                        );
+                    }
+
+                    // 文本 / placeholder
+                    if display.is_empty() {
+                        if !input.placeholder.is_empty() {
+                            let run = shape_text(&font, &input.placeholder, fs, text_x, content_y);
+                            painter.glyph_run(&run, with_opacity(Color::rgb(152, 152, 166), op));
+                        }
+                    } else {
+                        let fg = with_opacity(resolve_fg(inner, p.id), op);
+                        let run = shape_text(&font, &display, fs, text_x, content_y);
+                        painter.glyph_run(&run, fg);
+                    }
+
+                    // 预编辑整段 2px 下划线(over-the-spot,候选窗是输入法自己的)
+                    if let Some((lo, hi)) = preedit_range {
+                        let x0 = caret_x(&font, &display, fs, lo);
+                        let x1 = caret_x(&font, &display, fs, hi);
+                        painter.fill_rounded_rect(
+                            text_x + x0,
+                            content_y + content_h - 2.0 * scale,
+                            x1 - x0,
+                            2.0 * scale,
+                            0.0,
+                            with_opacity(resolve_fg(inner, p.id), op),
+                        );
+                    }
+
+                    // 光标竖线(仅焦点时)
+                    if focused {
+                        painter.fill_rounded_rect(
+                            text_x + caret_px,
+                            content_y,
+                            (1.5 * scale).max(1.0),
+                            content_h,
+                            0.0,
+                            with_opacity(Color::rgb(255, 62, 0), op),
+                        );
+                    }
+
+                    painter.pop_clip();
+                }
                 ElementKind::View => {}
             }
         }
@@ -443,12 +582,59 @@ pub fn render_frame(doc: &Doc, phys_w: u32, phys_h: u32, scale: f32) -> (Pixmap,
 
     let mut pixmap = Pixmap::new(phys_w.max(1), phys_h.max(1)).expect("sv-shell: 创建 pixmap 失败");
     pixmap.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
-    let mut painter = TinySkiaPainter {
-        pixmap: &mut pixmap,
-    };
+    let mut painter = TinySkiaPainter::new(&mut pixmap);
     paint_tree(doc, &placed, &mut painter, scale);
 
     (pixmap, placed)
+}
+
+/// 点击命中 TextInput 时:窗口逻辑 x → 值内字节偏移(含 padding/border 内缩)。
+/// v0 忽略溢出滚移(光标跟随滚动是绘制层每帧无状态计算,点击场景多为未溢出)
+pub fn input_caret_at(doc: &Doc, p: &Placed, lx: f32) -> usize {
+    let font = ui_font();
+    doc.read(|inner| {
+        let Some(n) = inner.nodes.get(p.id) else {
+            return 0;
+        };
+        let fs = resolve_font_size(inner, p.id);
+        let bw = n.style.border.map(|b| b.width).unwrap_or(0.0);
+        let text_x = p.rect.x + n.style.padding.left + bw;
+        caret_index_at(&font, &n.text, fs, lx - text_x)
+    })
+}
+
+/// 焦点输入框的光标矩形(物理 px;IME 候选窗定位用)。
+/// 与绘制层同一 display/caret/scroll 计算——"画的"与"报的"一致
+pub fn ime_caret_rect(doc: &Doc, placed: &[Placed], scale: f32) -> Option<(f32, f32, f32, f32)> {
+    let font = ui_font();
+    doc.read(|inner| {
+        let id = inner.focused?;
+        let n = inner.nodes.get(id)?;
+        let input = n.input.as_deref()?;
+        let p = placed.iter().find(|p| p.id == id)?;
+        let fs = resolve_font_size(inner, id) * scale;
+        let bw = n.style.border.map(|b| b.width).unwrap_or(0.0);
+        let s = &n.style;
+        let (x, y, w, h) = (
+            p.rect.x * scale,
+            p.rect.y * scale,
+            p.rect.w * scale,
+            p.rect.h * scale,
+        );
+        let content_x = x + (s.padding.left + bw) * scale;
+        let content_y = y + (s.padding.top + bw) * scale;
+        let content_w = w - (s.padding.horizontal() + bw * 2.0) * scale;
+        let content_h = h - (s.padding.vertical() + bw * 2.0) * scale;
+        let (display, caret_byte, _) = sv_ui::input::display_text(&n.text, input);
+        let caret_px = caret_x(&font, &display, fs, caret_byte);
+        let scroll = (caret_px - (content_w - 2.0 * scale)).max(0.0);
+        Some((
+            content_x - scroll + caret_px,
+            content_y,
+            (1.5 * scale).max(1.0),
+            content_h,
+        ))
+    })
 }
 
 /// 命中测试(逻辑坐标),返回最上层可点击节点
