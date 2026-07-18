@@ -33,9 +33,15 @@ static FONT: OnceLock<Font> = OnceLock::new();
 /// 加载(并缓存)系统 UI 字体
 pub fn ui_font() -> &'static Font {
     FONT.get_or_init(|| {
+        // SV_FONT_SUBST=0 关闭 OpenType 替换表加载(内存实验;调研 15/16)
+        let load_subst = std::env::var("SV_FONT_SUBST").map(|v| v != "0").unwrap_or(true);
         for path in CANDIDATES {
             if let Ok(bytes) = std::fs::read(path) {
-                let settings = FontSettings { collection_index: 0, ..FontSettings::default() };
+                let settings = FontSettings {
+                    collection_index: 0,
+                    load_substitutions: load_subst,
+                    ..FontSettings::default()
+                };
                 if let Ok(font) = Font::from_bytes(bytes, settings) {
                     return font;
                 }

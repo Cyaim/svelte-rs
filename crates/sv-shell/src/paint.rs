@@ -26,8 +26,21 @@ pub struct GlyphPos {
     pub y: f32,
 }
 
+/// 后端能力协商(调研 15:为 3D 复合预留通道,避免 M2 设计堵路)
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PainterCaps {
+    /// 能否合成外部 wgpu 纹理(`<surface3d>` 的前置;CPU 后端恒 false)
+    pub external_texture: bool,
+    /// 能否做高斯模糊(box-shadow/backdrop-filter 的前置)
+    pub blur: bool,
+}
+
 /// 渲染后端要实现的最小指令集
 pub trait Painter {
+    /// 能力位(默认全 false;调用方按 caps 降级)
+    fn caps(&self) -> PainterCaps {
+        PainterCaps::default()
+    }
     fn fill_rounded_rect(&mut self, x: f32, y: f32, w: f32, h: f32, radius: f32, color: Color);
     fn stroke_rounded_rect(
         &mut self,
@@ -95,6 +108,43 @@ impl Painter for RecordingPainter {
 
 pub struct TinySkiaPainter<'a> {
     pub pixmap: &'a mut Pixmap,
+}
+
+/// 字形覆盖度 LRU(线程级):同一字形同字号只光栅一次。
+/// 上限按条目数粗控(每条 ≈ 字号² 字节;2048 条 @16px ≈ 1.3MB)
+mod glyph_cache {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    use fontdue::Metrics;
+    use fontdue::layout::GlyphRasterConfig;
+
+    const CAP: usize = 2048;
+
+    thread_local! {
+        static CACHE: RefCell<HashMap<GlyphRasterConfig, (Metrics, Vec<u8>)>> =
+            RefCell::new(HashMap::new());
+    }
+
+    pub fn with<R>(
+        font: &fontdue::Font,
+        key: GlyphRasterConfig,
+        f: impl FnOnce(&Metrics, &[u8]) -> R,
+    ) -> R {
+        CACHE.with(|c| {
+            let mut cache = c.borrow_mut();
+            if !cache.contains_key(&key) {
+                // 简化淘汰:超限整体清空(避免逐条 LRU 记账;
+                // 稳态 UI 的工作集远小于上限,清空是罕见事件)
+                if cache.len() >= CAP {
+                    cache.clear();
+                }
+                cache.insert(key, font.rasterize_config(key));
+            }
+            let (m, cov) = &cache[&key];
+            f(m, cov)
+        })
+    }
 }
 
 fn skia_color(c: Color) -> tiny_skia::Color {
@@ -171,24 +221,25 @@ impl Painter for TinySkiaPainter<'_> {
         let (pw, ph) = (self.pixmap.width(), self.pixmap.height());
         let data = self.pixmap.pixels_mut();
         for g in glyphs {
-            let (metrics, coverage) = font.rasterize_config(g.key);
-            for yy in 0..metrics.height {
-                for xx in 0..metrics.width {
-                    let cov = coverage[yy * metrics.width + xx];
-                    if cov == 0 {
-                        continue;
+            glyph_cache::with(font, g.key, |metrics, coverage| {
+                for yy in 0..metrics.height {
+                    for xx in 0..metrics.width {
+                        let cov = coverage[yy * metrics.width + xx];
+                        if cov == 0 {
+                            continue;
+                        }
+                        blend_pixel(
+                            data,
+                            pw,
+                            ph,
+                            g.x.round() as i32 + xx as i32,
+                            g.y.round() as i32 + yy as i32,
+                            color,
+                            cov,
+                        );
                     }
-                    blend_pixel(
-                        data,
-                        pw,
-                        ph,
-                        g.x.round() as i32 + xx as i32,
-                        g.y.round() as i32 + yy as i32,
-                        color,
-                        cov,
-                    );
                 }
-            }
+            });
         }
     }
 }
