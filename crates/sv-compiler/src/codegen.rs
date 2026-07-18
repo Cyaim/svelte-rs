@@ -801,6 +801,7 @@ impl Cg<'_> {
 
         // ---- 事件 / 绑定 / 附着 / 过渡 ----
         let mut autofocus = false;
+        let mut bind_scrolly: Option<TokenStream> = None;
         for attr in attrs {
             match attr.name.as_str() {
                 // Svelte 5 事件属性与遗留 on: 指令都认
@@ -969,6 +970,44 @@ impl Cg<'_> {
                     };
                     ts.extend(quote! { __doc.#setter(#el, #handler); });
                 }
+                // onscroll:滚动偏移变化回调(签名 Fn(f32, f32),新 (x, y))
+                "onscroll" => {
+                    let AttrValue::Expr(e) = &attr.value else {
+                        return Err(CompileError::at_offset(
+                            self.source,
+                            attr.offset,
+                            "事件处理器应为 {闭包表达式}(签名 |x: f32, y: f32|)",
+                        ));
+                    };
+                    let handler = self.expr(e, scope, true)?;
+                    ts.extend(quote! { __doc.set_on_scroll(#el, #handler); });
+                }
+                // bind:scrolly:Signal<f32> ↔ 纵向滚动偏移双向桥(调研 22)。
+                // 延后到事件循环末尾发射:桥会链式保留既有 on_scroll,
+                // 与 onscroll 共存时二者都生效
+                "bind:scrolly" => {
+                    let AttrValue::Expr(e) = &attr.value else {
+                        return Err(CompileError::at_offset(
+                            self.source,
+                            attr.offset,
+                            "bind:scrolly 的值应为 {反应式变量}",
+                        ));
+                    };
+                    let sig_ts = if let Ok(syn::Expr::Path(p)) = syn::parse_str::<syn::Expr>(&e.src)
+                        && p.path.segments.len() == 1
+                        && self
+                            .script
+                            .vars
+                            .contains(&p.path.segments[0].ident.to_string())
+                    {
+                        let id = p.path.segments[0].ident.clone();
+                        quote! { #id }
+                    } else {
+                        let x = self.expr(e, scope, false)?;
+                        quote! { #x }
+                    };
+                    bind_scrolly = Some(sig_ts);
+                }
                 // bind:checked:<checkbox> 双向绑定
                 "bind:checked" => {
                     if *tag != Tag::Checkbox {
@@ -1031,7 +1070,7 @@ impl Cg<'_> {
                         self.source,
                         attr.offset,
                         format!(
-                            "v0 的元素绑定支持 bind:checked/bind:value;`{name}` 需要对应控件/布局测量(见 SVELTE-SUPPORT)"
+                            "v0 的元素绑定支持 bind:checked/bind:value/bind:scrolly;`{name}` 需要对应控件/布局测量(见 SVELTE-SUPPORT)"
                         ),
                     ));
                 }
@@ -1085,6 +1124,7 @@ impl Cg<'_> {
                             | "onblur"
                             | "oninput"
                             | "onsubmit"
+                            | "onscroll"
                     ) =>
                 {
                     return Err(CompileError::at_offset(
@@ -1111,6 +1151,9 @@ impl Cg<'_> {
                 }
                 _ => {}
             }
+        }
+        if let Some(sig) = bind_scrolly {
+            ts.extend(quote! { ::sv_ui::bind_scroll_y(&__doc, #el, #sig); });
         }
         if autofocus {
             ts.extend(quote! { __doc.focus(#el); });

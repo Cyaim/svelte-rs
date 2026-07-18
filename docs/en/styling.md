@@ -145,7 +145,7 @@ The full accounting is the 91-item gap matrix in [../CSS-SUPPORT.md](../CSS-SUPP
 | ✅ implemented | 24 | tested, used by `examples/showcase` |
 | 📅 C2 scheduled | 19 | flex/grid via taffy, `@media`, transitions, `:focus`, `%` units, margin `auto`… |
 | ✏️ P2 degraded/compile-time form | 14 | `calc()` constant folding, descendant combinators, `oklch()`… |
-| ⏳ awaiting infrastructure | 18 | gradients/shadows/filters (vello backend), scrolling, fonts (parley)… |
+| ⏳ awaiting infrastructure | 17 | gradients/shadows/filters (vello backend), fonts (parley)… (scrolling landed in R2: `overflow: scroll` + wheel/scrollbar/clipping) |
 | ❌ never, with documented alternative | 16 | specificity, `!important`, `@layer`, pseudo-elements, runtime selectors, `:has()`… |
 
 C2 completion is defined as the "seamless migration line" for Svelte developers (44/91 implemented, covering the high-frequency surface).

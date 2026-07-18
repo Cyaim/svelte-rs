@@ -142,7 +142,7 @@
 | 锚点定位 `anchor()`(2024-25) | ⏳ | 桌面刚需(弹出菜单/tooltip),但要等定位系统;先用 mount+手动坐标 |
 | `inset` / 逻辑属性(`margin-inline` 系) | ✏️ P2 | 逻辑↔物理映射编译期做;RTL 支持时升级 |
 | `z-index` / stacking context | ⏳ | 场景树按文档序绘制;分层随渲染后端合成层设计 |
-| `overflow` / 滚动 | ⏳ | M1 路线图(滚动容器是独立工程) |
+| `overflow` / 滚动 | ✅ R2(调研 22) | `overflow: visible\|hidden\|scroll\|auto`(auto=scroll);滚轮 + 最近可滚祖先滚动链、裁剪(CPU 矩形交集/vello 图层)、滚动条 shell 合成绘制、`onscroll`/`bind:scrolly`、virtual_scroll 虚拟化桥;按轴拆分(overflow-x/y)与拖拽滚动条留 C2/档 B |
 | `writing-mode` 竖排 | ❌ | 随文本栈(Parley)再议,当前裁 |
 
 ## G. 排版

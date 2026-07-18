@@ -540,6 +540,37 @@ let last = $state(String::new());
     }
 
     #[test]
+    fn sfc_overflow_and_scroll_bindings_compile() {
+        let src = r#"<script>
+let y = $state(0.0f32);
+</script>
+<view style="overflow: scroll; height: 200" bind:scrolly={y}
+      onscroll={|_x, _y| ()}>
+  <text>长内容</text>
+</view>
+"#;
+        let code = compile_sv(src, "c").expect("应编译成功");
+        assert!(
+            code.contains("Overflow::Scroll"),
+            "overflow: scroll 应落 Style.overflow:\n{code}"
+        );
+        assert!(
+            code.contains("bind_scroll_y"),
+            "bind:scrolly 应编译成 bind_scroll_y:\n{code}"
+        );
+        assert!(
+            code.contains("set_on_scroll"),
+            "onscroll 应编译成 set_on_scroll:\n{code}"
+        );
+        syn::parse_file(&code).unwrap();
+        // overflow: auto 按 scroll 处理;非法值报错
+        let auto = compile_sv("<view style=\"overflow: auto\">x</view>", "c").unwrap();
+        assert!(auto.contains("Overflow::Scroll"));
+        let err = compile_sv("<view style=\"overflow: wrap\">x</view>", "c").unwrap_err();
+        assert!(err.message.contains("overflow"), "{err}");
+    }
+
+    #[test]
     fn on_keydown_legacy_form_rejected_with_hint() {
         let src = "<view on:keydown={|e| ()}>x</view>";
         let err = compile_sv(src, "c").unwrap_err();

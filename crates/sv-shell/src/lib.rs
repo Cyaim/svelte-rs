@@ -19,8 +19,9 @@ pub use paint::{
     GlyphKey, GlyphPos, PaintCmd, Painter, PainterCaps, RecordingPainter, TinySkiaPainter,
 };
 pub use render::{
-    Placed, Rect, caret_index_at, caret_x, hit_click_target, ime_caret_rect, input_caret_at,
-    layout_tree, paint_tree, render_frame,
+    Layout, Placed, Rect, ScrollArea, caret_index_at, caret_x, hit_click_target, ime_caret_rect,
+    input_caret_at, layout_full_cached, layout_tree, layout_tree_full, paint_scrollbars,
+    paint_tree, render_frame, route_wheel, scrollbar_thumb,
 };
 #[cfg(feature = "backend-vello")]
 pub use vello_backend::{VelloPainter, VelloWin, render_frame_vello};
@@ -214,7 +215,7 @@ impl App {
             .iter()
             .rev()
             .find(|p| {
-                p.rect.contains(lx, ly)
+                p.hit(lx, ly)
                     && (self.doc.pointer_enter_handler(p.id).is_some()
                         || self.doc.pointer_leave_handler(p.id).is_some())
             })
@@ -238,7 +239,7 @@ impl App {
             .iter()
             .rev()
             .find_map(|p| {
-                if !p.rect.contains(lx, ly) {
+                if !p.hit(lx, ly) {
                     return None;
                 }
                 self.doc
@@ -450,6 +451,43 @@ impl ApplicationHandler for App {
                 self.cursor = (position.x, position.y);
                 self.update_hover();
             }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let Some(ws) = &self.win else { return };
+                let scale = ws.window.scale_factor();
+                let (lx, ly) = (
+                    (self.cursor.0 / scale) as f32,
+                    (self.cursor.1 / scale) as f32,
+                );
+                // 行滚 ≈ 40 逻辑 px;触摸板 PixelDelta 直通(设备已平滑)
+                const LINE_PX: f32 = 40.0;
+                let (dx, dy) = match delta {
+                    winit::event::MouseScrollDelta::LineDelta(x, y) => (x * LINE_PX, y * LINE_PX),
+                    winit::event::MouseScrollDelta::PixelDelta(p) => {
+                        ((p.x / scale) as f32, (p.y / scale) as f32)
+                    }
+                };
+                let size = ws.window.inner_size();
+                let layout = layout_full_cached(
+                    &self.doc,
+                    size.width as f32 / scale as f32,
+                    size.height as f32 / scale as f32,
+                );
+                // winit 正值 = 内容向右/下移 → offset 减
+                if route_wheel(
+                    &self.doc,
+                    &layout.placed,
+                    &layout.scroll_areas,
+                    lx,
+                    ly,
+                    -dx,
+                    -dy,
+                )
+                .is_some()
+                {
+                    // 滚动后指针下的内容变了,重派发悬停
+                    self.update_hover();
+                }
+            }
             WindowEvent::ModifiersChanged(m) => self.mods = m.state(),
             WindowEvent::KeyboardInput {
                 event,
@@ -505,9 +543,7 @@ impl ApplicationHandler for App {
                     .placed
                     .iter()
                     .rev()
-                    .find(|p| {
-                        p.rect.contains(lx, ly) && self.doc.pointer_down_handler(p.id).is_some()
-                    })
+                    .find(|p| p.hit(lx, ly) && self.doc.pointer_down_handler(p.id).is_some())
                     .map(|p| p.id);
                 if let Some(id) = self.pressed
                     && let Some(h) = self.doc.pointer_down_handler(id)
@@ -520,7 +556,7 @@ impl ApplicationHandler for App {
                     .placed
                     .iter()
                     .rev()
-                    .find(|p| p.rect.contains(lx, ly) && self.doc.focusable(p.id))
+                    .find(|p| p.hit(lx, ly) && self.doc.focusable(p.id))
                     .copied()
                 {
                     self.doc.focus(p.id);
@@ -983,6 +1019,290 @@ mod tests {
             (x2 - x1 * 2.0).abs() < 2.0,
             "2x 缩放光标 x 应约为 1x 的两倍:{x1} vs {x2}"
         );
+    }
+
+    /// 建一个 200 高的滚动容器,内放 10 行 40 高 → 内容 400,max_y = 240
+    /// (padding 20×2 → 内区 160)
+    fn scroll_doc() -> (Doc, sv_ui::ViewId, Vec<sv_ui::ViewId>) {
+        let doc = Doc::new();
+        let mut rows = Vec::new();
+        let container = doc.create_view();
+        doc.append(doc.root(), container);
+        doc.update_style(container, |s| {
+            s.overflow = sv_ui::Overflow::Scroll;
+            s.width = Some(300.0);
+            s.height = Some(200.0);
+            s.padding = 20.0.into();
+        });
+        for i in 0..10 {
+            let row = doc.create_view();
+            doc.update_style(row, |s| s.height = Some(40.0));
+            let t = doc.create_text(&format!("行 {i}"));
+            doc.append(row, t);
+            doc.append(container, row);
+            rows.push(row);
+        }
+        (doc, container, rows)
+    }
+
+    #[test]
+    fn scroll_offset_shifts_children_and_clamps() {
+        let (doc, container, rows) = scroll_doc();
+        let layout = layout_tree_full(&doc, 480.0, 400.0);
+        let a = layout
+            .scroll_areas
+            .iter()
+            .find(|a| a.id == container)
+            .expect("应产出滚动区元数据");
+        assert_eq!(a.content.1, 400.0, "内容高 = 10 行 × 40");
+        assert_eq!(a.max.1, 240.0, "max = 400 − (200 − 40 padding)");
+
+        let row0_y = |placed: &[Placed]| {
+            placed
+                .iter()
+                .find(|p| p.id == rows[0])
+                .map(|p| p.rect.y)
+                .unwrap()
+        };
+        let y_before = row0_y(&layout.placed);
+        doc.set_scroll(container, 0.0, 100.0);
+        let layout2 = layout_tree_full(&doc, 480.0, 400.0);
+        assert_eq!(
+            row0_y(&layout2.placed),
+            y_before - 100.0,
+            "滚动 100 应把子行上移 100"
+        );
+        // 布局期钳制:超出 max 的 offset 不产生额外平移
+        doc.set_scroll(container, 0.0, 9999.0);
+        let layout3 = layout_tree_full(&doc, 480.0, 400.0);
+        assert_eq!(row0_y(&layout3.placed), y_before - 240.0);
+        // 子行携带裁剪矩形 = 容器 border-box
+        let p = layout3.placed.iter().find(|p| p.id == rows[0]).unwrap();
+        assert!(p.clip.is_some() && p.clip_depth == 1);
+    }
+
+    #[test]
+    fn clipped_child_not_hit() {
+        let (doc, container, rows) = scroll_doc();
+        for r in &rows {
+            doc.set_on_click(*r, || {});
+        }
+        let layout = layout_tree_full(&doc, 480.0, 400.0);
+        // 行 8 在视口(高 200)外
+        let p8 = layout.placed.iter().find(|p| p.id == rows[8]).unwrap();
+        let (cx, cy) = (p8.rect.x + p8.rect.w / 2.0, p8.rect.y + p8.rect.h / 2.0);
+        assert!(
+            hit_click_target(&doc, &layout.placed, cx, cy).is_none()
+                || hit_click_target(&doc, &layout.placed, cx, cy) != Some(rows[8]),
+            "视口外的行不应命中"
+        );
+        // 滚到底后行 8 进入视口,可命中
+        doc.set_scroll(container, 0.0, 240.0);
+        let layout2 = layout_tree_full(&doc, 480.0, 400.0);
+        let p8 = layout2.placed.iter().find(|p| p.id == rows[8]).unwrap();
+        let (cx, cy) = (p8.rect.x + p8.rect.w / 2.0, p8.rect.y + p8.rect.h / 2.0);
+        assert_eq!(
+            hit_click_target(&doc, &layout2.placed, cx, cy),
+            Some(rows[8]),
+            "滚入视口后应可命中"
+        );
+    }
+
+    #[test]
+    fn wheel_routes_and_chains_to_ancestor_at_edge() {
+        // 外层滚动容器嵌内层滚动容器
+        let doc = Doc::new();
+        let outer = doc.create_view();
+        doc.append(doc.root(), outer);
+        doc.update_style(outer, |s| {
+            s.overflow = sv_ui::Overflow::Scroll;
+            s.width = Some(300.0);
+            s.height = Some(200.0);
+        });
+        let inner = doc.create_view();
+        doc.append(outer, inner);
+        doc.update_style(inner, |s| {
+            s.overflow = sv_ui::Overflow::Scroll;
+            s.width = Some(300.0);
+            s.height = Some(100.0);
+        });
+        let filler = doc.create_view();
+        doc.update_style(filler, |s| {
+            s.width = Some(100.0);
+            s.height = Some(150.0); // inner 内容 150 > 视口 100 → max 50
+        });
+        doc.append(inner, filler);
+        let tall = doc.create_view();
+        doc.update_style(tall, |s| {
+            s.width = Some(100.0);
+            s.height = Some(400.0); // outer 内容 100+400 > 200 → 可滚
+        });
+        doc.append(outer, tall);
+
+        let layout = layout_tree_full(&doc, 480.0, 400.0);
+        // 指针悬在内层上:滚轮先消费内层
+        let consumed = route_wheel(
+            &doc,
+            &layout.placed,
+            &layout.scroll_areas,
+            50.0,
+            50.0,
+            0.0,
+            30.0,
+        );
+        assert_eq!(consumed, Some(inner));
+        assert_eq!(doc.scroll_of(inner).1, 30.0);
+        // 再滚 100:内层只剩 20 到边界,但 v0 语义为整段交给内层直到贴边,
+        // 下一次滚动才链到外层
+        route_wheel(
+            &doc,
+            &layout.placed,
+            &layout.scroll_areas,
+            50.0,
+            50.0,
+            0.0,
+            100.0,
+        );
+        assert_eq!(doc.scroll_of(inner).1, 50.0, "内层应贴边");
+        let consumed = route_wheel(
+            &doc,
+            &layout.placed,
+            &layout.scroll_areas,
+            50.0,
+            50.0,
+            0.0,
+            40.0,
+        );
+        assert_eq!(consumed, Some(outer), "内层到边后应链到外层祖先");
+        assert_eq!(doc.scroll_of(outer).1, 40.0);
+        // 反向同理:外层在顶、内层也在顶时,向上滚不消费
+        doc.set_scroll(inner, 0.0, 0.0);
+        doc.set_scroll(outer, 0.0, 0.0);
+        let consumed = route_wheel(
+            &doc,
+            &layout.placed,
+            &layout.scroll_areas,
+            50.0,
+            50.0,
+            0.0,
+            -10.0,
+        );
+        assert_eq!(consumed, None, "全部贴顶时向上滚不应有消费者");
+    }
+
+    /// 裁剪金样:滚动容器命令流 = 容器底色 → PushClip → 子行内容 → PopClip
+    /// → 滚动条 thumb;CPU 像素级:视口外行的文字不落像素
+    #[test]
+    fn scroll_clip_golden_and_cpu_pixels() {
+        let (doc, container, _rows) = scroll_doc();
+        doc.update_style(container, |s| s.bg = Some(sv_ui::Color::rgb(240, 240, 246)));
+        let layout = layout_tree_full(&doc, 480.0, 400.0);
+        let mut rec = RecordingPainter::default();
+        paint_tree(&doc, &layout.placed, &mut rec, 1.0);
+        paint_scrollbars(&doc, &layout.scroll_areas, &mut rec, 1.0);
+        let pushes = rec
+            .cmds
+            .iter()
+            .filter(|c| matches!(c, PaintCmd::PushClip { .. }))
+            .count();
+        let pops = rec
+            .cmds
+            .iter()
+            .filter(|c| matches!(c, PaintCmd::PopClip))
+            .count();
+        assert_eq!(pushes, 1, "一个滚动容器一层裁剪:{:?}", rec.cmds);
+        assert_eq!(pushes, pops, "push/pop 应配平");
+        assert!(
+            matches!(rec.cmds.last(), Some(PaintCmd::FillRect { .. })),
+            "最后应是滚动条 thumb:{:?}",
+            rec.cmds.last()
+        );
+
+        // CPU 像素:容器(y∈[0,200))外不应有文字像素(白底)
+        let (pixmap, _) = render_frame(&doc, 480, 400, 1.0);
+        let below_viewport_nonwhite = pixmap
+            .pixels()
+            .iter()
+            .enumerate()
+            .filter(|(i, p)| {
+                let y = i / 480;
+                y > 210 && p.red() < 250 // 210 留滚动条/抗锯齿余量
+            })
+            .count();
+        assert_eq!(
+            below_viewport_nonwhite, 0,
+            "视口下方不应有内容像素(裁剪生效)"
+        );
+    }
+
+    #[test]
+    fn scrollbar_thumb_geometry() {
+        // 内容未溢出 → 无 thumb
+        assert!(scrollbar_thumb(200.0, 200.0, 100.0, 0.0).is_none());
+        // 视口 200 / 内容 400 → thumb 半轨道;顶部在 0,滚到底贴底
+        let (pos, len) = scrollbar_thumb(200.0, 200.0, 400.0, 0.0).unwrap();
+        assert_eq!((pos, len), (0.0, 100.0));
+        let (pos, len) = scrollbar_thumb(200.0, 200.0, 400.0, 200.0).unwrap();
+        assert_eq!(pos + len, 200.0, "滚到底 thumb 应贴轨道底");
+        // 超长内容:thumb 不小于 24
+        let (_, len) = scrollbar_thumb(200.0, 200.0, 100_000.0, 0.0).unwrap();
+        assert_eq!(len, 24.0);
+    }
+
+    /// S5 验收:virtual_list + virtual_scroll 由 route_wheel 真实输入驱动
+    #[test]
+    fn virtual_list_driven_by_wheel() {
+        use sv_reactive::state;
+        let doc = Doc::new();
+        let offset = state(0usize);
+        let container = doc.create_view();
+        doc.append(doc.root(), container);
+        doc.update_style(container, |s| {
+            s.overflow = sv_ui::Overflow::Scroll;
+            s.width = Some(300.0);
+            s.height = Some(200.0);
+        });
+        let (_, _scope) = create_root(|| {
+            sv_ui::virtual_list(
+                &doc,
+                container,
+                || 100_000usize,
+                offset,
+                10,
+                |i| format!("行 {i}"),
+                |doc, parent, slot, _| {
+                    let t = doc.create_text("");
+                    doc.append(parent, t);
+                    bind_text(doc, t, move || slot.get().unwrap_or_default());
+                },
+            );
+            sv_ui::virtual_scroll(&doc, container, || 100_000usize, 20.0, offset);
+        });
+        let layout = layout_tree_full(&doc, 480.0, 400.0);
+        let a = layout
+            .scroll_areas
+            .iter()
+            .find(|a| a.id == container)
+            .unwrap();
+        assert_eq!(
+            a.content.1, 2_000_000.0,
+            "虚拟内容高 = 100k 行 × 20(content_override)"
+        );
+        // 滚轮滚 4000px → 行号 200,槽位内容更新
+        route_wheel(
+            &doc,
+            &layout.placed,
+            &layout.scroll_areas,
+            50.0,
+            50.0,
+            0.0,
+            4000.0,
+        );
+        assert_eq!(offset.get(), 200, "像素域应换算到行域");
+        assert!(doc.dump().contains("行 200"), "\n{}", doc.dump());
+        assert!(!doc.dump().contains("行 0\n"), "旧首行应被替换");
+        // 节点数不随滚动增长(虚拟化不变量)
+        assert!(doc.read(|inner| inner.nodes.len()) < 30);
     }
 
     #[test]

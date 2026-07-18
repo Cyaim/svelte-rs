@@ -108,6 +108,17 @@ pub struct Border {
     pub color: Color,
 }
 
+/// 溢出行为(调研 22:滚动是 View 的正交属性,不是新 ElementKind)
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Overflow {
+    #[default]
+    Visible,
+    /// 裁剪但不可滚
+    Hidden,
+    /// 裁剪 + 滚轮可滚(offset 真源在节点 [`ViewNode::scroll_x`]/`scroll_y`)
+    Scroll,
+}
+
 /// 鼠标光标(CSS cursor 子集)
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Cursor {
@@ -139,6 +150,9 @@ pub struct Style {
     /// 不透明度 0.0-1.0(过渡动画的载体)
     pub opacity: f32,
     pub cursor: Option<Cursor>,
+    /// 溢出行为(Hidden/Scroll 的 View 尺寸不被内容撑开,子内容按
+    /// scroll 偏移平移并裁剪;调研 22)
+    pub overflow: Overflow,
 }
 
 impl Default for Style {
@@ -157,6 +171,7 @@ impl Default for Style {
             corner_radius: 0.0,
             opacity: 1.0,
             cursor: None,
+            overflow: Overflow::Visible,
         }
     }
 }
@@ -180,6 +195,7 @@ impl PartialEq for Style {
             && self.corner_radius == other.corner_radius
             && self.opacity == other.opacity
             && self.cursor == other.cursor
+            && self.overflow == other.overflow
     }
 }
 
@@ -226,6 +242,14 @@ pub struct ViewNode {
     pub on_focus_change: Option<Rc<dyn Fn(bool)>>,
     /// TextInput 的编辑态(其它元素恒 None;Box 控制节点大小预算)
     pub input: Option<Box<input::InputState>>,
+    /// 滚动偏移(overflow: Scroll 的 View;真源在树上,与 checked 同款)
+    pub scroll_x: f32,
+    pub scroll_y: f32,
+    /// 滚动偏移变化回调(新 (x, y);virtual_scroll 桥与 onscroll 的载体)
+    pub on_scroll: Option<Rc<dyn Fn(f32, f32)>>,
+    /// 虚拟内容尺寸覆盖(virtual_scroll 用:滚动范围/滚动条比例按它算,
+    /// 不按实际子树尺寸)
+    pub content_override: Option<(f32, f32)>,
 }
 
 pub struct DocumentInner {
@@ -268,6 +292,10 @@ impl Doc {
             on_key: None,
             on_focus_change: None,
             input: None,
+            scroll_x: 0.0,
+            scroll_y: 0.0,
+            on_scroll: None,
+            content_override: None,
         });
         Doc(Rc::new(RefCell::new(DocumentInner {
             nodes,
@@ -338,6 +366,10 @@ impl Doc {
             on_key: None,
             on_focus_change: None,
             input: (kind == ElementKind::TextInput).then(Default::default),
+            scroll_x: 0.0,
+            scroll_y: 0.0,
+            on_scroll: None,
+            content_override: None,
         });
         self.bump();
         id
@@ -870,6 +902,74 @@ impl Doc {
         self.bump();
     }
 
+    // -----------------------------------------------------------------------
+    // 滚动系统(调研 22;offset 真源在节点内,Signal 只作可选桥)
+    // -----------------------------------------------------------------------
+
+    /// 写滚动偏移(负值钳到 0;上界钳制由布局侧调用方负责——内容尺寸
+    /// 只有布局知道)。相等剪枝;变化时先调 on_scroll 再 bump
+    pub fn set_scroll(&self, id: ViewId, x: f32, y: f32) {
+        let (x, y) = (x.max(0.0), y.max(0.0));
+        let cb = {
+            let mut inner = self.0.borrow_mut();
+            let Some(n) = inner.nodes.get_mut(id) else {
+                return;
+            };
+            if n.scroll_x == x && n.scroll_y == y {
+                return;
+            }
+            n.scroll_x = x;
+            n.scroll_y = y;
+            n.on_scroll.clone()
+        };
+        if let Some(cb) = cb {
+            cb(x, y);
+        }
+        self.bump();
+    }
+
+    pub fn scroll_of(&self, id: ViewId) -> (f32, f32) {
+        self.0
+            .borrow()
+            .nodes
+            .get(id)
+            .map_or((0.0, 0.0), |n| (n.scroll_x, n.scroll_y))
+    }
+
+    pub fn set_on_scroll(&self, id: ViewId, f: impl Fn(f32, f32) + 'static) {
+        {
+            let mut inner = self.0.borrow_mut();
+            let Some(n) = inner.nodes.get_mut(id) else {
+                return;
+            };
+            n.on_scroll = Some(Rc::new(f));
+        }
+        self.bump();
+    }
+
+    pub fn scroll_handler(&self, id: ViewId) -> Option<Rc<dyn Fn(f32, f32)>> {
+        self.0
+            .borrow()
+            .nodes
+            .get(id)
+            .and_then(|n| n.on_scroll.clone())
+    }
+
+    /// 虚拟内容尺寸覆盖(virtual_scroll 桥用;None = 按实际子树尺寸)
+    pub fn set_content_override(&self, id: ViewId, size: Option<(f32, f32)>) {
+        {
+            let mut inner = self.0.borrow_mut();
+            let Some(n) = inner.nodes.get_mut(id) else {
+                return;
+            };
+            if n.content_override == size {
+                return;
+            }
+            n.content_override = size;
+        }
+        self.bump();
+    }
+
     /// 调试:把树 dump 成缩进文本
     pub fn dump(&self) -> String {
         fn walk(inner: &DocumentInner, id: ViewId, depth: usize, out: &mut String) {
@@ -1101,6 +1201,45 @@ pub fn virtual_list<T: Clone + 'static>(
             let idx = off + i;
             slot.set(if idx < n { Some(item_at(idx)) } else { None });
         }
+    });
+}
+
+/// `bind:scrolly` 的编译目标:Signal ↔ 纵向滚动偏移双向桥。
+/// signal 写 → set_scroll(相等剪枝防回声);滚动(滚轮/程序)→ signal 更新。
+/// 既有 on_scroll 回调被链式保留(桥后挂;编译器保证 onscroll 先于本桥发射)
+pub fn bind_scroll_y(doc: &Doc, id: ViewId, sig: sv_reactive::Signal<f32>) {
+    let d = doc.clone();
+    effect(move || {
+        let y = sig.get();
+        let (x, _) = d.scroll_of(id);
+        d.set_scroll(id, x, y);
+    });
+    let prev = doc.scroll_handler(id);
+    doc.set_on_scroll(id, move |x, y| {
+        sig.set(y);
+        if let Some(p) = &prev {
+            p(x, y);
+        }
+    });
+}
+
+/// virtual_list 与真实滚动输入的合流桥(调研 22 §2.6):
+/// ① 维护容器的虚拟内容高度 `count × row_h`(滚动范围/滚动条比例由它决定);
+/// ② 滚动偏移(像素域)→ 行号(`offset` 槽信号)——像素到行域的唯一换算点。
+/// 用法:`overflow: Scroll` 容器(显式高)内放 [`virtual_list`] 槽位,再调本桥
+pub fn virtual_scroll(
+    doc: &Doc,
+    container: ViewId,
+    count: impl Fn() -> usize + 'static,
+    row_h: f32,
+    offset: sv_reactive::Signal<usize>,
+) {
+    let d = doc.clone();
+    effect(move || {
+        d.set_content_override(container, Some((0.0, count() as f32 * row_h)));
+    });
+    doc.set_on_scroll(container, move |_x, y| {
+        offset.set((y / row_h) as usize);
     });
 }
 

@@ -394,6 +394,34 @@ fn input_bind_value_roundtrip() {
 }
 
 // ---------------------------------------------------------------------------
+// 10. 滚动:bind_scroll_y 双向桥 + on_scroll 回调
+// ---------------------------------------------------------------------------
+
+#[test]
+fn scroll_bindings_roundtrip() {
+    let doc = Doc::new();
+    let y = state(0.0f32);
+    let log = state(0.0f32);
+    view! { &doc, doc.root() =>
+        <view
+            style(move |s| { s.overflow = sv_ui::Overflow::Scroll; s.height = Some(100.0); })
+            bind_scroll_y(y)
+            on_scroll(move |_x: f32, ny: f32| log.set(ny))
+        >
+            <text>"内容"</text>
+        </view>
+    };
+    let container = doc.read(|inner| inner.nodes[inner.root].children[0]);
+    // signal → 树
+    y.set(30.0);
+    assert_eq!(doc.scroll_of(container).1, 30.0, "signal 写应驱动滚动偏移");
+    // 树 → signal + 用户回调(桥链式保留 on_scroll,两者都生效)
+    doc.set_scroll(container, 0.0, 55.0);
+    assert_eq!(y.get(), 55.0, "滚动应写回 bind_scroll_y 的 signal");
+    assert_eq!(log.get(), 55.0, "滚动应同时触发用户 on_scroll 回调");
+}
+
+// ---------------------------------------------------------------------------
 // 补充:自闭合与空 label 按钮
 // ---------------------------------------------------------------------------
 
