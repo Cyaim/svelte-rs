@@ -244,7 +244,7 @@ fn compute_wrapped(
 /// 字形坐标按物理 px 产出
 #[allow(clippy::too_many_arguments)]
 fn shape_text_wrapped(
-    font: &FontRef,
+    font: crate::font::FontHandle,
     text: &str,
     px_logical: f32,
     wrap_w_logical: Option<f32>,
@@ -255,17 +255,18 @@ fn shape_text_wrapped(
     scale: f32,
 ) -> Vec<GlyphPos> {
     let px_phys = px_logical * scale;
-    let (_, line_h_phys) = line_metrics(font, px_phys);
-    let (_, _, lines) = measure_text_wrapped(font, text, px_logical, wrap_w_logical);
+    let fref = font.font_ref();
+    let (_, line_h_phys) = line_metrics(&fref, px_phys);
+    let (_, _, lines) = measure_text_wrapped(&fref, text, px_logical, wrap_w_logical);
     let mut out = Vec::new();
     for (li, r) in lines.iter().enumerate() {
         let line = text[r.clone()].trim_end_matches(['\n', '\r']);
         let x0 = match align {
             sv_ui::TextAlign::Left => ox,
             sv_ui::TextAlign::Center => {
-                ox + (box_w_phys - measure_text(font, line, px_phys).0) / 2.0
+                ox + (box_w_phys - measure_text(&fref, line, px_phys).0) / 2.0
             }
-            sv_ui::TextAlign::Right => ox + box_w_phys - measure_text(font, line, px_phys).0,
+            sv_ui::TextAlign::Right => ox + box_w_phys - measure_text(&fref, line, px_phys).0,
         };
         out.extend(shape_text(
             font,
@@ -665,14 +666,21 @@ fn effective_opacity(inner: &DocumentInner, id: ViewId) -> f32 {
 /// 简化线性排版:charmap 逐字映射 + advance 推进(无 kerning/连字)。
 /// `oy` 是文本框顶,基线 = oy + ascent;x/y 与 ox/oy 都是基线原点
 /// (CPU 端由光栅 Placement 换算位图左上角,GPU 端直接喂 draw_glyphs)
-fn shape_text(font: &FontRef, text: &str, px: f32, ox: f32, oy: f32) -> Vec<GlyphPos> {
+fn shape_text(
+    font: crate::font::FontHandle,
+    text: &str,
+    px: f32,
+    ox: f32,
+    oy: f32,
+) -> Vec<GlyphPos> {
     if text.is_empty() {
         return Vec::new();
     }
-    let (ascent, _) = line_metrics(font, px);
+    let fref = font.font_ref();
+    let (ascent, _) = line_metrics(&fref, px);
     let baseline = oy + ascent;
-    let charmap = font.charmap();
-    let gm = font.glyph_metrics(&[]).scale(px);
+    let charmap = fref.charmap();
+    let gm = fref.glyph_metrics(&[]).scale(px);
     let mut pen = ox;
     let mut out = Vec::new();
     for c in text.chars() {
@@ -681,7 +689,7 @@ fn shape_text(font: &FontRef, text: &str, px: f32, ox: f32, oy: f32) -> Vec<Glyp
         // 空白字符只推进 pen,不产出字形(与原 fontdue 过滤零宽位图语义一致)
         if !c.is_whitespace() {
             out.push(GlyphPos {
-                key: GlyphKey::new(id, px),
+                key: GlyphKey::new(font, id, px),
                 x: pen,
                 y: baseline,
                 id,
@@ -724,6 +732,7 @@ pub fn caret_index_at(font: &FontRef, text: &str, px: f32, x: f32) -> usize {
 /// 这是"可切换渲染后端"的支点(调研 14):后端只实现 Painter 三个动词
 pub fn paint_tree(doc: &Doc, placed: &[Placed], painter: &mut dyn Painter, scale: f32) {
     let font = ui_font();
+    let fh = crate::font::ui_font_handle();
     doc.read(|inner| {
         // 裁剪栈按 clip_depth 同步(Placed 是 DFS 序,深度每步至多 +1;
         // effective rect 已含祖先交集,push 交集幂等)
@@ -786,7 +795,7 @@ pub fn paint_tree(doc: &Doc, placed: &[Placed], painter: &mut dyn Painter, scale
                     let wrap_w =
                         (s.text_wrap == sv_ui::TextWrap::Wrap).then_some(content_w_logical);
                     let run = shape_text_wrapped(
-                        &font,
+                        fh,
                         &n.text,
                         fs_logical,
                         wrap_w,
@@ -796,14 +805,13 @@ pub fn paint_tree(doc: &Doc, placed: &[Placed], painter: &mut dyn Painter, scale
                         content_w_logical * scale,
                         scale,
                     );
-                    painter.glyph_run(&run, fg);
+                    painter.glyph_run(fh, &run, fg);
                 }
                 ElementKind::Button => {
                     let fg = with_opacity(s.fg.unwrap_or(Color::WHITE), op);
                     let (tw, th) = measure_text(&font, &n.text, fs);
-                    let run =
-                        shape_text(&font, &n.text, fs, x + (w - tw) / 2.0, y + (h - th) / 2.0);
-                    painter.glyph_run(&run, fg);
+                    let run = shape_text(fh, &n.text, fs, x + (w - tw) / 2.0, y + (h - th) / 2.0);
+                    painter.glyph_run(fh, &run, fg);
                 }
                 ElementKind::Checkbox => {
                     let boxc = with_opacity(s.bg.unwrap_or(Color::rgb(221, 221, 234)), op);
@@ -894,13 +902,17 @@ pub fn paint_tree(doc: &Doc, placed: &[Placed], painter: &mut dyn Painter, scale
                     // 文本 / placeholder
                     if display.is_empty() {
                         if !input.placeholder.is_empty() {
-                            let run = shape_text(&font, &input.placeholder, fs, text_x, content_y);
-                            painter.glyph_run(&run, with_opacity(Color::rgb(152, 152, 166), op));
+                            let run = shape_text(fh, &input.placeholder, fs, text_x, content_y);
+                            painter.glyph_run(
+                                fh,
+                                &run,
+                                with_opacity(Color::rgb(152, 152, 166), op),
+                            );
                         }
                     } else {
                         let fg = with_opacity(resolve_fg(inner, p.id), op);
-                        let run = shape_text(&font, &display, fs, text_x, content_y);
-                        painter.glyph_run(&run, fg);
+                        let run = shape_text(fh, &display, fs, text_x, content_y);
+                        painter.glyph_run(fh, &run, fg);
                     }
 
                     // 预编辑整段 2px 下划线(over-the-spot,候选窗是输入法自己的)

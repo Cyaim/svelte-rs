@@ -69,3 +69,32 @@ pub fn ui_font() -> FontRef<'static> {
             .expect("sv-shell: 字体字节已校验可解析,构建 FontRef 不应失败")
     })
 }
+
+/// 字体身份句柄(调研 24 P0"载体扩宽"):glyph run 从此带字体身份,
+/// 光栅缓存/GPU FontData 都按 `key` 索引。单字体阶段恒为内置 UI 字体
+/// (key=0);fontique 接管 fallback 后同帧可出现多个 key,载体无需再动
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct FontHandle {
+    pub key: u64,
+}
+
+impl FontHandle {
+    /// 按 key 解析 swash FontRef(CPU 光栅/度量用)
+    pub fn font_ref(&self) -> FontRef<'static> {
+        // 单字体阶段:key 0 即 UI 字体;fontique 落地后换注册表查询
+        debug_assert_eq!(self.key, 0, "多字体注册表随 fontique 落地(调研 24 P1)");
+        ui_font()
+    }
+
+    /// 原始字节 + collection index(GPU 端构造 peniko::FontData 用)
+    #[cfg_attr(not(feature = "backend-vello"), allow(dead_code))]
+    pub fn data(&self) -> (&'static [u8], u32) {
+        debug_assert_eq!(self.key, 0);
+        ui_font_data()
+    }
+}
+
+/// 内置 UI 字体的句柄(单字体阶段所有 run 共用)
+pub fn ui_font_handle() -> FontHandle {
+    FontHandle { key: 0 }
+}

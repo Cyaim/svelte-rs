@@ -15,6 +15,7 @@ mod render;
 #[cfg(feature = "backend-vello")]
 mod vello_backend;
 
+pub use font::{FontHandle, ui_font_handle};
 pub use paint::{
     GlyphKey, GlyphPos, PaintCmd, Painter, PainterCaps, RecordingPainter, TinySkiaPainter,
 };

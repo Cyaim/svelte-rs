@@ -21,7 +21,6 @@ use winit::window::Window;
 
 use sv_ui::{Color, Doc};
 
-use crate::font::ui_font_data;
 use crate::paint::{GlyphPos, Painter, PainterCaps};
 use crate::render::{Placed, paint_tree};
 
@@ -47,18 +46,15 @@ fn aa_config() -> AaConfig {
 
 pub struct VelloPainter {
     pub scene: Scene,
-    font: FontData,
+    /// 按字体身份缓存的 FontData(调研 24 P0:fallback 后同帧多字体)
+    fonts: std::collections::HashMap<u64, FontData>,
 }
 
 impl VelloPainter {
     pub fn new() -> Self {
-        let (bytes, index) = ui_font_data();
-        // 与 CPU 端 swash 共用同一份 'static 字节;Blob 只包一层 Arc<&[u8]>,零拷贝。
-        // glyph id 语义一致:swash FontRef::from_index(0) 与这里的 index 0 同一字体
-        let font = FontData::new(Blob::new(Arc::new(bytes)), index);
         Self {
             scene: Scene::new(),
-            font,
+            fonts: std::collections::HashMap::new(),
         }
     }
 }
@@ -119,12 +115,18 @@ impl Painter for VelloPainter {
         );
     }
 
-    fn glyph_run(&mut self, glyphs: &[GlyphPos], color: Color) {
+    fn glyph_run(&mut self, font: crate::font::FontHandle, glyphs: &[GlyphPos], color: Color) {
         let Some(first) = glyphs.first() else { return };
-        // 一段 run 内字号一致(paint_tree 按节点发射);px 语义 = font size
+        // 一段 run 内字号一致(paint_tree 按节点发射);px 语义 = font size。
+        // FontData 按字体身份缓存建一次:与 CPU 端 swash 共用同一份 'static
+        // 字节,Blob 只包一层 Arc<&[u8]>,零拷贝;glyph id 语义两端一致
+        let fd = self.fonts.entry(font.key).or_insert_with(|| {
+            let (bytes, index) = font.data();
+            FontData::new(Blob::new(Arc::new(bytes)), index)
+        });
         let px = first.px();
         self.scene
-            .draw_glyphs(&self.font)
+            .draw_glyphs(fd)
             .font_size(px)
             .brush(pcolor(color))
             .draw(
