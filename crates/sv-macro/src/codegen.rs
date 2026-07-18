@@ -82,9 +82,19 @@ fn gen_view(cx: &mut Cx, el: &ViewElem, parent: &Ident) -> TokenStream {
 
 fn gen_leaf(cx: &mut Cx, el: &LeafElem, parent: &Ident) -> TokenStream {
     let var = cx.fresh_el();
+    // input:无文本段(value 走 bind_value 绑定,不走内容)
+    if el.kind == LeafKind::Input {
+        let attrs = gen_attrs(&el.attrs, &var);
+        return quote! {
+            let #var = __doc.create_text_input();
+            __doc.append(#parent, #var);
+            #attrs
+        };
+    }
     let ctor = match el.kind {
         LeafKind::Text => Ident::new("create_text", Span::call_site()),
         LeafKind::Button => Ident::new("create_button", Span::call_site()),
+        LeafKind::Input => unreachable!(),
     };
     let (create, bind) = match static_text(&el.segments) {
         // 纯字面量:合并成静态文本 / 按钮 label,无绑定
@@ -163,6 +173,19 @@ fn gen_attrs(attrs: &[Attr], var: &Ident) -> TokenStream {
                     __doc.set_focusable(#var, true);
                     __doc.set_on_key(#var, #expr);
                 },
+                AttrKind::Placeholder => quote! { __doc.set_placeholder(#var, #expr); },
+                // bind_value:effect 写(signal→树)+ on_input 读(树→signal)
+                AttrKind::BindValue => quote! {
+                    {
+                        let __b_sig = #expr;
+                        let __b_doc = __doc.clone();
+                        let __b_el = #var;
+                        ::sv_reactive::effect(move || { __b_doc.set_input_value(__b_el, &__b_sig.get()); });
+                        __doc.set_on_input(#var, move |__v| __b_sig.set(__v.to_string()));
+                    }
+                },
+                AttrKind::OnInput => quote! { __doc.set_on_input(#var, #expr); },
+                AttrKind::OnSubmit => quote! { __doc.set_on_submit(#var, #expr); },
                 // 下方合成进单一 set_on_focus_change
                 AttrKind::OnFocus | AttrKind::OnBlur => TokenStream::new(),
             }

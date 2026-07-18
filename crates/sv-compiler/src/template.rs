@@ -13,6 +13,8 @@ pub enum Tag {
     Button,
     /// 复选框叶子(bind:checked 双向绑定的宿主)
     Checkbox,
+    /// 单行文本输入叶子(bind:value 双向绑定的宿主)
+    Input,
     /// 大写开头的标签 = 组件调用,如 `<TodoItem />`
     Component(String),
 }
@@ -291,6 +293,7 @@ impl<'a> Parser<'a> {
             "text" => Tag::Text,
             "button" => Tag::Button,
             "checkbox" => Tag::Checkbox,
+            "input" => Tag::Input,
             "" => return Err(self.err(off, "`<` 后应为标签名")),
             other if other.chars().next().unwrap().is_ascii_uppercase() => {
                 Tag::Component(other.to_string())
@@ -298,7 +301,9 @@ impl<'a> Parser<'a> {
             other => {
                 return Err(self.err(
                     off + 1,
-                    format!("未知标签 `{other}`(内置 view/text/button;组件用大写开头)"),
+                    format!(
+                        "未知标签 `{other}`(内置 view/text/button/checkbox/input;组件用大写开头)"
+                    ),
                 ));
             }
         };
@@ -340,9 +345,9 @@ impl<'a> Parser<'a> {
                 children,
                 offset: off,
             }),
-            Tag::Checkbox => {
+            Tag::Checkbox | Tag::Input => {
                 if !children.is_empty() {
-                    return Err(self.err(off, "`<checkbox>` 是叶子元素,请自闭合"));
+                    return Err(self.err(off, format!("`<{name}>` 是叶子元素,请自闭合")));
                 }
                 Ok(Node::Element {
                     tag,

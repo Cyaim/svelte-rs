@@ -326,7 +326,7 @@ impl Cg<'_> {
             } => self.emit_each(
                 EachParts {
                     list,
-                    pat: pat,
+                    pat,
                     pat_offset: *pat_offset,
                     index: index.as_deref(),
                     key: key.as_ref(),
@@ -490,6 +490,7 @@ impl Cg<'_> {
         let mut ts = match tag {
             Tag::View => quote! { let #el = __doc.create_view(); },
             Tag::Checkbox => quote! { let #el = __doc.create_checkbox(); },
+            Tag::Input => quote! { let #el = __doc.create_text_input(); },
             Tag::Text | Tag::Button => {
                 let segments: &[Segment] = match children.first() {
                     Some(Node::Text { segments }) => segments,
@@ -513,6 +514,7 @@ impl Cg<'_> {
             Tag::Text => "text",
             Tag::Button => "button",
             Tag::Checkbox => "checkbox",
+            Tag::Input => "input",
             Tag::Component(_) => unreachable!(),
         };
         if let Some(entry) = self.sheet.elements.get(tag_name) {
@@ -555,7 +557,8 @@ impl Cg<'_> {
         }
         for attr in attrs {
             match attr.name.as_str() {
-                "class" | "checked" | "@attach" | "autofocus" => {}
+                "class" | "checked" | "@attach" | "autofocus" | "placeholder" => {}
+                "value" if *tag == Tag::Input => {}
                 name if name == "onclick"
                     || name.starts_with("on")
                     || name.starts_with("style:")
@@ -869,6 +872,103 @@ impl Cg<'_> {
                         }
                     });
                 }
+                // <input> 专属:placeholder / value 单向 / bind:value 双向 /
+                // oninput / onsubmit(调研 21 §2.7,复刻 bind:checked 模板)
+                "placeholder" => {
+                    if *tag != Tag::Input {
+                        return Err(CompileError::at_offset(
+                            self.source,
+                            attr.offset,
+                            "placeholder 只能用在 <input> 上",
+                        ));
+                    }
+                    let AttrValue::Str { value, .. } = &attr.value else {
+                        return Err(CompileError::at_offset(
+                            self.source,
+                            attr.offset,
+                            "placeholder v0 只支持静态字符串",
+                        ));
+                    };
+                    ts.extend(quote! { __doc.set_placeholder(#el, #value); });
+                }
+                "value" if *tag == Tag::Input => {
+                    let AttrValue::Expr(e) = &attr.value else {
+                        return Err(CompileError::at_offset(
+                            self.source,
+                            attr.offset,
+                            "value 的值应为 {表达式}(静态初值也用 {\"...\"})",
+                        ));
+                    };
+                    let expr = self.expr(e, scope, false)?;
+                    ts.extend(quote! {
+                        {
+                            let __v_doc = __doc.clone();
+                            let __v_el = #el;
+                            ::sv_reactive::effect(move || { __v_doc.set_input_value(__v_el, &(#expr)); });
+                        }
+                    });
+                }
+                "bind:value" => {
+                    if *tag != Tag::Input {
+                        return Err(CompileError::at_offset(
+                            self.source,
+                            attr.offset,
+                            "bind:value 只能用在 <input> 上",
+                        ));
+                    }
+                    let AttrValue::Expr(e) = &attr.value else {
+                        return Err(CompileError::at_offset(
+                            self.source,
+                            attr.offset,
+                            "bind:value 的值应为 {反应式变量}",
+                        ));
+                    };
+                    let sig_ts = if let Ok(syn::Expr::Path(p)) = syn::parse_str::<syn::Expr>(&e.src)
+                        && p.path.segments.len() == 1
+                        && self
+                            .script
+                            .vars
+                            .contains(&p.path.segments[0].ident.to_string())
+                    {
+                        let id = p.path.segments[0].ident.clone();
+                        quote! { #id }
+                    } else {
+                        let x = self.expr(e, scope, false)?;
+                        quote! { #x }
+                    };
+                    ts.extend(quote! {
+                        {
+                            let __b_sig = #sig_ts;
+                            let __b_doc = __doc.clone();
+                            let __b_el = #el;
+                            ::sv_reactive::effect(move || { __b_doc.set_input_value(__b_el, &__b_sig.get()); });
+                            __doc.set_on_input(#el, move |__v| __b_sig.set(__v.to_string()));
+                        }
+                    });
+                }
+                "oninput" | "onsubmit" => {
+                    if *tag != Tag::Input {
+                        return Err(CompileError::at_offset(
+                            self.source,
+                            attr.offset,
+                            format!("{} 只能用在 <input> 上", attr.name),
+                        ));
+                    }
+                    let AttrValue::Expr(e) = &attr.value else {
+                        return Err(CompileError::at_offset(
+                            self.source,
+                            attr.offset,
+                            "事件处理器应为 {闭包表达式}(签名 |值: &str|)",
+                        ));
+                    };
+                    let handler = self.expr(e, scope, true)?;
+                    let setter = if attr.name == "oninput" {
+                        quote! { set_on_input }
+                    } else {
+                        quote! { set_on_submit }
+                    };
+                    ts.extend(quote! { __doc.#setter(#el, #handler); });
+                }
                 // bind:checked:<checkbox> 双向绑定
                 "bind:checked" => {
                     if *tag != Tag::Checkbox {
@@ -931,7 +1031,7 @@ impl Cg<'_> {
                         self.source,
                         attr.offset,
                         format!(
-                            "v0 的元素绑定支持 bind:checked;`{name}` 需要对应控件/布局测量(见 SVELTE-SUPPORT)"
+                            "v0 的元素绑定支持 bind:checked/bind:value;`{name}` 需要对应控件/布局测量(见 SVELTE-SUPPORT)"
                         ),
                     ));
                 }
@@ -983,13 +1083,15 @@ impl Cg<'_> {
                             | "onkeydown"
                             | "onfocus"
                             | "onblur"
+                            | "oninput"
+                            | "onsubmit"
                     ) =>
                 {
                     return Err(CompileError::at_offset(
                         self.source,
                         attr.offset,
                         format!(
-                            "v0 事件支持 onclick/onpointerenter/onpointerleave/onkeydown/onfocus/onblur,收到 `{name}`"
+                            "v0 事件支持 onclick/onpointerenter/onpointerleave/onkeydown/onfocus/onblur/oninput/onsubmit,收到 `{name}`"
                         ),
                     ));
                 }

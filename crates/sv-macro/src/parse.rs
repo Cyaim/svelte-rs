@@ -112,10 +112,11 @@ fn parse_element(input: ParseStream) -> Result<Node> {
         "view" => None,
         "text" => Some(LeafKind::Text),
         "button" => Some(LeafKind::Button),
+        "input" => Some(LeafKind::Input),
         other => {
             return Err(Error::new(
                 name.span(),
-                format!("未知标签 <{other}>:仅支持 <view>/<text>/<button>"),
+                format!("未知标签 <{other}>:仅支持 <view>/<text>/<button>/<input>"),
             ));
         }
     };
@@ -146,6 +147,12 @@ fn parse_element(input: ParseStream) -> Result<Node> {
         }
         Some(kind) => {
             let segments = parse_leaf_segments(input, &name)?;
+            if kind == LeafKind::Input && !segments.is_empty() {
+                return Err(Error::new(
+                    name.span(),
+                    "<input> 无内容(值走 bind_value 绑定),请自闭合",
+                ));
+            }
             Node::Leaf(LeafElem {
                 kind,
                 attrs,
@@ -172,11 +179,15 @@ fn parse_attrs(input: ParseStream) -> Result<Vec<Attr>> {
             "on_key_down" => AttrKind::OnKeyDown,
             "on_focus" => AttrKind::OnFocus,
             "on_blur" => AttrKind::OnBlur,
+            "placeholder" => AttrKind::Placeholder,
+            "bind_value" => AttrKind::BindValue,
+            "on_input" => AttrKind::OnInput,
+            "on_submit" => AttrKind::OnSubmit,
             other => {
                 return Err(Error::new(
                     name.span(),
                     format!(
-                        "未知属性 `{other}`:仅支持 style/on_click/on_key_down/on_focus/on_blur"
+                        "未知属性 `{other}`:仅支持 style/on_click/on_key_down/on_focus/on_blur/placeholder/bind_value/on_input/on_submit"
                     ),
                 ));
             }

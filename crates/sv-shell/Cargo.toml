@@ -13,6 +13,8 @@ softbuffer = "0.4"
 tiny-skia = "0.11"
 # 文本栈:懒解析 + 零拷贝(fontdue 急切解析 CJK ~173MB 的替代,调研 16/17)
 swash = "0.2.10"
+# 剪贴板(调研 21 §2.6:1Password 维护,Win/macOS/X11 原生;平台物放壳层)
+arboard = { version = "3", default-features = false }
 # GPU 后端(ADR-3b / 调研 14):默认关闭,backend-vello feature 启用。
 # wgpu 版本跟随 vello(0.9 → wgpu 29),经 vello::wgpu 再导出使用,不直接依赖
 vello = { version = "0.9", optional = true }

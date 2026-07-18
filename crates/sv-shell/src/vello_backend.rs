@@ -12,7 +12,7 @@
 
 use std::sync::Arc;
 
-use vello::kurbo::{Affine, RoundedRect, Stroke};
+use vello::kurbo::{Affine, Rect as KRect, RoundedRect, Stroke};
 use vello::peniko::{Blob, Fill, FontData};
 use vello::util::{RenderContext, RenderSurface};
 use vello::wgpu::{self, CurrentSurfaceTexture};
@@ -135,6 +135,17 @@ impl Painter for VelloPainter {
                     y: g.oy,
                 }),
             );
+    }
+
+    fn push_clip(&mut self, x: f32, y: f32, w: f32, h: f32) {
+        // 1:1 映射 vello 图层裁剪(嵌套自动取交集)
+        let rect = KRect::new(x as f64, y as f64, (x + w) as f64, (y + h) as f64);
+        self.scene
+            .push_clip_layer(Fill::NonZero, Affine::IDENTITY, &rect);
+    }
+
+    fn pop_clip(&mut self) {
+        self.scene.pop_layer();
     }
 }
 

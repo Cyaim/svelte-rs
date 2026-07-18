@@ -356,6 +356,44 @@ fn on_key_down_wires_focus_and_bubbles() {
 }
 
 // ---------------------------------------------------------------------------
+// 9. input:bind_value 双向 + on_submit + 编辑内核端到端
+// ---------------------------------------------------------------------------
+
+#[test]
+fn input_bind_value_roundtrip() {
+    use sv_ui::{EditOp, apply_edit};
+    let doc = Doc::new();
+    let name = state(String::new());
+    let submitted = state(String::new());
+    view! { &doc, doc.root() =>
+        <input
+            placeholder("请输入")
+            bind_value(name)
+            on_submit(move |v: &str| submitted.set(format!("提交:{v}")))
+        />
+        <text>"你好," {name.get()}</text>
+    };
+    let input = find_kind(&doc, ElementKind::TextInput)[0];
+
+    // 树 → signal:模拟键入
+    apply_edit(&doc, input, EditOp::InsertStr("世界".into()));
+    assert_eq!(name.get(), "世界", "键入应写回 signal");
+    assert!(doc.dump().contains("你好,世界"), "\n{}", doc.dump());
+
+    // signal → 树:响应式写入
+    name.set("svelte".into());
+    assert_eq!(doc.input_value(input).unwrap(), "svelte");
+
+    // Enter 提交(经 dispatch_key 编辑段)
+    doc.focus(input);
+    sv_ui::dispatch_key(
+        &doc,
+        &sv_ui::KeyEvent::new(sv_ui::Key::Enter, sv_ui::Mods::NONE),
+    );
+    assert_eq!(submitted.get(), "提交:svelte");
+}
+
+// ---------------------------------------------------------------------------
 // 补充:自闭合与空 label 按钮
 // ---------------------------------------------------------------------------
 

@@ -6,7 +6,7 @@
 
 use std::cell::Cell;
 
-use crate::{Doc, ElementKind, shortcuts};
+use crate::{Doc, ElementKind, input, shortcuts};
 
 /// 键(v0 裁剪面:~20 个具名键 + `Char` 兜底;漏配键由渲染壳丢弃)
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -144,6 +144,20 @@ pub fn dispatch_key(doc: &Doc, e: &KeyEvent) -> bool {
         cur = doc.parent(id);
     }
     if e.default_prevented() {
+        return true;
+    }
+
+    // ①.5 编辑段:焦点是 TextInput → 键翻译成 EditOp / 剪贴板 / Enter 提交
+    // (Tab/Esc 不消费,放行给导航段——文本框保留键盘可达性)
+    if let Some(id) = doc.focused()
+        && doc.read(|inner| {
+            inner
+                .nodes
+                .get(id)
+                .is_some_and(|n| n.kind == ElementKind::TextInput)
+        })
+        && input::route_editing_key(doc, id, e)
+    {
         return true;
     }
 
