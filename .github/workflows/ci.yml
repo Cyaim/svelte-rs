@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # 渲染测试要真实字体:Linux 走 Noto CJK(候选路径见 sv-shell/src/font.rs);
+      # mesa-vulkan-drivers 提供 lavapipe 软件 Vulkan,让 vello 测试在无 GPU 跑道上也能跑
+      - name: Install fonts & software Vulkan (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y fonts-noto-cjk mesa-vulkan-drivers
+
+      - name: Build (all targets)
+        run: cargo build --workspace --all-targets
+
+      - name: Test (CPU backend)
+        run: cargo test --workspace
+
+      # vello/wgpu 路径:无 adapter 的跑道自动跳过 GPU 测试(探测回退逻辑本身也被覆盖)
+      - name: Test (vello backend)
+        run: cargo test -p sv-shell --features backend-vello
+
+      - name: Build benchmark harness (vello)
+        run: cargo build -p membench --features backend-vello
+
+  lint:
+    name: fmt & clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: rustfmt
+        run: cargo fmt --check
+
+      # 现存告警在清理排期上,先不阻塞合并;失败会在 annotations 里可见
+      - name: clippy (informational)
+        run: cargo clippy --workspace --all-targets
+        continue-on-error: true
