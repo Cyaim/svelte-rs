@@ -169,10 +169,15 @@ fn parse_attrs(input: ParseStream) -> Result<Vec<Attr>> {
         let kind = match name.to_string().as_str() {
             "style" => AttrKind::Style,
             "on_click" => AttrKind::OnClick,
+            "on_key_down" => AttrKind::OnKeyDown,
+            "on_focus" => AttrKind::OnFocus,
+            "on_blur" => AttrKind::OnBlur,
             other => {
                 return Err(Error::new(
                     name.span(),
-                    format!("未知属性 `{other}`:仅支持 style(...) 与 on_click(...)"),
+                    format!(
+                        "未知属性 `{other}`:仅支持 style/on_click/on_key_down/on_focus/on_blur"
+                    ),
                 ));
             }
         };

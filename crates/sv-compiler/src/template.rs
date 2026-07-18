@@ -695,7 +695,7 @@ impl<'a> Parser<'a> {
         self.expect("}", "{#await 表达式} 结束")?;
         let pending = self.parse_nodes(&["{:then", "{:catch", "{/await}", "</"])?;
 
-        let mut read_arm =
+        let read_arm =
             |p: &mut Self, kw: &str| -> Result<(Option<String>, Vec<Node>), CompileError> {
                 p.pos += kw.len();
                 p.skip_ws();

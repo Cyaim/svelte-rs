@@ -308,6 +308,54 @@ fn style_in_each_row_captures_row_scope() {
 }
 
 // ---------------------------------------------------------------------------
+// 8. 键盘:on_key_down 自动设 focusable、on_focus/on_blur 合成、四段路由端到端
+// ---------------------------------------------------------------------------
+
+#[test]
+fn on_key_down_wires_focus_and_bubbles() {
+    use sv_ui::{Key, KeyEvent, Mods, dispatch_key};
+    let doc = Doc::new();
+    let count = state(0);
+    let focus_log = state(String::new());
+    view! { &doc, doc.root() =>
+        <view on_key_down(move |e: &sv_ui::KeyEvent| {
+            if e.key == sv_ui::Key::ArrowUp { count.update(|c| *c += 1); }
+        })>
+            <button
+                on_click(move || count.update(|c| *c += 10))
+                on_focus(move || focus_log.update(|s| s.push('+')))
+                on_blur(move || focus_log.update(|s| s.push('-')))
+            >"加十"</button>
+        </view>
+    };
+    // on_key_down 应自动把 view 设为 focusable(树序上它在 button 前)
+    let views = find_kind(&doc, ElementKind::View);
+    assert!(
+        views.iter().any(|v| doc.focusable(*v)),
+        "on_key_down 应自动 set_focusable"
+    );
+
+    // Tab 落到 view(树序第一个 focusable),ArrowUp 触发它的 on_key
+    dispatch_key(&doc, &KeyEvent::new(Key::Tab, Mods::NONE));
+    dispatch_key(&doc, &KeyEvent::new(Key::ArrowUp, Mods::NONE));
+    assert_eq!(count.get(), 1, "焦点节点应收到 ArrowUp");
+
+    // Tab 到 button:on_focus 回调触发;Enter 激活 on_click
+    dispatch_key(&doc, &KeyEvent::new(Key::Tab, Mods::NONE));
+    assert_eq!(focus_log.get(), "+", "button 获焦应触发 on_focus");
+    dispatch_key(&doc, &KeyEvent::new(Key::Enter, Mods::NONE));
+    assert_eq!(count.get(), 11, "Enter 应激活焦点按钮");
+
+    // 按钮上按 ArrowUp:事件沿父链冒泡到 view 的 on_key
+    dispatch_key(&doc, &KeyEvent::new(Key::ArrowUp, Mods::NONE));
+    assert_eq!(count.get(), 12, "未消费的键盘事件应冒泡到父节点");
+
+    // Esc 失焦:on_blur 回调触发
+    dispatch_key(&doc, &KeyEvent::new(Key::Escape, Mods::NONE));
+    assert_eq!(focus_log.get(), "+-", "失焦应触发 on_blur");
+}
+
+// ---------------------------------------------------------------------------
 // 补充:自闭合与空 label 按钮
 // ---------------------------------------------------------------------------
 

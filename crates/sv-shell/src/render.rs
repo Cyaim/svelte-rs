@@ -410,6 +410,28 @@ pub fn paint_tree(doc: &Doc, placed: &[Placed], painter: &mut dyn Painter, scale
                 ElementKind::View => {}
             }
         }
+
+        // 默认焦点环(调研 20:stroke 外扩 2px,宽 2px,accent 定色;
+        // 画在所有节点之后 = 永远在最上层;Painter 零新动词)
+        if let Some(fid) = inner.focused
+            && let Some(p) = placed.iter().find(|p| p.id == fid)
+        {
+            let m = 2.0 * scale;
+            let radius = inner
+                .nodes
+                .get(fid)
+                .map(|n| n.style.corner_radius)
+                .unwrap_or(0.0);
+            painter.stroke_rounded_rect(
+                p.rect.x * scale - m,
+                p.rect.y * scale - m,
+                p.rect.w * scale + m * 2.0,
+                p.rect.h * scale + m * 2.0,
+                (radius + 2.0) * scale,
+                2.0 * scale,
+                Color::rgb(255, 62, 0),
+            );
+        }
     });
 }
 

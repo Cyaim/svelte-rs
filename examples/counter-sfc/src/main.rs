@@ -52,4 +52,35 @@ mod tests {
         assert!(dump.contains("双倍 = 12"), "$derived 应联动:\n{dump}");
         assert!(dump.contains("超过 5 了!"), "{{#if}} 应翻转:\n{dump}");
     }
+
+    /// R1 键盘闭环(调研 20 验收):Tab 树序落焦 → Enter/Space 激活 →
+    /// Shift+Tab 环绕 → 按钮免费获得键盘可达性,零 .sv 改动
+    #[test]
+    fn sfc_counter_keyboard_roundtrip() {
+        use sv_ui::{Key, KeyEvent, Mods, dispatch_key};
+        let doc = Doc::new();
+        let d = doc.clone();
+        let (_, _scope) = sv_reactive::create_root(move || counter(&d, d.root()));
+
+        dispatch_key(&doc, &KeyEvent::new(Key::Tab, Mods::NONE));
+        let focused = doc.focused().expect("Tab 应带来焦点");
+        let label = doc.read(|inner| inner.nodes[focused].text.clone());
+        assert_eq!(label, "+1", "树序第一个 focusable 应是 +1 按钮");
+
+        dispatch_key(&doc, &KeyEvent::new(Key::Enter, Mods::NONE));
+        dispatch_key(&doc, &KeyEvent::new(Key::Space, Mods::NONE));
+        assert!(
+            doc.dump().contains("Count: 2"),
+            "Enter/Space 应各激活一次:\n{}",
+            doc.dump()
+        );
+
+        // Shift+Tab 从 +1 环绕到树序最后一个按钮(归零),Enter 归零
+        dispatch_key(&doc, &KeyEvent::new(Key::Tab, Mods::SHIFT));
+        let focused = doc.focused().unwrap();
+        let label = doc.read(|inner| inner.nodes[focused].text.clone());
+        assert_eq!(label, "归零", "Shift+Tab 应环绕到最后一个 focusable");
+        dispatch_key(&doc, &KeyEvent::new(Key::Enter, Mods::NONE));
+        assert!(doc.dump().contains("Count: 0"), "\n{}", doc.dump());
+    }
 }

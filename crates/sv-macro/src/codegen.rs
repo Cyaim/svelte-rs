@@ -150,7 +150,7 @@ fn gen_bind_text(var: &Ident, segments: &[Segment]) -> TokenStream {
 }
 
 fn gen_attrs(attrs: &[Attr], var: &Ident) -> TokenStream {
-    attrs
+    let mut ts: TokenStream = attrs
         .iter()
         .map(|attr| {
             let expr = &attr.expr;
@@ -158,9 +158,36 @@ fn gen_attrs(attrs: &[Attr], var: &Ident) -> TokenStream {
                 // 用户闭包表达式原样传给 bind_style(响应式:闭包里读 signal 会自动追踪)
                 AttrKind::Style => quote! { ::sv_ui::bind_style(&__doc, #var, #expr); },
                 AttrKind::OnClick => quote! { __doc.set_on_click(#var, #expr); },
+                // 自动设 focusable(不设位回调永远收不到事件,floem 教训)
+                AttrKind::OnKeyDown => quote! {
+                    __doc.set_focusable(#var, true);
+                    __doc.set_on_key(#var, #expr);
+                },
+                // 下方合成进单一 set_on_focus_change
+                AttrKind::OnFocus | AttrKind::OnBlur => TokenStream::new(),
             }
         })
-        .collect()
+        .collect();
+    let focus = attrs.iter().find(|a| a.kind == AttrKind::OnFocus);
+    let blur = attrs.iter().find(|a| a.kind == AttrKind::OnBlur);
+    if focus.is_some() || blur.is_some() {
+        let f = focus.map_or(quote! { let __uf = || {}; }, |a| {
+            let e = &a.expr;
+            quote! { let __uf = #e; }
+        });
+        let b = blur.map_or(quote! { let __ub = || {}; }, |a| {
+            let e = &a.expr;
+            quote! { let __ub = #e; }
+        });
+        ts.extend(quote! {
+            {
+                #f
+                #b
+                __doc.set_on_focus_change(#var, move |__fc| if __fc { __uf(); } else { __ub(); });
+            }
+        });
+    }
+    ts
 }
 
 fn gen_if(cx: &mut Cx, node: &IfNode, parent: &Ident) -> TokenStream {

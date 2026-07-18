@@ -9,7 +9,7 @@
 //!    保有原值,反复调用各拿新克隆。
 //! 代价:模板引用的普通变量需要 `Clone`(文档化约束)。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use proc_macro2::{TokenStream, TokenTree};
 use quote::{ToTokens, format_ident, quote};
@@ -555,7 +555,7 @@ impl Cg<'_> {
         }
         for attr in attrs {
             match attr.name.as_str() {
-                "class" | "checked" | "@attach" => {}
+                "class" | "checked" | "@attach" | "autofocus" => {}
                 name if name == "onclick"
                     || name.starts_with("on")
                     || name.starts_with("style:")
@@ -763,7 +763,41 @@ impl Cg<'_> {
             });
         }
 
+        // ---- 焦点回调(onfocus/onblur 合成进单一 set_on_focus_change,
+        //      与 :hover 的 __ue/__ul 合成同款,避免互相覆盖)----
+        let user_focus = attrs.iter().find(|a| a.name == "onfocus");
+        let user_blur = attrs.iter().find(|a| a.name == "onblur");
+        if user_focus.is_some() || user_blur.is_some() {
+            let bind =
+                |attr: Option<&Attr>, var: TokenStream| -> Result<TokenStream, CompileError> {
+                    match attr {
+                        Some(a) => {
+                            let AttrValue::Expr(e) = &a.value else {
+                                return Err(CompileError::at_offset(
+                                    self.source,
+                                    a.offset,
+                                    "事件处理器应为 {闭包表达式}",
+                                ));
+                            };
+                            let x = self.expr(e, scope, true)?;
+                            Ok(quote! { let #var = #x; })
+                        }
+                        None => Ok(quote! { let #var = || {}; }),
+                    }
+                };
+            let f_bind = bind(user_focus, quote! { __uf })?;
+            let b_bind = bind(user_blur, quote! { __ub })?;
+            ts.extend(quote! {
+                {
+                    #f_bind
+                    #b_bind
+                    __doc.set_on_focus_change(#el, move |__f| if __f { __uf(); } else { __ub(); });
+                }
+            });
+        }
+
         // ---- 事件 / 绑定 / 附着 / 过渡 ----
+        let mut autofocus = false;
         for attr in attrs {
             match attr.name.as_str() {
                 // Svelte 5 事件属性与遗留 on: 指令都认
@@ -780,6 +814,28 @@ impl Cg<'_> {
                         ));
                     }
                 },
+                // onkeydown:挂键盘回调并自动设 focusable(floem 教训:
+                // 不自动设位,回调永远收不到事件是新手第一坑)
+                "onkeydown" => match &attr.value {
+                    AttrValue::Expr(e) => {
+                        let handler = self.expr(e, scope, true)?;
+                        ts.extend(quote! {
+                            __doc.set_focusable(#el, true);
+                            __doc.set_on_key(#el, #handler);
+                        });
+                    }
+                    AttrValue::Str { .. } => {
+                        return Err(CompileError::at_offset(
+                            self.source,
+                            attr.offset,
+                            "事件处理器应为 {闭包表达式}(签名 |e: &KeyEvent|)",
+                        ));
+                    }
+                },
+                // 已在上方合成进 set_on_focus_change
+                "onfocus" | "onblur" => {}
+                // autofocus 布尔属性:建树末尾聚焦(多个时文档序最后者胜)
+                "autofocus" => autofocus = true,
                 "onpointerenter" | "onpointerleave" if has_hover => {}
                 "onpointerenter" | "onpointerleave" => match &attr.value {
                     AttrValue::Expr(e) => {
@@ -919,27 +975,43 @@ impl Cg<'_> {
                 }
                 name if name.starts_with("on")
                     && !name.starts_with("on:")
-                    && name != "onclick"
-                    && name != "onpointerenter"
-                    && name != "onpointerleave" =>
+                    && !matches!(
+                        name,
+                        "onclick"
+                            | "onpointerenter"
+                            | "onpointerleave"
+                            | "onkeydown"
+                            | "onfocus"
+                            | "onblur"
+                    ) =>
                 {
                     return Err(CompileError::at_offset(
                         self.source,
                         attr.offset,
                         format!(
-                            "v0 事件支持 onclick/onpointerenter/onpointerleave,收到 `{name}`(键盘事件待焦点链)"
+                            "v0 事件支持 onclick/onpointerenter/onpointerleave/onkeydown/onfocus/onblur,收到 `{name}`"
                         ),
                     ));
                 }
                 name if name.starts_with("on:") && name != "on:click" => {
+                    // SVELTE-SUPPORT 裁决:on: 是待移除的遗留形态,新事件只进属性形态
+                    let hint = match name {
+                        "on:keydown" => "键盘事件用属性形态 onkeydown={|e| ...}",
+                        "on:focus" => "焦点事件用属性形态 onfocus={...}",
+                        "on:blur" => "焦点事件用属性形态 onblur={...}",
+                        _ => "on: 是待移除的遗留形态,新事件只进属性形态(如 onclick)",
+                    };
                     return Err(CompileError::at_offset(
                         self.source,
                         attr.offset,
-                        format!("v0 只支持 on:click,收到 `{name}`"),
+                        format!("不支持 `{name}`:{hint}"),
                     ));
                 }
                 _ => {}
             }
+        }
+        if autofocus {
+            ts.extend(quote! { __doc.focus(#el); });
         }
 
         if *tag == Tag::View && !children.is_empty() {
