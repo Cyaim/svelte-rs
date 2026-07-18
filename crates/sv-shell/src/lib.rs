@@ -1054,8 +1054,9 @@ mod tests {
             .iter()
             .find(|a| a.id == container)
             .expect("应产出滚动区元数据");
-        assert_eq!(a.content.1, 400.0, "内容高 = 10 行 × 40");
-        assert_eq!(a.max.1, 240.0, "max = 400 − (200 − 40 padding)");
+        // taffy/CSS 口径:scrollable overflow 含容器 padding(400 + 20×2)
+        assert_eq!(a.content.1, 440.0, "内容高 = 10 行 × 40 + padding 40");
+        assert_eq!(a.max.1, 240.0, "max = scroll_height = 440 − 200");
 
         let row0_y = |placed: &[Placed]| {
             placed
@@ -1303,6 +1304,212 @@ mod tests {
         assert!(!doc.dump().contains("行 0\n"), "旧首行应被替换");
         // 节点数不随滚动增长(虚拟化不变量)
         assert!(doc.read(|inner| inner.nodes.len()) < 30);
+    }
+
+    // -----------------------------------------------------------------------
+    // 调研 23:taffy + 折行 + flex 验收
+    // -----------------------------------------------------------------------
+
+    use crate::render::measure_text_wrapped;
+
+    #[test]
+    fn text_wraps_at_container_width() {
+        let font = crate::font::ui_font();
+        let px = 16.0;
+        // 英文按空格断;限宽 = 最宽单词 + 1px,恰好每词一行
+        let one_word_w = ["hello", "world", "again"]
+            .iter()
+            .map(|s| crate::render::measure_text(&font, s, px).0)
+            .fold(0.0f32, f32::max);
+        let (w, h, lines) =
+            measure_text_wrapped(&font, "hello world again", px, Some(one_word_w + 1.0));
+        assert_eq!(lines.len(), 3, "三个词应折成三行:{lines:?}");
+        assert!(w <= one_word_w + 1.0);
+        let (_, line_h) = (0.0, h / 3.0);
+        assert!(line_h > 0.0);
+        // 单行模式(NoWrap)不折
+        let (_, _, lines) = measure_text_wrapped(&font, "hello world again", px, None);
+        assert_eq!(lines.len(), 1);
+    }
+
+    #[test]
+    fn cjk_wraps_without_spaces_and_respects_punct() {
+        let font = crate::font::ui_font();
+        let px = 16.0;
+        let two_cjk_w = crate::render::measure_text(&font, "中文", px).0;
+        // 无空格的 CJK 应能逐字断行
+        let (_, _, lines) = measure_text_wrapped(&font, "中文换行测试", px, Some(two_cjk_w + 0.5));
+        assert_eq!(lines.len(), 3, "六字限宽两字应三行:{lines:?}");
+        // 标点禁则:句号不能落行首(UAX #14:"。"跟随前字)
+        let text = "你好。世界";
+        let (_, _, lines) = measure_text_wrapped(&font, text, px, Some(two_cjk_w + 0.5));
+        for r in &lines {
+            assert!(
+                !text[r.clone()].starts_with('。'),
+                "行首不应出现句号:{lines:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn long_token_force_breaks() {
+        let font = crate::font::ui_font();
+        let px = 16.0;
+        let w4 = crate::render::measure_text(&font, "abcd", px).0;
+        let (w, _, lines) = measure_text_wrapped(
+            &font,
+            "https://example.com/very/long/url",
+            px,
+            Some(w4 + 0.5),
+        );
+        assert!(lines.len() > 3, "超长不可断段应按字符强制断:{lines:?}");
+        assert!(w <= w4 + 0.5 + 0.01, "强制断后行宽不应超限:{w}");
+    }
+
+    /// 两趟测量协议:MaxContent(不限宽)= 单行固有宽;
+    /// Definite(限宽)= 折行后高度增长
+    #[test]
+    fn wrapped_measure_two_pass() {
+        let doc = Doc::new();
+        let (_, _scope) = create_root(|| {
+            let container = doc.create_view();
+            doc.append(doc.root(), container);
+            doc.update_style(container, |s| s.width = Some(120.0));
+            let t = doc.create_text("这是一段需要在一百二十像素宽的容器里折成多行的长文本");
+            doc.append(container, t);
+        });
+        let placed = layout_tree(&doc, 480.0, 400.0);
+        let text_p = placed.last().unwrap();
+        let font = crate::font::ui_font();
+        let (_, single_h) = crate::render::measure_text(&font, "字", 16.0);
+        assert!(
+            text_p.rect.h > single_h * 2.5,
+            "长文本在 120px 容器内应折成多行(高 {} vs 单行 {single_h})",
+            text_p.rect.h
+        );
+        assert!(text_p.rect.w <= 120.0 + 0.5, "折行后宽不超容器");
+    }
+
+    #[test]
+    fn flex_grow_and_justify_and_align() {
+        let doc = Doc::new();
+        let container = doc.create_view();
+        doc.append(doc.root(), container);
+        doc.update_style(container, |s| {
+            s.direction = sv_ui::Direction::Row;
+            s.width = Some(300.0);
+            s.height = Some(100.0);
+        });
+        let fixed = doc.create_view();
+        doc.update_style(fixed, |s| {
+            s.width = Some(100.0);
+            s.height = Some(20.0);
+        });
+        doc.append(container, fixed);
+        let grower = doc.create_view();
+        doc.update_style(grower, |s| {
+            s.flex_grow = 1.0;
+            s.height = Some(20.0);
+        });
+        doc.append(container, grower);
+
+        let placed = layout_tree(&doc, 480.0, 400.0);
+        let rect = |id| placed.iter().find(|p| p.id == id).map(|p| p.rect).unwrap();
+        assert_eq!(rect(grower).w, 200.0, "flex-grow 应吃掉剩余 200px");
+
+        // justify-content: space-between —— 两个定宽子项分居两端
+        doc.update_style(container, |s| {
+            s.justify_content = sv_ui::JustifyContent::SpaceBetween;
+        });
+        doc.update_style(grower, |s| {
+            s.flex_grow = 0.0;
+            s.width = Some(50.0);
+            s.height = Some(20.0);
+        });
+        let placed = layout_tree(&doc, 480.0, 400.0);
+        let rect = |id| placed.iter().find(|p| p.id == id).map(|p| p.rect).unwrap();
+        assert_eq!(rect(fixed).x, 0.0);
+        assert_eq!(
+            rect(grower).x + rect(grower).w,
+            300.0,
+            "space-between 尾项应贴容器右缘"
+        );
+
+        // align-items: center —— 交叉轴居中
+        doc.update_style(container, |s| {
+            s.align_items = sv_ui::AlignItems::Center;
+        });
+        let placed = layout_tree(&doc, 480.0, 400.0);
+        let r = placed.iter().find(|p| p.id == fixed).unwrap().rect;
+        assert_eq!(r.y, 40.0, "100 高容器内 20 高子项应居中于 y=40");
+    }
+
+    /// gap 语义钉住(调研 23 §2.2):nowrap 单轴与旧引擎等价;
+    /// wrap 后交叉轴 gap 也生效(taffy/CSS 双轴语义,与旧引擎不同,记录在案)
+    #[test]
+    fn gap_cross_axis_semantics_pinned() {
+        let doc = Doc::new();
+        let container = doc.create_view();
+        doc.append(doc.root(), container);
+        doc.update_style(container, |s| {
+            s.direction = sv_ui::Direction::Row;
+            s.gap = 10.0;
+            s.width = Some(110.0);
+            s.flex_wrap = sv_ui::FlexWrap::Wrap;
+        });
+        let mut items = Vec::new();
+        for _ in 0..2 {
+            let it = doc.create_view();
+            doc.update_style(it, |s| {
+                s.width = Some(60.0);
+                s.height = Some(20.0);
+            });
+            doc.append(container, it);
+            items.push(it);
+        }
+        let placed = layout_tree(&doc, 480.0, 400.0);
+        let r = |id| placed.iter().find(|p| p.id == id).map(|p| p.rect).unwrap();
+        // 60+10+60 > 110 → 换行;第二项 y = 20(首行高)+ 10(交叉轴 gap)
+        assert_eq!(r(items[1]).y, 30.0, "wrap 后交叉轴 gap 应生效(双轴语义)");
+        assert_eq!(r(items[1]).x, 0.0);
+    }
+
+    /// 调研 23 §2.6 触发线探针:30k 节点全量档 build+layout 的 2ms 触发线
+    /// **已确认越线**(2026-07-18 实测 release ≈130–160ms:taffy 裸 compute
+    /// ~45ms + 叶子 measure ~70ms + build ~30ms)→ 按预案启动"Blitz 式低层
+    /// trait 增量布局"升级路径(档 B 欠账,2–3 人周);全量大树的档 A 出路
+    /// 仍是虚拟化(1M 虚拟化 p99=5.56ms 达标,ADR-9)。
+    /// 这里只设灾难性回归上限;`cargo test --release -- layout_30k --nocapture` 看真值
+    #[test]
+    fn layout_30k_full_tree_budget_probe() {
+        let doc = Doc::new();
+        let (_, _scope) = create_root(|| {
+            for _ in 0..6000 {
+                let row = doc.create_view();
+                doc.update_style(row, |s| s.direction = sv_ui::Direction::Row);
+                doc.append(doc.root(), row);
+                for j in 0..5 {
+                    let t = doc.create_text(if j % 2 == 0 { "标签" } else { "value" });
+                    doc.append(row, t);
+                }
+            }
+        });
+        let t = std::time::Instant::now();
+        let _ = layout_tree_full(&doc, 1920.0, 1080.0);
+        let cold = t.elapsed().as_secs_f64() * 1000.0;
+        let t = std::time::Instant::now();
+        let layout = layout_tree_full(&doc, 1920.0, 1080.0);
+        let ms = t.elapsed().as_secs_f64() * 1000.0;
+        println!(
+            "[probe] 30k 全量 build+layout:冷 {cold:.2}ms / 热 {ms:.2}ms(2ms 触发线已越,增量升级列档 B)"
+        );
+        assert!(layout.placed.len() > 30_000);
+        if cfg!(not(debug_assertions)) {
+            assert!(
+                ms <= 500.0,
+                "30k 全量布局 {ms:.2}ms 出现灾难性回归(基线 ~130–160ms)"
+            );
+        }
     }
 
     #[test]

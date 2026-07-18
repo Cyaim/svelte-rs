@@ -143,7 +143,7 @@ view { color: #223344; }  /* 下面所有 text 未覆盖时都继承这个色 */
 | 状态 | 数量 | 含义 |
 |---|---|---|
 | ✅ 已实现 | 24 | 有测试,`examples/showcase` 在用 |
-| 📅 C2 已排期 | 19 | flex/grid 走 taffy、`@media`、transition、`:focus`、`%` 单位、margin `auto`… |
+| 📅 C2 已排期 | 13 | grid、`@media`、transition、`:focus`、`%` 单位、margin `auto`…(flex 第一批 + `white-space` + `text-align` 已随 R2 taffy 0.12 落地) |
 | ✏️ P2 降级/编译期形态 | 14 | `calc()` 常量折叠、后代组合子、`oklch()`… |
 | ⏳ 等基建 | 17 | 渐变/阴影/滤镜(vello 后端)、字体(parley)…(滚动已于 R2 落地:`overflow: scroll` + 滚轮/滚动条/裁剪) |
 | ❌ 永不做,给替代写法 | 16 | specificity、`!important`、`@layer`、伪元素、运行时选择器、`:has()`… |

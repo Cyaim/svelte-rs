@@ -12,7 +12,7 @@
 
 use std::sync::Arc;
 
-use vello::kurbo::{Affine, Rect as KRect, RoundedRect, Stroke};
+use vello::kurbo::{Affine, RoundedRect, Stroke};
 use vello::peniko::{Blob, Fill, FontData};
 use vello::util::{RenderContext, RenderSurface};
 use vello::wgpu::{self, CurrentSurfaceTexture};

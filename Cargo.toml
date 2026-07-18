@@ -12,6 +12,7 @@ members = [
     "examples/showcase",
     "examples/membench",
     "examples/input-demo",
+    "examples/settings-sfc",
 ]
 
 [workspace.package]

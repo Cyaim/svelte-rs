@@ -33,4 +33,6 @@ runes 源变换 + build.rs 集成,示例 examples/counter-sfc)。
 - 响应式是单线程模型(thread-local runtime,句柄 `Copy + !Send`)。
 - derived 计算中禁止写 state(会 panic,对应 Svelte state_unsafe_mutation)。
 - sv-ui 是宏的编译目标:改绑定原语签名要同步改 sv-macro codegen 与其测试。
-- 渲染层是临时 CPU 栈,替换目标(vello/parley/taffy)与迁移顺序见 DESIGN.md 路线图。
+- 布局已迁 taffy 0.12(封在 sv-shell layout_tree 内,`Vec<Placed>` 契约);
+  折行为 swash + unicode-linebreak 过渡(计划内报废);文本栈 Parley 在 R3。
+  渲染 CPU/vello 双后端(Painter 抽象)。
