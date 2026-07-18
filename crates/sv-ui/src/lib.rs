@@ -108,6 +108,57 @@ pub struct Border {
     pub color: Color,
 }
 
+/// 主轴排布(CSS justify-content 子集;taffy 直通,调研 23)
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum JustifyContent {
+    #[default]
+    Start,
+    Center,
+    End,
+    SpaceBetween,
+    SpaceAround,
+    SpaceEvenly,
+}
+
+/// 交叉轴对齐(CSS align-items 子集;也用作 align-self 的值)
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum AlignItems {
+    /// CSS 缺省是 stretch;v0 保持既有"顶对齐不拉伸"行为为缺省,
+    /// 显式 `align-items: stretch` 才拉伸(迁移零回归优先)
+    #[default]
+    Start,
+    Center,
+    End,
+    Stretch,
+}
+
+/// 换行(flex-wrap 子集)
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum FlexWrap {
+    #[default]
+    NoWrap,
+    Wrap,
+}
+
+/// 文本折行(white-space 子集;Text 叶子用)
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum TextWrap {
+    /// 容器宽内折行(UAX #14 断点;CJK 正确断行)
+    #[default]
+    Wrap,
+    /// 恒单行(Button/Checkbox label 语义)
+    NoWrap,
+}
+
+/// 文本水平对齐(逐行 x 偏移;justify 永不做,见 CSS-SUPPORT)
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum TextAlign {
+    #[default]
+    Left,
+    Center,
+    Right,
+}
+
 /// 溢出行为(调研 22:滚动是 View 的正交属性,不是新 ElementKind)
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Overflow {
@@ -153,6 +204,21 @@ pub struct Style {
     /// 溢出行为(Hidden/Scroll 的 View 尺寸不被内容撑开,子内容按
     /// scroll 偏移平移并裁剪;调研 22)
     pub overflow: Overflow,
+    // ---- flex 第一批(调研 23 T3;taffy 直通,渲染层不读) ----
+    pub justify_content: JustifyContent,
+    pub align_items: AlignItems,
+    /// None = 跟随父的 align_items
+    pub align_self: Option<AlignItems>,
+    pub flex_grow: f32,
+    pub flex_shrink: f32,
+    pub flex_wrap: FlexWrap,
+    pub min_width: Option<f32>,
+    pub min_height: Option<f32>,
+    pub max_width: Option<f32>,
+    pub max_height: Option<f32>,
+    /// 文本折行(Text 叶子;Button/Checkbox 恒单行)
+    pub text_wrap: TextWrap,
+    pub text_align: TextAlign,
 }
 
 impl Default for Style {
@@ -172,6 +238,21 @@ impl Default for Style {
             opacity: 1.0,
             cursor: None,
             overflow: Overflow::Visible,
+            justify_content: JustifyContent::Start,
+            align_items: AlignItems::Start,
+            align_self: None,
+            flex_grow: 0.0,
+            // CSS 缺省是 1;这里取 0 保持旧引擎"子项不收缩"的行为
+            // (迁移零回归优先,与 align_items 缺省 Start 同一裁决;
+            // 需要收缩布局时显式 `flex-shrink: 1`)
+            flex_shrink: 0.0,
+            flex_wrap: FlexWrap::NoWrap,
+            min_width: None,
+            min_height: None,
+            max_width: None,
+            max_height: None,
+            text_wrap: TextWrap::Wrap,
+            text_align: TextAlign::Left,
         }
     }
 }
@@ -196,6 +277,18 @@ impl PartialEq for Style {
             && self.opacity == other.opacity
             && self.cursor == other.cursor
             && self.overflow == other.overflow
+            && self.justify_content == other.justify_content
+            && self.align_items == other.align_items
+            && self.align_self == other.align_self
+            && self.flex_grow == other.flex_grow
+            && self.flex_shrink == other.flex_shrink
+            && self.flex_wrap == other.flex_wrap
+            && self.min_width == other.min_width
+            && self.min_height == other.min_height
+            && self.max_width == other.max_width
+            && self.max_height == other.max_height
+            && self.text_wrap == other.text_wrap
+            && self.text_align == other.text_align
     }
 }
 
@@ -1748,7 +1841,11 @@ mod memory_probe {
             "[probe] ViewNode={vn}B Style={st}B Edges={}B",
             std::mem::size_of::<Edges>()
         );
-        assert!(st <= 128, "Style 超预算: {st}B");
-        assert!(vn <= 320, "ViewNode 超预算: {vn}B");
+        // 2026-07-18 预算两次上调:R1 焦点/输入(focusable/accepts_text/
+        // on_key/on_focus_change/input/scroll/on_scroll/content_override
+        // ≈ +100B)与 R2 flex 第一批(justify/align/grow/shrink/min-max
+        // ≈ +48B,调研 23 §2.2 冷字段 Box 化留作超线时的收缩手段)
+        assert!(st <= 192, "Style 超预算: {st}B");
+        assert!(vn <= 448, "ViewNode 超预算: {vn}B");
     }
 }

@@ -143,7 +143,7 @@ The full accounting is the 91-item gap matrix in [../CSS-SUPPORT.md](../CSS-SUPP
 | Status | Count | Meaning |
 |---|---|---|
 | ✅ implemented | 24 | tested, used by `examples/showcase` |
-| 📅 C2 scheduled | 19 | flex/grid via taffy, `@media`, transitions, `:focus`, `%` units, margin `auto`… |
+| 📅 C2 scheduled | 13 | grid, `@media`, transitions, `:focus`, `%` units, margin `auto`… (flex batch 1 + `white-space` + `text-align` landed in R2 via taffy 0.12) |
 | ✏️ P2 degraded/compile-time form | 14 | `calc()` constant folding, descendant combinators, `oklch()`… |
 | ⏳ awaiting infrastructure | 17 | gradients/shadows/filters (vello backend), fonts (parley)… (scrolling landed in R2: `overflow: scroll` + wheel/scrollbar/clipping) |
 | ❌ never, with documented alternative | 16 | specificity, `!important`, `@layer`, pseudo-elements, runtime selectors, `:has()`… |

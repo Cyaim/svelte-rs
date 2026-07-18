@@ -132,7 +132,7 @@
 | 现代 CSS | sv 现状 | 说明 / 替代 |
 |---|---|---|
 | `flex-direction` / `gap` | ✅ | 现为自研行列布局 |
-| Flexbox 全家(grow/shrink/basis/wrap/justify/align) | 📅 C2 | taffy 字段直通(调研 12 有对照表) |
+| Flexbox 全家(grow/shrink/basis/wrap/justify/align) | ✅ 第一批(R2,调研 23) | taffy 0.12 直通:`justify-content`/`align-items`/`align-self`/`flex-grow`/`flex-shrink`/`flex-wrap`/`min(max)-width(height)`;缺省 align=start、shrink=0(迁移零回归,单测钉死;CSS 缺省不同已文档化);`flex-basis`/`%`/`position:absolute` 第二批(弹层前置) |
 | Grid 全家(template/areas/span) | 📅 C2 | taffy 0.12 含 `grid-template-areas` |
 | `subgrid`(2023) | ⏳ | taffy 未覆盖,跟踪上游 |
 | `masonry` 布局(2025 实验) | ❌ | 上游未定稿,不追 |
@@ -154,7 +154,8 @@
 | `font-family` / `@font-face` | ⏳ | 随 Parley/fontique 字体系统(M2);现为系统字体单栈 |
 | `font-weight` / `font-style` | 📅 C2 | 需字体子族选择,Parley 前可先假粗斜 |
 | `line-height` / `letter-spacing` | 📅 C1/C2 | line-height 进继承白名单 |
-| `text-align` | 📅 C2 | 随文本布局 |
+| `text-align` | ✅ left/center/right(R2) | 逐行 x 偏移;justify 永不做 |
+| 折行(`white-space: normal\|nowrap`) | ✅(R2,调研 23) | swash + unicode-linebreak(UAX #14,CJK 断点/标点禁则/超长强断);计划内报废,M2 换 Parley 门面 |
 | `text-decoration` / `text-transform` | ✏️ P2 | 下划线渲染小;transform 编译期折叠 |
 | `text-overflow: ellipsis` / `line-clamp` | ⏳ | 依赖文本测量与截断(Parley) |
 | `text-wrap: balance/pretty`(2023-24) | ❌ | Parley 能力边界外,不承诺 |

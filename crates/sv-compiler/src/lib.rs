@@ -571,6 +571,34 @@ let y = $state(0.0f32);
     }
 
     #[test]
+    fn style_c2_flex_keys_compile() {
+        let src = r#"<view style="direction:row; justify-content: space-between; align-items: center; flex-wrap: wrap; min-width: 100; max-height: 300">
+  <text style="flex-grow: 1; white-space: nowrap; text-align: center">标题</text>
+  <view style="align-self: stretch; flex-shrink: 1" />
+</view>
+"#;
+        let code = compile_sv(src, "c").expect("应编译成功");
+        for needle in [
+            "JustifyContent::SpaceBetween",
+            "AlignItems::Center",
+            "FlexWrap::Wrap",
+            "min_width",
+            "max_height",
+            "flex_grow",
+            "TextWrap::NoWrap",
+            "TextAlign::Center",
+            "AlignItems::Stretch",
+            "flex_shrink",
+        ] {
+            assert!(code.contains(needle), "缺 {needle}:\n{code}");
+        }
+        syn::parse_file(&code).unwrap();
+        // 非法值报错
+        let err = compile_sv("<view style=\"justify-content: middle\">x</view>", "c").unwrap_err();
+        assert!(err.message.contains("justify-content"), "{err}");
+    }
+
+    #[test]
     fn on_keydown_legacy_form_rejected_with_hint() {
         let src = "<view on:keydown={|e| ()}>x</view>";
         let err = compile_sv(src, "c").unwrap_err();

@@ -19,6 +19,8 @@ arboard = { version = "3", default-features = false }
 # wgpu 版本跟随 vello(0.9 → wgpu 29),经 vello::wgpu 再导出使用,不直接依赖
 vello = { version = "0.9", optional = true }
 pollster = { version = "0.4", optional = true }
+taffy = { version = "0.12", default-features = false, features = ["std", "flexbox", "taffy_tree", "content_size"] }
+unicode-linebreak = "0.1"
 
 [features]
 default = []

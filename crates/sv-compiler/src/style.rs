@@ -525,6 +525,88 @@ fn parse_style_with_vars(
                 };
                 quote! { s.cursor = Some(#c); }
             }
+            "justify-content" => {
+                let v = match value {
+                    "flex-start" | "start" => quote! { ::sv_ui::JustifyContent::Start },
+                    "center" => quote! { ::sv_ui::JustifyContent::Center },
+                    "flex-end" | "end" => quote! { ::sv_ui::JustifyContent::End },
+                    "space-between" => quote! { ::sv_ui::JustifyContent::SpaceBetween },
+                    "space-around" => quote! { ::sv_ui::JustifyContent::SpaceAround },
+                    "space-evenly" => quote! { ::sv_ui::JustifyContent::SpaceEvenly },
+                    _ => {
+                        return Err(err(format!(
+                            "justify-content 支持 start/center/end/space-between/space-around/space-evenly,收到 `{value}`"
+                        )));
+                    }
+                };
+                quote! { s.justify_content = #v; }
+            }
+            "align-items" | "align-self" => {
+                let v = match value {
+                    "flex-start" | "start" => quote! { ::sv_ui::AlignItems::Start },
+                    "center" => quote! { ::sv_ui::AlignItems::Center },
+                    "flex-end" | "end" => quote! { ::sv_ui::AlignItems::End },
+                    "stretch" => quote! { ::sv_ui::AlignItems::Stretch },
+                    _ => {
+                        return Err(err(format!(
+                            "{key} 支持 start/center/end/stretch,收到 `{value}`"
+                        )));
+                    }
+                };
+                if key == "align-items" {
+                    quote! { s.align_items = #v; }
+                } else {
+                    quote! { s.align_self = Some(#v); }
+                }
+            }
+            "flex-grow" => {
+                let v = num(value)?;
+                quote! { s.flex_grow = #v; }
+            }
+            "flex-shrink" => {
+                let v = num(value)?;
+                quote! { s.flex_shrink = #v; }
+            }
+            "flex-wrap" => match value {
+                "nowrap" => quote! { s.flex_wrap = ::sv_ui::FlexWrap::NoWrap; },
+                "wrap" => quote! { s.flex_wrap = ::sv_ui::FlexWrap::Wrap; },
+                _ => return Err(err(format!("flex-wrap 支持 nowrap|wrap,收到 `{value}`"))),
+            },
+            "min-width" => {
+                let v = num(value)?;
+                quote! { s.min_width = Some(#v); }
+            }
+            "min-height" => {
+                let v = num(value)?;
+                quote! { s.min_height = Some(#v); }
+            }
+            "max-width" => {
+                let v = num(value)?;
+                quote! { s.max_width = Some(#v); }
+            }
+            "max-height" => {
+                let v = num(value)?;
+                quote! { s.max_height = Some(#v); }
+            }
+            "white-space" => match value {
+                "normal" => quote! { s.text_wrap = ::sv_ui::TextWrap::Wrap; },
+                "nowrap" => quote! { s.text_wrap = ::sv_ui::TextWrap::NoWrap; },
+                _ => {
+                    return Err(err(format!(
+                        "white-space 支持 normal|nowrap,收到 `{value}`"
+                    )));
+                }
+            },
+            "text-align" => match value {
+                "left" => quote! { s.text_align = ::sv_ui::TextAlign::Left; },
+                "center" => quote! { s.text_align = ::sv_ui::TextAlign::Center; },
+                "right" => quote! { s.text_align = ::sv_ui::TextAlign::Right; },
+                _ => {
+                    return Err(err(format!(
+                        "text-align 支持 left|center|right(justify 永不做,见 CSS-SUPPORT),收到 `{value}`"
+                    )));
+                }
+            },
             "overflow" => match value {
                 "visible" => quote! { s.overflow = ::sv_ui::Overflow::Visible; },
                 "hidden" => quote! { s.overflow = ::sv_ui::Overflow::Hidden; },
@@ -552,8 +634,9 @@ fn parse_style_with_vars(
             _ => {
                 return Err(err(format!(
                     "未知样式键 `{key}`(支持盒模型 padding/margin/border(-radius)、gap、font-size、\
-                     opacity、width/height、flex-direction、background(-color)、color、cursor、overflow;\
-                     其余见 CSS-SUPPORT 矩阵)"
+                     opacity、width/height/min-max、flex 系(direction/grow/shrink/wrap/justify-content/\
+                     align-items/align-self)、background(-color)、color、cursor、overflow、\
+                     white-space、text-align;其余见 CSS-SUPPORT 矩阵)"
                 )));
             }
         };
