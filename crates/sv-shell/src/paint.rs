@@ -96,9 +96,10 @@ pub trait Painter {
     /// 一段已定位字形(shaping 已完成;backend 只负责光栅/上屏。
     /// 字体是全局单字体 UI 字体——`font::ui_font()` / vello FontData 各自持有)
     fn glyph_run(&mut self, glyphs: &[GlyphPos], color: Color);
-    /// 压入矩形裁剪(嵌套取交集;TextInput 溢出裁剪用,同时是滚动体系的
-    /// 前置——调研 21 §2.3。物理像素坐标)
-    fn push_clip(&mut self, x: f32, y: f32, w: f32, h: f32);
+    /// 压入矩形裁剪(嵌套取交集;TextInput 溢出与滚动容器共用——调研 21/22。
+    /// 物理像素坐标。radius:CPU 后端 v0 矩形近似(角部最多溢出 ~radius²px,
+    /// 调研 22 §2.3 裁决),vello 端精确)
+    fn push_clip(&mut self, x: f32, y: f32, w: f32, h: f32, radius: f32);
     fn pop_clip(&mut self);
 }
 
@@ -134,6 +135,7 @@ pub enum PaintCmd {
         y: i32,
         w: i32,
         h: i32,
+        radius: i32,
     },
     PopClip,
 }
@@ -183,12 +185,13 @@ impl Painter for RecordingPainter {
         });
     }
 
-    fn push_clip(&mut self, x: f32, y: f32, w: f32, h: f32) {
+    fn push_clip(&mut self, x: f32, y: f32, w: f32, h: f32, radius: f32) {
         self.cmds.push(PaintCmd::PushClip {
             x: x as i32,
             y: y as i32,
             w: w as i32,
             h: h as i32,
+            radius: radius as i32,
         });
     }
 
@@ -203,10 +206,11 @@ impl Painter for RecordingPainter {
 
 pub struct TinySkiaPainter<'a> {
     pixmap: &'a mut Pixmap,
-    /// 累积交集后的裁剪矩形栈(物理像素;top 即当前生效裁剪)
+    /// 累积交集后的裁剪矩形栈(物理像素;top 即当前生效裁剪)。
+    /// v0 裁决(调研 22 §2.3):手动矩形交集,不用 tiny-skia Mask——
+    /// Mask 每层要分配整画布 w×h 字节且嵌套逐像素相乘,与 CPU 栈能力
+    /// 冻结(ADR-3b)相悖;圆角裁剪为矩形近似(角部最多溢出 ~radius²px)
     clips: Vec<[f32; 4]>,
-    /// 当前裁剪的 Mask(fill/stroke 用;无裁剪时 None 走快路径)
-    mask: Option<tiny_skia::Mask>,
 }
 
 impl<'a> TinySkiaPainter<'a> {
@@ -214,23 +218,21 @@ impl<'a> TinySkiaPainter<'a> {
         Self {
             pixmap,
             clips: Vec::new(),
-            mask: None,
         }
     }
 
-    fn rebuild_mask(&mut self) {
-        self.mask = self.clips.last().map(|[x, y, w, h]| {
-            let mut mask = tiny_skia::Mask::new(self.pixmap.width(), self.pixmap.height())
-                .expect("sv-shell: 创建裁剪 mask 失败");
-            let mut pb = PathBuilder::new();
-            if let Some(r) = tiny_skia::Rect::from_xywh(*x, *y, *w, *h) {
-                pb.push_rect(r);
+    /// 绘制矩形与当前裁剪求交;None = 完全被裁掉
+    fn clipped(&self, x: f32, y: f32, w: f32, h: f32) -> Option<(f32, f32, f32, f32)> {
+        match self.clips.last() {
+            Some([cx, cy, cw, ch]) => {
+                let x0 = x.max(*cx);
+                let y0 = y.max(*cy);
+                let x1 = (x + w).min(cx + cw);
+                let y1 = (y + h).min(cy + ch);
+                (x1 > x0 && y1 > y0).then_some((x0, y0, x1 - x0, y1 - y0))
             }
-            if let Some(path) = pb.finish() {
-                mask.fill_path(&path, FillRule::Winding, true, Transform::identity());
-            }
-            mask
-        });
+            None => Some((x, y, w, h)),
+        }
     }
 }
 
@@ -363,6 +365,9 @@ fn blend_pixel(
 
 impl Painter for TinySkiaPainter<'_> {
     fn fill_rounded_rect(&mut self, x: f32, y: f32, w: f32, h: f32, radius: f32, color: Color) {
+        let Some((x, y, w, h)) = self.clipped(x, y, w, h) else {
+            return;
+        };
         let mut pb = PathBuilder::new();
         rounded_rect_path(&mut pb, x, y, w, h, radius);
         if let Some(path) = pb.finish() {
@@ -374,7 +379,7 @@ impl Painter for TinySkiaPainter<'_> {
                 &paint,
                 FillRule::Winding,
                 Transform::identity(),
-                self.mask.as_ref(),
+                None,
             );
         }
     }
@@ -389,6 +394,11 @@ impl Painter for TinySkiaPainter<'_> {
         width: f32,
         color: Color,
     ) {
+        // 视口外整体剔除;部分越界时不几何裁剪(描边收缩会造出幻影边,
+        // 允许出血,滚动容器边框在 push_clip 之外绘制,实践中罕见触发)
+        if self.clipped(x, y, w, h).is_none() {
+            return;
+        }
         // 沿边框中心线描边(内缩半宽),视觉贴合 border-box
         let half = width / 2.0;
         let mut pb = PathBuilder::new();
@@ -408,13 +418,8 @@ impl Painter for TinySkiaPainter<'_> {
                 width,
                 ..Stroke::default()
             };
-            self.pixmap.stroke_path(
-                &path,
-                &paint,
-                &stroke,
-                Transform::identity(),
-                self.mask.as_ref(),
-            );
+            self.pixmap
+                .stroke_path(&path, &paint, &stroke, Transform::identity(), None);
         }
     }
 
@@ -455,7 +460,8 @@ impl Painter for TinySkiaPainter<'_> {
         }
     }
 
-    fn push_clip(&mut self, x: f32, y: f32, w: f32, h: f32) {
+    fn push_clip(&mut self, x: f32, y: f32, w: f32, h: f32, _radius: f32) {
+        // radius 忽略:矩形近似(调研 22 §2.3;Mask 精确路线留作升级项)
         let rect = match self.clips.last() {
             Some([px, py, pw, ph]) => {
                 let x0 = x.max(*px);
@@ -467,11 +473,9 @@ impl Painter for TinySkiaPainter<'_> {
             None => [x, y, w, h],
         };
         self.clips.push(rect);
-        self.rebuild_mask();
     }
 
     fn pop_clip(&mut self) {
         self.clips.pop();
-        self.rebuild_mask();
     }
 }

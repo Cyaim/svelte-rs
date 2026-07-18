@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use swash::FontRef;
 use tiny_skia::Pixmap;
 
-use sv_ui::{Color, Direction, Doc, DocumentInner, ElementKind, ViewId};
+use sv_ui::{Color, Direction, Doc, DocumentInner, ElementKind, Overflow, ViewId};
 
 use crate::font::ui_font;
 use crate::paint::{GlyphKey, GlyphPos, Painter, TinySkiaPainter};
@@ -38,6 +38,37 @@ impl Rect {
 pub struct Placed {
     pub id: ViewId,
     pub rect: Rect,
+    /// 生效裁剪矩形(祖先滚动/Hidden 容器的交集;None = 不裁)。
+    /// 命中测试直接用;绘制按 clip_depth 维护 push/pop 栈
+    pub clip: Option<Rect>,
+    /// 裁剪嵌套深度(= 祖先链上 overflow≠Visible 的容器数)
+    pub clip_depth: u16,
+}
+
+impl Placed {
+    /// 命中:点在 border-box 内且未被祖先裁掉(视口外不可点/不可悬停)
+    pub fn hit(&self, x: f32, y: f32) -> bool {
+        self.rect.contains(x, y) && self.clip.is_none_or(|c| c.contains(x, y))
+    }
+}
+
+/// 滚动区元数据(布局旁路输出:滚轮路由 clamp 与滚动条比例的依据)
+#[derive(Clone, Copy, Debug)]
+pub struct ScrollArea {
+    pub id: ViewId,
+    /// border-box(逻辑坐标)
+    pub viewport: Rect,
+    /// 内容尺寸(不含 padding;content_override 优先)
+    pub content: (f32, f32),
+    /// 各轴最大滚动偏移(content − 内区,≥0)
+    pub max: (f32, f32),
+}
+
+/// 一次布局的完整产物
+#[derive(Clone, Debug, Default)]
+pub struct Layout {
+    pub placed: Vec<Placed>,
+    pub scroll_areas: Vec<ScrollArea>,
 }
 
 const ROOT_FONT_SIZE: f32 = 16.0;
@@ -84,16 +115,23 @@ pub fn measure_text(font: &FontRef, text: &str, px: f32) -> (f32, f32) {
     (w, line_h)
 }
 
+/// 布局期缓存:border-box 尺寸 + 滚动容器的内容尺寸(不含 padding)
+#[derive(Default)]
+struct LayoutCaches {
+    sizes: HashMap<ViewId, (f32, f32)>,
+    content: HashMap<ViewId, (f32, f32)>,
+}
+
 /// 返回 border-box 尺寸(不含 margin;margin 由父容器计入间距)。
 /// `inherited_font`:父链解析到本节点的字号(自身未设时生效)
 fn measure(
     inner: &DocumentInner,
     font: &FontRef,
     id: ViewId,
-    cache: &mut HashMap<ViewId, (f32, f32)>,
+    cache: &mut LayoutCaches,
     inherited_font: f32,
 ) -> (f32, f32) {
-    if let Some(sz) = cache.get(&id) {
+    if let Some(sz) = cache.sizes.get(&id) {
         return *sz;
     }
     let n = &inner.nodes[id];
@@ -149,16 +187,21 @@ fn measure(
             if count > 1 {
                 main += s.gap * (count as f32 - 1.0);
             }
-            match s.direction {
-                Direction::Row => (
-                    main + s.padding.horizontal() + bw * 2.0,
-                    cross + s.padding.vertical() + bw * 2.0,
-                ),
-                Direction::Column => (
-                    cross + s.padding.horizontal() + bw * 2.0,
-                    main + s.padding.vertical() + bw * 2.0,
-                ),
+            let (cw, ch) = match s.direction {
+                Direction::Row => (main, cross),
+                Direction::Column => (cross, main),
+            };
+            // 滚动/裁剪容器:记录内容尺寸(滚动范围与滚动条比例的依据;
+            // 虚拟内容覆盖优先——virtual_scroll 桥)
+            if s.overflow != Overflow::Visible {
+                cache
+                    .content
+                    .insert(id, n.content_override.unwrap_or((cw, ch)));
             }
+            (
+                cw + s.padding.horizontal() + bw * 2.0,
+                ch + s.padding.vertical() + bw * 2.0,
+            )
         }
     };
     // 显式宽高 = border-box 覆盖(桌面直觉,即 CSS box-sizing: border-box)
@@ -168,26 +211,48 @@ fn measure(
     if let Some(fh) = s.height {
         h = fh;
     }
-    cache.insert(id, (w, h));
+    cache.sizes.insert(id, (w, h));
     (w, h)
+}
+
+fn intersect(a: Rect, b: Rect) -> Rect {
+    let x0 = a.x.max(b.x);
+    let y0 = a.y.max(b.y);
+    let x1 = (a.x + a.w).min(b.x + b.w);
+    let y1 = (a.y + a.h).min(b.y + b.h);
+    Rect {
+        x: x0,
+        y: y0,
+        w: (x1 - x0).max(0.0),
+        h: (y1 - y0).max(0.0),
+    }
+}
+
+struct PlaceCtx<'a> {
+    clip: Option<Rect>,
+    clip_depth: u16,
+    font: &'a FontRef<'a>,
 }
 
 #[allow(clippy::too_many_arguments)]
 fn place(
     inner: &DocumentInner,
-    font: &FontRef,
-    cache: &mut HashMap<ViewId, (f32, f32)>,
+    ctx: &PlaceCtx,
+    cache: &mut LayoutCaches,
     id: ViewId,
     x: f32,
     y: f32,
     forced: Option<(f32, f32)>,
     inherited_font: f32,
-    out: &mut Vec<Placed>,
+    out: &mut Layout,
 ) {
+    let font = ctx.font;
     let (w, h) = forced.unwrap_or_else(|| measure(inner, font, id, cache, inherited_font));
-    out.push(Placed {
+    out.placed.push(Placed {
         id,
         rect: Rect { x, y, w, h },
+        clip: ctx.clip,
+        clip_depth: ctx.clip_depth,
     });
     let n = &inner.nodes[id];
     if n.kind != ElementKind::View {
@@ -200,8 +265,50 @@ fn place(
         s.font_size
     };
     let bw = s.border.map(|b| b.width).unwrap_or(0.0);
-    let mut cx = x + s.padding.left + bw;
-    let mut cy = y + s.padding.top + bw;
+
+    // 滚动/裁剪容器:子层 clip = 祖先 clip ∩ 本容器 border-box;
+    // 子起点减去滚动偏移(布局期按内容尺寸钳制,不回写节点)
+    let (child_ctx, scroll) = if s.overflow != Overflow::Visible {
+        let own = Rect { x, y, w, h };
+        let clip = Some(ctx.clip.map_or(own, |c| intersect(c, own)));
+        let content = cache.content.get(&id).copied().unwrap_or((0.0, 0.0));
+        let inner_w = w - s.padding.horizontal() - bw * 2.0;
+        let inner_h = h - s.padding.vertical() - bw * 2.0;
+        let max = (
+            (content.0 - inner_w).max(0.0),
+            (content.1 - inner_h).max(0.0),
+        );
+        if s.overflow == Overflow::Scroll {
+            out.scroll_areas.push(ScrollArea {
+                id,
+                viewport: own,
+                content,
+                max,
+            });
+        }
+        let sx = n.scroll_x.min(max.0);
+        let sy = n.scroll_y.min(max.1);
+        (
+            PlaceCtx {
+                clip,
+                clip_depth: ctx.clip_depth + 1,
+                font,
+            },
+            (sx, sy),
+        )
+    } else {
+        (
+            PlaceCtx {
+                clip: ctx.clip,
+                clip_depth: ctx.clip_depth,
+                font,
+            },
+            (0.0, 0.0),
+        )
+    };
+
+    let mut cx = x + s.padding.left + bw - scroll.0;
+    let mut cy = y + s.padding.top + bw - scroll.1;
     for c in &n.children {
         let (cw, ch) = measure(inner, font, *c, cache, fs);
         let m = inner.nodes[*c].style.margin;
@@ -209,7 +316,7 @@ fn place(
             Direction::Row => {
                 place(
                     inner,
-                    font,
+                    &child_ctx,
                     cache,
                     *c,
                     cx + m.left,
@@ -223,7 +330,7 @@ fn place(
             Direction::Column => {
                 place(
                     inner,
-                    font,
+                    &child_ctx,
                     cache,
                     *c,
                     cx + m.left,
@@ -238,12 +345,14 @@ fn place(
     }
 }
 
-/// 版本键控布局缓存:同一 Doc、同版本、同尺寸 → 直接复用上次布局。
-/// 静止帧的 O(n) measure/place 归零(细粒度更新模型下,静止是常态)
-pub fn layout_tree_cached(doc: &Doc, logical_w: f32, logical_h: f32) -> Vec<Placed> {
+/// 版本键控布局缓存(完整产物):同一 Doc、同版本、同尺寸 → 直接复用。
+/// 静止帧的 O(n) measure/place 归零(细粒度更新模型下,静止是常态)。
+/// 滚动改 offset → bump 版本 → 键自然失效(滚动帧 = 全树重布局,
+/// 大全量树靠 virtual_list 兜底,ADR-9)
+pub fn layout_full_cached(doc: &Doc, logical_w: f32, logical_h: f32) -> Layout {
     use std::cell::RefCell;
     thread_local! {
-        static CACHE: RefCell<Option<(usize, u64, u32, u32, Vec<Placed>)>> =
+        static CACHE: RefCell<Option<(usize, u64, u32, u32, Layout)>> =
             const { RefCell::new(None) };
     }
     let key = (
@@ -254,26 +363,36 @@ pub fn layout_tree_cached(doc: &Doc, logical_w: f32, logical_h: f32) -> Vec<Plac
     );
     CACHE.with(|c| {
         let mut slot = c.borrow_mut();
-        if let Some((id, ver, w, h, placed)) = slot.as_ref()
+        if let Some((id, ver, w, h, layout)) = slot.as_ref()
             && (*id, *ver, *w, *h) == key
         {
-            return placed.clone();
+            return layout.clone();
         }
-        let placed = layout_tree(doc, logical_w, logical_h);
-        *slot = Some((key.0, key.1, key.2, key.3, placed.clone()));
-        placed
+        let layout = layout_tree_full(doc, logical_w, logical_h);
+        *slot = Some((key.0, key.1, key.2, key.3, layout.clone()));
+        layout
     })
 }
 
-/// 布局整棵树。root 强制占满窗口逻辑尺寸
-pub fn layout_tree(doc: &Doc, logical_w: f32, logical_h: f32) -> Vec<Placed> {
+/// 兼容入口:只要 Placed 列表
+pub fn layout_tree_cached(doc: &Doc, logical_w: f32, logical_h: f32) -> Vec<Placed> {
+    layout_full_cached(doc, logical_w, logical_h).placed
+}
+
+/// 布局整棵树(完整产物:Placed + 滚动区元数据)。root 强制占满窗口逻辑尺寸
+pub fn layout_tree_full(doc: &Doc, logical_w: f32, logical_h: f32) -> Layout {
     let font = ui_font();
     doc.read(|inner| {
-        let mut cache = HashMap::new();
-        let mut out = Vec::new();
+        let mut cache = LayoutCaches::default();
+        let mut out = Layout::default();
+        let ctx = PlaceCtx {
+            clip: None,
+            clip_depth: 0,
+            font: &font,
+        };
         place(
             inner,
-            &font,
+            &ctx,
             &mut cache,
             inner.root,
             0.0,
@@ -284,6 +403,11 @@ pub fn layout_tree(doc: &Doc, logical_w: f32, logical_h: f32) -> Vec<Placed> {
         );
         out
     })
+}
+
+/// 兼容入口:只要 Placed 列表
+pub fn layout_tree(doc: &Doc, logical_w: f32, logical_h: f32) -> Vec<Placed> {
+    layout_tree_full(doc, logical_w, logical_h).placed
 }
 
 /// 把节点的不透明度乘进颜色 alpha
@@ -368,7 +492,20 @@ pub fn caret_index_at(font: &FontRef, text: &str, px: f32, x: f32) -> usize {
 pub fn paint_tree(doc: &Doc, placed: &[Placed], painter: &mut dyn Painter, scale: f32) {
     let font = ui_font();
     doc.read(|inner| {
+        // 裁剪栈按 clip_depth 同步(Placed 是 DFS 序,深度每步至多 +1;
+        // effective rect 已含祖先交集,push 交集幂等)
+        let mut clip_stack: Vec<Rect> = Vec::new();
         for p in placed {
+            while clip_stack.len() > p.clip_depth as usize {
+                clip_stack.pop();
+                painter.pop_clip();
+            }
+            if (p.clip_depth as usize) > clip_stack.len()
+                && let Some(c) = p.clip
+            {
+                clip_stack.push(c);
+                painter.push_clip(c.x * scale, c.y * scale, c.w * scale, c.h * scale, 0.0);
+            }
             let Some(n) = inner.nodes.get(p.id) else {
                 continue;
             };
@@ -490,7 +627,7 @@ pub fn paint_tree(doc: &Doc, placed: &[Placed], painter: &mut dyn Painter, scale
                     let scroll = (caret_px - (content_w - 2.0 * scale)).max(0.0);
                     let text_x = content_x - scroll;
 
-                    painter.push_clip(content_x - scale, y, content_w + 2.0 * scale, h);
+                    painter.push_clip(content_x - scale, y, content_w + 2.0 * scale, h, 0.0);
 
                     // 选区高亮(组合中隐藏选区,IME 惯例)
                     if focused && input.preedit.is_none() && input.cursor != input.anchor {
@@ -549,6 +686,10 @@ pub fn paint_tree(doc: &Doc, placed: &[Placed], painter: &mut dyn Painter, scale
                 ElementKind::View => {}
             }
         }
+        // 收尾:退出全部裁剪层(焦点环画在裁剪之外,保持始终可见)
+        for _ in 0..clip_stack.len() {
+            painter.pop_clip();
+        }
 
         // 默认焦点环(调研 20:stroke 外扩 2px,宽 2px,accent 定色;
         // 画在所有节点之后 = 永远在最上层;Painter 零新动词)
@@ -578,14 +719,15 @@ pub fn paint_tree(doc: &Doc, placed: &[Placed], painter: &mut dyn Painter, scale
 pub fn render_frame(doc: &Doc, phys_w: u32, phys_h: u32, scale: f32) -> (Pixmap, Vec<Placed>) {
     let logical_w = phys_w as f32 / scale;
     let logical_h = phys_h as f32 / scale;
-    let placed = layout_tree_cached(doc, logical_w, logical_h);
+    let layout = layout_full_cached(doc, logical_w, logical_h);
 
     let mut pixmap = Pixmap::new(phys_w.max(1), phys_h.max(1)).expect("sv-shell: 创建 pixmap 失败");
     pixmap.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
     let mut painter = TinySkiaPainter::new(&mut pixmap);
-    paint_tree(doc, &placed, &mut painter, scale);
+    paint_tree(doc, &layout.placed, &mut painter, scale);
+    paint_scrollbars(doc, &layout.scroll_areas, &mut painter, scale);
 
-    (pixmap, placed)
+    (pixmap, layout.placed)
 }
 
 /// 点击命中 TextInput 时:窗口逻辑 x → 值内字节偏移(含 padding/border 内缩)。
@@ -637,11 +779,100 @@ pub fn ime_caret_rect(doc: &Doc, placed: &[Placed], scale: f32) -> Option<(f32, 
     })
 }
 
-/// 命中测试(逻辑坐标),返回最上层可点击节点
+/// 命中测试(逻辑坐标),返回最上层可点击节点(视口外的子节点不可点)
 pub fn hit_click_target(doc: &Doc, placed: &[Placed], x: f32, y: f32) -> Option<ViewId> {
     placed
         .iter()
         .rev()
-        .find(|p| p.rect.contains(x, y) && doc.click_handler(p.id).is_some())
+        .find(|p| p.hit(x, y) && doc.click_handler(p.id).is_some())
         .map(|p| p.id)
+}
+
+/// 滚动条 thumb 几何(纯函数):给定轨道长/视口/内容/偏移 →
+/// (thumb 起点偏移, thumb 长度);内容未溢出返回 None
+pub fn scrollbar_thumb(track: f32, viewport: f32, content: f32, offset: f32) -> Option<(f32, f32)> {
+    if content <= viewport || content <= 0.0 || track <= 0.0 {
+        return None;
+    }
+    let len = (viewport / content * track).max(24.0).min(track);
+    let max_off = content - viewport;
+    let pos = (offset.clamp(0.0, max_off) / max_off) * (track - len);
+    Some((pos, len))
+}
+
+/// 滚动条绘制:shell 合成,不入场景树(egui 同构;调研 22 §2.4)。
+/// v0 纵向 thumb only(横向 API 留通道);宽 6 逻辑 px、右缘内贴 2px
+pub fn paint_scrollbars(doc: &Doc, areas: &[ScrollArea], painter: &mut dyn Painter, scale: f32) {
+    const BAR_W: f32 = 6.0;
+    const MARGIN: f32 = 2.0;
+    for a in areas {
+        let track = a.viewport.h - MARGIN * 2.0;
+        let inner_h = a.viewport.h; // 近似:track 按 border-box 高(视觉够用)
+        let (_, sy) = doc.scroll_of(a.id);
+        let Some((pos, len)) = scrollbar_thumb(track, inner_h, a.content.1, sy) else {
+            continue;
+        };
+        painter.fill_rounded_rect(
+            (a.viewport.x + a.viewport.w - BAR_W - MARGIN) * scale,
+            (a.viewport.y + MARGIN + pos) * scale,
+            BAR_W * scale,
+            len * scale,
+            BAR_W / 2.0 * scale,
+            Color::rgba(120, 120, 134, 140),
+        );
+    }
+}
+
+/// 滚轮路由(纯函数,离屏可测;调研 22 §2.4):命中最上层可滚容器,
+/// 该方向到边界则沿父链上浮(浏览器 scroll chaining 语义)。
+/// dx/dy 为期望的 offset 增量(正 = 内容向左/上移);返回消费者
+pub fn route_wheel(
+    doc: &Doc,
+    placed: &[Placed],
+    areas: &[ScrollArea],
+    x: f32,
+    y: f32,
+    dx: f32,
+    dy: f32,
+) -> Option<ViewId> {
+    let mut target = placed
+        .iter()
+        .rev()
+        .find(|p| {
+            p.hit(x, y)
+                && doc.read(|inner| {
+                    inner
+                        .nodes
+                        .get(p.id)
+                        .is_some_and(|n| n.style.overflow == Overflow::Scroll)
+                })
+        })
+        .map(|p| p.id);
+    while let Some(id) = target {
+        if let Some(a) = areas.iter().find(|a| a.id == id) {
+            let (sx, sy) = doc.scroll_of(id);
+            let nx = (sx + dx).clamp(0.0, a.max.0);
+            let ny = (sy + dy).clamp(0.0, a.max.1);
+            if nx != sx || ny != sy {
+                doc.set_scroll(id, nx, ny);
+                return Some(id);
+            }
+        }
+        // 到边界/无元数据:上浮找下一个可滚祖先
+        target = doc.read(|inner| {
+            let mut cur = inner.nodes.get(id).and_then(|n| n.parent);
+            while let Some(c) = cur {
+                if inner
+                    .nodes
+                    .get(c)
+                    .is_some_and(|n| n.style.overflow == Overflow::Scroll)
+                {
+                    return Some(c);
+                }
+                cur = inner.nodes.get(c).and_then(|n| n.parent);
+            }
+            None
+        });
+    }
+    None
 }

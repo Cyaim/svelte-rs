@@ -137,11 +137,24 @@ impl Painter for VelloPainter {
             );
     }
 
-    fn push_clip(&mut self, x: f32, y: f32, w: f32, h: f32) {
-        // 1:1 映射 vello 图层裁剪(嵌套自动取交集)
-        let rect = KRect::new(x as f64, y as f64, (x + w) as f64, (y + h) as f64);
-        self.scene
-            .push_clip_layer(Fill::NonZero, Affine::IDENTITY, &rect);
+    fn push_clip(&mut self, x: f32, y: f32, w: f32, h: f32, radius: f32) {
+        // 1:1 映射 vello 图层裁剪(嵌套自动取交集,圆角精确)。
+        // 用 push_layer + Normal blend 而非 push_clip_layer:后者 blend 语义
+        // 尚不正确(vello issue #1198,调研 22 §2.3)
+        let rect = RoundedRect::new(
+            x as f64,
+            y as f64,
+            (x + w) as f64,
+            (y + h) as f64,
+            radius as f64,
+        );
+        self.scene.push_layer(
+            Fill::NonZero,
+            vello::peniko::Mix::Normal,
+            1.0,
+            Affine::IDENTITY,
+            &rect,
+        );
     }
 
     fn pop_clip(&mut self) {
@@ -214,12 +227,14 @@ impl VelloWin {
     ) -> (Vec<Placed>, bool) {
         let width = self.surface.config.width;
         let height = self.surface.config.height;
-        let placed =
-            crate::render::layout_tree_cached(doc, width as f32 / scale, height as f32 / scale);
+        let layout =
+            crate::render::layout_full_cached(doc, width as f32 / scale, height as f32 / scale);
+        let placed = layout.placed;
 
         if !scene_unchanged {
             self.painter.scene.reset();
             paint_tree(doc, &placed, &mut self.painter, scale);
+            crate::render::paint_scrollbars(doc, &layout.scroll_areas, &mut self.painter, scale);
         }
 
         let device_handle = &self.context.devices[self.surface.dev_id];
@@ -455,10 +470,12 @@ fn render_offscreen_frame(
         depth_or_array_layers: 1,
     };
 
-    let placed =
-        crate::render::layout_tree_cached(doc, width as f32 / scale, height as f32 / scale);
+    let layout =
+        crate::render::layout_full_cached(doc, width as f32 / scale, height as f32 / scale);
+    let placed = layout.placed;
     let mut painter = VelloPainter::new();
     paint_tree(doc, &placed, &mut painter, scale);
+    crate::render::paint_scrollbars(doc, &layout.scroll_areas, &mut painter, scale);
 
     if let Err(e) = renderer.render_to_texture(
         device,

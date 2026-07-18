@@ -186,11 +186,18 @@ fn gen_attrs(attrs: &[Attr], var: &Ident) -> TokenStream {
                 },
                 AttrKind::OnInput => quote! { __doc.set_on_input(#var, #expr); },
                 AttrKind::OnSubmit => quote! { __doc.set_on_submit(#var, #expr); },
+                AttrKind::OnScroll => quote! { __doc.set_on_scroll(#var, #expr); },
+                // 延后发射(桥链式保留既有 on_scroll,与 on_scroll 共存)
+                AttrKind::BindScrollY => TokenStream::new(),
                 // 下方合成进单一 set_on_focus_change
                 AttrKind::OnFocus | AttrKind::OnBlur => TokenStream::new(),
             }
         })
         .collect();
+    if let Some(a) = attrs.iter().find(|a| a.kind == AttrKind::BindScrollY) {
+        let e = &a.expr;
+        ts.extend(quote! { ::sv_ui::bind_scroll_y(&__doc, #var, #e); });
+    }
     let focus = attrs.iter().find(|a| a.kind == AttrKind::OnFocus);
     let blur = attrs.iter().find(|a| a.kind == AttrKind::OnBlur);
     if focus.is_some() || blur.is_some() {

@@ -525,6 +525,17 @@ fn parse_style_with_vars(
                 };
                 quote! { s.cursor = Some(#c); }
             }
+            "overflow" => match value {
+                "visible" => quote! { s.overflow = ::sv_ui::Overflow::Visible; },
+                "hidden" => quote! { s.overflow = ::sv_ui::Overflow::Hidden; },
+                // v0:auto 按 scroll 处理(调研 22 §2.5)
+                "scroll" | "auto" => quote! { s.overflow = ::sv_ui::Overflow::Scroll; },
+                _ => {
+                    return Err(err(format!(
+                        "overflow 支持 visible/hidden/scroll/auto,收到 `{value}`"
+                    )));
+                }
+            },
             "bg" | "background" | "background-color" => {
                 let c = color(value).map_err(&err)?;
                 quote! { s.bg = Some(#c); }
@@ -541,7 +552,7 @@ fn parse_style_with_vars(
             _ => {
                 return Err(err(format!(
                     "未知样式键 `{key}`(支持盒模型 padding/margin/border(-radius)、gap、font-size、\
-                     opacity、width/height、flex-direction、background(-color)、color、cursor;\
+                     opacity、width/height、flex-direction、background(-color)、color、cursor、overflow;\
                      其余见 CSS-SUPPORT 矩阵)"
                 )));
             }

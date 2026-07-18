@@ -145,7 +145,7 @@ view { color: #223344; }  /* 下面所有 text 未覆盖时都继承这个色 */
 | ✅ 已实现 | 24 | 有测试,`examples/showcase` 在用 |
 | 📅 C2 已排期 | 19 | flex/grid 走 taffy、`@media`、transition、`:focus`、`%` 单位、margin `auto`… |
 | ✏️ P2 降级/编译期形态 | 14 | `calc()` 常量折叠、后代组合子、`oklch()`… |
-| ⏳ 等基建 | 18 | 渐变/阴影/滤镜(vello 后端)、滚动、字体(parley)… |
+| ⏳ 等基建 | 17 | 渐变/阴影/滤镜(vello 后端)、字体(parley)…(滚动已于 R2 落地:`overflow: scroll` + 滚轮/滚动条/裁剪) |
 | ❌ 永不做,给替代写法 | 16 | specificity、`!important`、`@layer`、伪元素、运行时选择器、`:has()`… |
 
 C2 完成即定义为对 Svelte 开发者的"迁移无感线"(44/91 落地,覆盖高频面)。

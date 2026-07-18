@@ -69,6 +69,10 @@ pub enum AttrKind {
     /// `on_input(闭包)` / `on_submit(闭包)`(仅 input,签名 Fn(&str))
     OnInput,
     OnSubmit,
+    /// `on_scroll(闭包)` → `set_on_scroll`(签名 Fn(f32, f32))
+    OnScroll,
+    /// `bind_scroll_y(signal)` → `::sv_ui::bind_scroll_y`(纵向滚动双向桥)
+    BindScrollY,
 }
 
 /// 文本段:字符串字面量或 `{表达式}` 插值
