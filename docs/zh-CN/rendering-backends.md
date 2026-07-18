@@ -97,6 +97,7 @@ cargo run -p membench --release --features backend-vello -- --backend vello --co
 | `SV_RENDERER` | `cpu` \| `vello` | 覆盖后端选择(见上) |
 | `SV_VELLO_AA` | `area` \| `msaa8` \| `msaa16` | vello 抗锯齿方式,默认 `msaa16`。`area` 是解析式 AA、零 MSAA 缓冲——本机实测对内存无影响(调研 17) |
 | `SV_SHOW_FPS` | `1` | 连续重绘 + 每 30 帧向 stdout 打印一行 `FPS <n>`(基准/诊断用) |
+| `SV_ALLOW_SOFTWARE_GPU` | `1` | 接受软件光栅适配器(WARP/lavapipe,`DeviceType::Cpu`)。默认拒绝:相对 CPU 后端毫无收益,且无 GPU 的 CI 跑道上 WARP 曾在管线执行中崩溃。CI 在 Linux 上开启此项保留 lavapipe 渲染覆盖 |
 
 ## 文本栈
 
