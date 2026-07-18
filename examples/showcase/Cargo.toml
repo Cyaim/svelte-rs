@@ -10,5 +10,9 @@ sv-reactive = { workspace = true }
 sv-ui = { workspace = true }
 sv-shell = { workspace = true }
 
+[features]
+# 转发给 sv-shell:cargo run -p showcase --features backend-vello
+backend-vello = ["sv-shell/backend-vello"]
+
 [build-dependencies]
 sv-compiler = { workspace = true }

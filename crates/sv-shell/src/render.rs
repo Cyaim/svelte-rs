@@ -245,7 +245,19 @@ fn shape_text(font: &Font, text: &str, px: f32, ox: f32, oy: f32) -> Vec<GlyphPo
         .glyphs()
         .iter()
         .filter(|g| g.width > 0)
-        .map(|g| GlyphPos { key: g.key, x: ox + g.x, y: oy + g.y })
+        .map(|g| {
+            // 反推基线原点:fontdue 给位图左上角,GPU 后端要 pen origin
+            // (bitmap_left = pen_x + xmin;bitmap_top = baseline - height - ymin)
+            let m = font.metrics_indexed(g.key.glyph_index, px);
+            GlyphPos {
+                key: g.key,
+                x: ox + g.x,
+                y: oy + g.y,
+                id: g.key.glyph_index,
+                ox: ox + g.x - m.xmin as f32,
+                oy: oy + g.y + m.height as f32 + m.ymin as f32,
+            }
+        })
         .collect()
 }
 

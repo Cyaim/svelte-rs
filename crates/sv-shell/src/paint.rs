@@ -18,12 +18,22 @@ use fontdue::layout::GlyphRasterConfig;
 use sv_ui::Color;
 use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, PremultipliedColorU8, Stroke, Transform};
 
-/// 一枚已定位字形(物理坐标;key 携带字形 id 与字号)
+/// 一枚已定位字形(物理坐标)。
+/// CPU 路径用 (key, x, y):位图左上角 + 光栅配置;
+/// GPU 路径用 (id, ox, oy):字形 id + **基线原点**(vello draw_glyphs 语义)
 #[derive(Clone, Copy, Debug)]
 pub struct GlyphPos {
     pub key: GlyphRasterConfig,
+    /// 位图左上角 x(CPU 光栅路径)
     pub x: f32,
+    /// 位图左上角 y(CPU 光栅路径)
     pub y: f32,
+    /// 字形 id(GPU 路径)
+    pub id: u16,
+    /// 基线原点 x(GPU 路径)
+    pub ox: f32,
+    /// 基线原点 y(GPU 路径)
+    pub oy: f32,
 }
 
 /// 后端能力协商(调研 15:为 3D 复合预留通道,避免 M2 设计堵路)
