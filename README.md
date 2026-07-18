@@ -1,47 +1,25 @@
-# svelte-rs(工作代号 `sv`)
+[中文](./README.zh-CN.md) | **English**
 
-Svelte 风格的 Rust 跨平台桌面 UI 库 — **探索原型**。
+# svelte-rs (working name `sv`)
 
-把 Svelte 5 的编译哲学搬到原生桌面:模板在编译期变成对 retained 场景树的
-**定点更新代码**,运行时没有虚拟 DOM、没有 diff。目标平台:Windows / Linux /
-macOS / 鸿蒙(HarmonyOS NEXT)。
+[![CI](https://github.com/Cyaim/svelte-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/Cyaim/svelte-rs/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+
+A Svelte-style cross-platform desktop UI library in Rust — **exploratory prototype**.
+
+The idea: bring Svelte 5's compilation philosophy to native desktop. Templates compile
+into **pinpoint updates** against a retained scene tree — no virtual DOM, no diffing,
+no rebuild at runtime. Target platforms: Windows / Linux / macOS / HarmonyOS NEXT.
 
 ```rust
-let count = state(0);                       // $state
+let count = state(0);                          // $state
 let double = derived(move || count.get() * 2); // $derived
 effect(move || println!("{}", double.get()));  // $effect
-count.set(1);                                // 精准触发,无 diff
+count.set(1);                                  // precise trigger, no diff
 ```
 
-## 仓库结构
-
-| 路径 | 说明 |
-|---|---|
-| `crates/sv-reactive` | runes 响应式内核(push-pull 三态脏标记、effect 所有权树) |
-| `crates/sv-ui` | retained 场景树(桌面版 DOM)+ 细粒度绑定原语 |
-| `crates/sv-macro` | `view!` 宏前端(proc-macro 路线) |
-| `crates/sv-compiler` | `.sv` 单文件组件编译器前端(编译器路线:runes 源变换 + 原汁 Svelte 模板语法) |
-| `crates/sv-shell` | winit 窗口 + CPU 自绘渲染壳(原型;归宿是 wgpu/vello + Parley) |
-| `examples/counter` | 计数器 · `view!` 宏写法 |
-| `examples/counter-sfc` | 计数器 · `.sv` 文件写法(`src/Counter.sv`,build.rs 编译) |
-| `examples/todo-sfc` | 待办 · `.sv` 特性集(组件+`$props`、`{#each}{:else}`、`{@const}`、`{#key}`、`style:` 指令、`$inspect`) |
-| `examples/showcase` | **特性橱窗**(推荐先看):`$bindable` 双向绑定、children snippet、`{#snippet}/{@render}`、keyed `{#each}` 重排保状态、`<style>` scoped 类 |
-| `docs/SVELTE-SUPPORT.md` | Svelte 5 语法/特性支持矩阵(77 项,终局 ✅43/🚧3/📋0/⏳11/❌20) |
-| `docs/CSS-SUPPORT.md` | 现代 CSS 对比矩阵(91 项差距表:✅12 / C1+C2 排期 32 / P2 13 / ⏳18 / ❌16) |
-| `docs/DESIGN.md` | 架构设计与决策记录(ADR) |
-| `docs/research/` | 5 份联网核实的深度调研(Svelte 内核 / 生态 / 鸿蒙 / 编译器 / 渲染栈) |
-
-## 快速开始
-
-```sh
-cargo test                    # 全部测试(77 个)
-cargo run -p showcase         # 特性橱窗(推荐)
-cargo run -p counter          # 计数器(view! 宏路线)
-cargo run -p counter-sfc      # 计数器(.sv 编译器路线,UI 在 src/Counter.sv)
-cargo run -p showcase -- --png out.png  # 离屏渲染一帧(无需窗口)
-```
-
-`.sv` 写法一瞥(script 里的 `count += 1` 会被编译器自动改写成句柄操作):
+Or the same thing in a `.sv` single-file component — real Svelte template syntax,
+real Rust expressions (the compiler rewrites `count += 1` into handle operations):
 
 ```text
 <script>
@@ -49,21 +27,83 @@ let count = $state(0i32);
 let double = $derived(count * 2);
 </script>
 
-<text>Count: {count} · 双倍 = {double}</text>
+<text>Count: {count} · doubled = {double}</text>
 <button style="bg:#ff3e00; fg:#fff" on:click={|| count += 1}>+1</button>
 {#if count > 5}
-  <text fg="#ff3e00">超过 5 了!</text>
+  <text fg="#ff3e00">Past five!</text>
 {/if}
 ```
 
-> 注:检出目录在 OneDrive 等同步盘时,建议启用 `.cargo/config.toml` 里注释掉的
-> `target-dir`,把构建产物移出同步目录。
+## Highlights
 
-## 现状与路线
+- **Runes kernel in Rust** — `state` / `derived` (writable) / `effect` / `batch` /
+  `untrack` / context, push-pull three-state dirty marking, effect ownership tree.
+- **Two compiler frontends, one target** — a `view!` proc-macro and a `.sv`
+  single-file-component compiler (build.rs integration) both emit calls to the same
+  scene-tree binding primitives.
+- **Real CSS, compiled** — a closed subset of actual CSS syntax (`:hover`, `:root`
+  variables, nesting, inheritance) resolved at build time; zero runtime selector engine.
+- **Switchable render backends** — CPU (tiny-skia + swash) and GPU (vello 0.9 / wgpu)
+  behind one `Painter` trait; select per build, per env (`SV_RENDERER`), with automatic
+  fallback.
+- **Scales to a million widgets** — viewport virtualization (`virtual_list`) measured at
+  1,000,000 logical controls: p99 = 5.28 ms, 1% low = 174 fps, 28 MB working set
+  (CPU backend, continuous-scroll worst case).
 
-M0 已完成:signal → 场景树 → 布局 → 光栅完整闭环(中文渲染、HiDPI、点击派发);
-`.sv` 编译器支持 Svelte 5 主要语法面(runes 全家、全部块语法、组件模型 v0、
-`$bindable` 双向绑定、keyed each、scoped `<style>`),经对抗性审查修复 17 个缺陷。
-详见 [docs/DESIGN.md](docs/DESIGN.md) 与 [docs/SVELTE-SUPPORT.md](docs/SVELTE-SUPPORT.md)。
+## Quick start
 
-双许可:MIT OR Apache-2.0。
+```sh
+cargo test                    # run the whole test suite
+cargo run -p showcase         # feature tour (recommended first stop)
+cargo run -p counter          # counter, view! macro route
+cargo run -p counter-sfc      # counter, .sv compiler route (UI in src/Counter.sv)
+cargo run -p showcase -- --png out.png  # render one frame offscreen, no window needed
+```
+
+> If the checkout lives inside OneDrive or another synced folder, enable the
+> commented-out `target-dir` in `.cargo/config.toml` to keep build artifacts out
+> of the sync scope.
+
+## Documentation
+
+The documentation center lives in [`docs/`](docs/README.md) — guides in
+[English](docs/en/getting-started.md) and [中文](docs/zh-CN/getting-started.md):
+
+| Guide | |
+|---|---|
+| [Getting started](docs/en/getting-started.md) | Install, run the examples, repo tour |
+| [Architecture](docs/en/architecture.md) | Layers, data flow, why no VDOM |
+| [Reactivity](docs/en/reactivity.md) | The runes kernel as a user guide |
+| [.sv components](docs/en/sv-components.md) | Template syntax, props, build integration |
+| [Styling](docs/en/styling.md) | The compiled CSS subset |
+| [Render backends](docs/en/rendering-backends.md) | Painter trait, CPU/vello, knobs |
+| [Performance](docs/en/performance.md) | virtual_list, membench, measured numbers |
+
+Reference material (Chinese): [design & ADRs](docs/DESIGN.md) ·
+[Svelte support matrix, 77 items](docs/SVELTE-SUPPORT.md) ·
+[modern-CSS gap matrix, 91 items](docs/CSS-SUPPORT.md) ·
+[research reports ×18](docs/README.md#research)
+
+## Repository layout
+
+| Path | What it is |
+|---|---|
+| `crates/sv-reactive` | Runes reactive kernel |
+| `crates/sv-ui` | Retained scene tree + fine-grained binding primitives |
+| `crates/sv-macro` | `view!` proc-macro frontend |
+| `crates/sv-compiler` | `.sv` single-file-component compiler frontend |
+| `crates/sv-shell` | winit window shell + CPU/vello renderers |
+| `examples/` | showcase · counter · counter-sfc · todo-sfc · membench |
+
+## Status
+
+M0 exploration is complete: full loop from signal to pixels (CJK text, HiDPI, hit
+testing), `.sv` compiler covering the main Svelte 5 syntax surface (43 of 77 matrix
+items ✅), dual render backends, and the million-widget virtualization result.
+This is a prototype — APIs churn, and several subsystems (layout, text shaping,
+frame pacing) are placeholders with planned replacements. See
+[docs/DESIGN.md](docs/DESIGN.md) (Chinese) for the roadmap and ADRs.
+
+## License
+
+Dual-licensed: MIT OR Apache-2.0.
