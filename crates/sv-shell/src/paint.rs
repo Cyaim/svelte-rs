@@ -29,7 +29,10 @@ pub struct GlyphKey {
 
 impl GlyphKey {
     pub fn new(id: u16, px: f32) -> Self {
-        Self { id, px_bits: px.to_bits() }
+        Self {
+            id,
+            px_bits: px.to_bits(),
+        }
     }
 
     /// 字号(vello 端 `font_size` / CPU 端 scaler size 用)
@@ -102,9 +105,26 @@ pub trait Painter {
 /// 简化命令(数值取整,快照稳定;字形只记数量与颜色)
 #[derive(Clone, PartialEq, Debug)]
 pub enum PaintCmd {
-    FillRect { x: i32, y: i32, w: i32, h: i32, radius: i32, color: Color },
-    StrokeRect { x: i32, y: i32, w: i32, h: i32, width: i32, color: Color },
-    Glyphs { count: usize, color: Color },
+    FillRect {
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        radius: i32,
+        color: Color,
+    },
+    StrokeRect {
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        width: i32,
+        color: Color,
+    },
+    Glyphs {
+        count: usize,
+        color: Color,
+    },
 }
 
 #[derive(Default)]
@@ -124,7 +144,16 @@ impl Painter for RecordingPainter {
         });
     }
 
-    fn stroke_rounded_rect(&mut self, x: f32, y: f32, w: f32, h: f32, radius: f32, width: f32, color: Color) {
+    fn stroke_rounded_rect(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        radius: f32,
+        width: f32,
+        color: Color,
+    ) {
         let _ = radius;
         self.cmds.push(PaintCmd::StrokeRect {
             x: x as i32,
@@ -137,7 +166,10 @@ impl Painter for RecordingPainter {
     }
 
     fn glyph_run(&mut self, glyphs: &[GlyphPos], color: Color) {
-        self.cmds.push(PaintCmd::Glyphs { count: glyphs.len(), color });
+        self.cmds.push(PaintCmd::Glyphs {
+            count: glyphs.len(),
+            color,
+        });
     }
 }
 
@@ -184,7 +216,15 @@ mod glyph_cache {
                 .format(Format::Alpha)
                 .render(&mut scaler, key.id)
                 .map(|img| (img.placement, img.data))
-                .unwrap_or((Placement { left: 0, top: 0, width: 0, height: 0 }, Vec::new()))
+                .unwrap_or((
+                    Placement {
+                        left: 0,
+                        top: 0,
+                        width: 0,
+                        height: 0,
+                    },
+                    Vec::new(),
+                ))
         })
     }
 
@@ -228,7 +268,14 @@ fn rounded_rect_path(pb: &mut PathBuilder, x: f32, y: f32, w: f32, h: f32, r: f3
     pb.line_to(x + w - r, y);
     pb.cubic_to(x + w - r + K * r, y, x + w, y + r - K * r, x + w, y + r);
     pb.line_to(x + w, y + h - r);
-    pb.cubic_to(x + w, y + h - r + K * r, x + w - r + K * r, y + h, x + w - r, y + h);
+    pb.cubic_to(
+        x + w,
+        y + h - r + K * r,
+        x + w - r + K * r,
+        y + h,
+        x + w - r,
+        y + h,
+    );
     pb.line_to(x + r, y + h);
     pb.cubic_to(x + r - K * r, y + h, x, y + h - r + K * r, x, y + h - r);
     pb.line_to(x, y + r);
@@ -236,7 +283,15 @@ fn rounded_rect_path(pb: &mut PathBuilder, x: f32, y: f32, w: f32, h: f32, r: f3
     pb.close();
 }
 
-fn blend_pixel(data: &mut [PremultipliedColorU8], pw: u32, ph: u32, x: i32, y: i32, c: Color, cov: u8) {
+fn blend_pixel(
+    data: &mut [PremultipliedColorU8],
+    pw: u32,
+    ph: u32,
+    x: i32,
+    y: i32,
+    c: Color,
+    cov: u8,
+) {
     if x < 0 || y < 0 || x >= pw as i32 || y >= ph as i32 {
         return;
     }
@@ -261,21 +316,45 @@ impl Painter for TinySkiaPainter<'_> {
             let mut paint = Paint::default();
             paint.set_color(skia_color(color));
             paint.anti_alias = true;
-            self.pixmap
-                .fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
+            self.pixmap.fill_path(
+                &path,
+                &paint,
+                FillRule::Winding,
+                Transform::identity(),
+                None,
+            );
         }
     }
 
-    fn stroke_rounded_rect(&mut self, x: f32, y: f32, w: f32, h: f32, radius: f32, width: f32, color: Color) {
+    fn stroke_rounded_rect(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        radius: f32,
+        width: f32,
+        color: Color,
+    ) {
         // 沿边框中心线描边(内缩半宽),视觉贴合 border-box
         let half = width / 2.0;
         let mut pb = PathBuilder::new();
-        rounded_rect_path(&mut pb, x + half, y + half, w - width, h - width, (radius - half).max(0.0));
+        rounded_rect_path(
+            &mut pb,
+            x + half,
+            y + half,
+            w - width,
+            h - width,
+            (radius - half).max(0.0),
+        );
         if let Some(path) = pb.finish() {
             let mut paint = Paint::default();
             paint.set_color(skia_color(color));
             paint.anti_alias = true;
-            let stroke = Stroke { width, ..Stroke::default() };
+            let stroke = Stroke {
+                width,
+                ..Stroke::default()
+            };
             self.pixmap
                 .stroke_path(&path, &paint, &stroke, Transform::identity(), None);
         }

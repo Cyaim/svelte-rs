@@ -47,7 +47,11 @@ pub struct CompileError {
 impl CompileError {
     pub(crate) fn at_offset(source: &str, offset: usize, message: impl Into<String>) -> Self {
         let (line, col) = line_col(source, offset);
-        CompileError { message: message.into(), line, col }
+        CompileError {
+            message: message.into(),
+            line,
+            col,
+        }
     }
 }
 
@@ -134,8 +138,12 @@ pub fn compile_file(path: &Path) -> Result<String, String> {
 }
 
 pub fn compile_file_with(path: &Path, registry: &PropsRegistry) -> Result<String, String> {
-    let source = std::fs::read_to_string(path).map_err(|e| format!("{}: 读取失败: {e}", path.display()))?;
-    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("component");
+    let source =
+        std::fs::read_to_string(path).map_err(|e| format!("{}: 读取失败: {e}", path.display()))?;
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("component");
     let fn_name = sanitize_fn_name(stem);
     compile_sv_with(&source, &fn_name, registry).map_err(|e| format!("{}:{e}", path.display()))
 }
@@ -172,10 +180,20 @@ pub fn build(src_dir: impl AsRef<Path>) {
     // 第一遍:props 签名注册表
     let mut registry = PropsRegistry::new();
     for path in &files {
-        let Ok(source) = std::fs::read_to_string(path) else { continue };
-        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("component");
+        let Ok(source) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("component");
         let fn_name = sanitize_fn_name(stem);
-        registry.insert(fn_name, PropsSig { fields: props_signature(&source) });
+        registry.insert(
+            fn_name,
+            PropsSig {
+                fields: props_signature(&source),
+            },
+        );
     }
 
     // 第二遍:编译
@@ -185,7 +203,10 @@ pub fn build(src_dir: impl AsRef<Path>) {
             Ok(c) => c,
             Err(e) => panic!("\n\n.sv 编译失败\n  --> {e}\n"),
         };
-        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("component");
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("component");
         let out = Path::new(&out_dir).join(format!("{}.rs", sanitize_fn_name(stem)));
         std::fs::write(&out, code).expect("写入生成代码失败");
     }
@@ -212,7 +233,9 @@ fn props_signature(source: &str) -> Option<Vec<PropsSigField>> {
 }
 
 fn collect_sv_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
@@ -253,18 +276,33 @@ let double = $derived(count * 2);
     fn counter_compiles() {
         let code = compile_sv(COUNTER, "counter").expect("应编译成功");
         // runes 源变换
-        assert!(code.contains("::sv_reactive::state(0i32)"), "$state 应展开:\n{code}");
-        assert!(code.contains("::sv_reactive::derived(move || count.get() * 2)"), "$derived 应闭包化且读改写:\n{code}");
+        assert!(
+            code.contains("::sv_reactive::state(0i32)"),
+            "$state 应展开:\n{code}"
+        );
+        assert!(
+            code.contains("::sv_reactive::derived(move || count.get() * 2)"),
+            "$derived 应闭包化且读改写:\n{code}"
+        );
         assert!(
             code.contains("count.update(|__v| *__v += __sv_rhs)"),
             "+= 应改写成 RHS 预求值的 update:\n{code}"
         );
         assert!(code.contains("count.set(0)"), "= 应改写成 set:\n{code}");
         // 模板
-        assert!(code.contains("::sv_ui::if_block"), "{{#if}} 应编译成 if_block:\n{code}");
-        assert!(code.contains("count.get() > 5"), "cond 里的读应改写:\n{code}");
+        assert!(
+            code.contains("::sv_ui::if_block"),
+            "{{#if}} 应编译成 if_block:\n{code}"
+        );
+        assert!(
+            code.contains("count.get() > 5"),
+            "cond 里的读应改写:\n{code}"
+        );
         assert!(code.contains("bind_text"), "插值文本应绑定:\n{code}");
-        assert!(code.contains("create_text(\"sv 计数器\")"), "静态文本无绑定:\n{code}");
+        assert!(
+            code.contains("create_text(\"sv 计数器\")"),
+            "静态文本无绑定:\n{code}"
+        );
         // 生成的是合法 Rust
         syn::parse_file(&code).expect("生成代码应能被 syn 解析");
     }
@@ -285,7 +323,10 @@ let items = $state(vec![1i32, 2, 3]);
         // 这里换成合法写法
         let src = src.replace("items.push(9)", "items += vec![]");
         let code = compile_sv(&src, "list").expect("应编译成功");
-        assert!(code.contains("::sv_ui::each_block"), "{{#each}} 应编译成 each_block:\n{code}");
+        assert!(
+            code.contains("::sv_ui::each_block"),
+            "{{#each}} 应编译成 each_block:\n{code}"
+        );
         assert!(code.contains("items.get()"), "列表读应改写:\n{code}");
         syn::parse_file(&code).expect("生成代码应能被 syn 解析");
     }
@@ -301,8 +342,14 @@ $effect(|| {
 <view><text>{count}</text></view>
 "#;
         let code = compile_sv(src, "c").expect("应编译成功");
-        assert!(code.contains("::sv_reactive::effect"), "$effect 应展开:\n{code}");
-        assert!(code.contains("count.get()"), "println! 参数里的读也应改写:\n{code}");
+        assert!(
+            code.contains("::sv_reactive::effect"),
+            "$effect 应展开:\n{code}"
+        );
+        assert!(
+            code.contains("count.get()"),
+            "println! 参数里的读也应改写:\n{code}"
+        );
         syn::parse_file(&code).unwrap();
     }
 
@@ -341,7 +388,10 @@ let items = $state(Vec::<String>::new());
 </view>
 "#;
         let code = compile_sv(src, "c").expect("应编译成功");
-        assert!(code.contains("each_block_else"), "{{:else}} 应编译成 each_block_else:\n{code}");
+        assert!(
+            code.contains("each_block_else"),
+            "{{:else}} 应编译成 each_block_else:\n{code}"
+        );
         assert!(code.contains("空空如也"));
         syn::parse_file(&code).unwrap();
     }
@@ -358,7 +408,10 @@ let user = $state(1i32);
 </view>
 "#;
         let code = compile_sv(src, "c").expect("应编译成功");
-        assert!(code.contains("::sv_ui::key_block"), "{{#key}} 应编译成 key_block:\n{code}");
+        assert!(
+            code.contains("::sv_ui::key_block"),
+            "{{#key}} 应编译成 key_block:\n{code}"
+        );
         assert!(code.contains("user.get()"), "key 表达式的读应改写:\n{code}");
         syn::parse_file(&code).unwrap();
     }
@@ -380,7 +433,10 @@ let count = $state(1i32);
             code.contains("::sv_reactive::derived(move || count.get() * 10)"),
             "{{@const}} 应编译成块级 derived:\n{code}"
         );
-        assert!(code.contains("(total.get()).to_string()"), "后续读 total 应改写:\n{code}");
+        assert!(
+            code.contains("(total.get()).to_string()"),
+            "后续读 total 应改写:\n{code}"
+        );
         syn::parse_file(&code).unwrap();
     }
 
@@ -394,9 +450,18 @@ let size = $state(10.0f32);
 </view>
 "#;
         let code = compile_sv(src, "c").expect("应编译成功");
-        assert!(code.contains("bind_style_patch"), "style: 指令应编译成 patch 绑定:\n{code}");
-        assert!(code.contains("Edges::all(size.get() * 2.0)"), "读应改写:\n{code}");
-        assert!(code.contains("s.gap = 3f32"), "静态 style 属性应共存:\n{code}");
+        assert!(
+            code.contains("bind_style_patch"),
+            "style: 指令应编译成 patch 绑定:\n{code}"
+        );
+        assert!(
+            code.contains("Edges::all(size.get() * 2.0)"),
+            "读应改写:\n{code}"
+        );
+        assert!(
+            code.contains("s.gap = 3f32"),
+            "静态 style 属性应共存:\n{code}"
+        );
         syn::parse_file(&code).unwrap();
     }
 
@@ -425,9 +490,15 @@ let count = $state(0i32);
 <view><text>{label} x {times}</text></view>
 "#;
         let code = compile_sv(src, "todo_item").expect("应编译成功");
-        assert!(code.contains("pub struct TodoItemProps"), "$props 应生成结构体:\n{code}");
+        assert!(
+            code.contains("pub struct TodoItemProps"),
+            "$props 应生成结构体:\n{code}"
+        );
         assert!(code.contains("pub label: String") && code.contains("pub times: i32"));
-        assert!(code.contains("props: TodoItemProps"), "fn 应带 props 参数:\n{code}");
+        assert!(
+            code.contains("props: TodoItemProps"),
+            "fn 应带 props 参数:\n{code}"
+        );
         assert!(
             code.contains("let TodoItemProps { label, times } = props;"),
             "应解构 props:\n{code}"
@@ -442,8 +513,16 @@ let count = $state(0i32);
             "todo_item",
             PropsSig {
                 fields: Some(vec![
-                    PropsSigField { name: "label".into(), has_default: false, bindable: false },
-                    PropsSigField { name: "times".into(), has_default: true, bindable: false },
+                    PropsSigField {
+                        name: "label".into(),
+                        has_default: false,
+                        bindable: false,
+                    },
+                    PropsSigField {
+                        name: "times".into(),
+                        has_default: true,
+                        bindable: false,
+                    },
                 ]),
             },
         );
@@ -459,7 +538,10 @@ let name = $state(String::from("洗碗"));
             code.contains("todo_item(") && code.contains("TodoItemProps"),
             "组件标签应编译成函数调用:\n{code}"
         );
-        assert!(code.contains("label: name.get()"), "prop 表达式的读应改写:\n{code}");
+        assert!(
+            code.contains("label: name.get()"),
+            "prop 表达式的读应改写:\n{code}"
+        );
         assert!(
             code.contains("times: TodoItemProps::default_times()"),
             "缺省 prop 应调用 callee 侧默认值函数:\n{code}"
@@ -469,9 +551,12 @@ let name = $state(String::from("洗碗"));
         // 缺必填 prop 与未知 prop 都应报错
         let missing = compile_sv_with("<view><TodoItem /></view>", "app", &registry).unwrap_err();
         assert!(missing.message.contains("label"), "{missing}");
-        let unknown =
-            compile_sv_with("<view><TodoItem label={1} bogus={2} /></view>", "app", &registry)
-                .unwrap_err();
+        let unknown = compile_sv_with(
+            "<view><TodoItem label={1} bogus={2} /></view>",
+            "app",
+            &registry,
+        )
+        .unwrap_err();
         assert!(unknown.message.contains("bogus"), "{unknown}");
     }
 
@@ -509,10 +594,22 @@ let handle_holder = $sig(a);
 <view><text>{b}</text></view>
 "#;
         let code = compile_sv(src, "c").expect("应编译成功");
-        assert!(code.contains("let a = ::sv_reactive::state(1i32)"), "$state.raw:\n{code}");
-        assert!(code.contains("a.get() * 2"), "$derived.by 体内读改写:\n{code}");
-        assert!(code.contains("[inspect]"), "$inspect 应生成观察 effect:\n{code}");
-        assert!(code.contains("let handle_holder = a;"), "$sig 应取出裸句柄:\n{code}");
+        assert!(
+            code.contains("let a = ::sv_reactive::state(1i32)"),
+            "$state.raw:\n{code}"
+        );
+        assert!(
+            code.contains("a.get() * 2"),
+            "$derived.by 体内读改写:\n{code}"
+        );
+        assert!(
+            code.contains("[inspect]"),
+            "$inspect 应生成观察 effect:\n{code}"
+        );
+        assert!(
+            code.contains("let handle_holder = a;"),
+            "$sig 应取出裸句柄:\n{code}"
+        );
         syn::parse_file(&code).unwrap();
     }
 
@@ -532,7 +629,10 @@ let count = $state(0i32);
 </view>
 "#;
         let code = compile_sv(src, "c").expect("应编译成功");
-        assert!(code.contains("let badge ="), "snippet 应编译成局部闭包:\n{code}");
+        assert!(
+            code.contains("let badge ="),
+            "snippet 应编译成局部闭包:\n{code}"
+        );
         assert!(
             code.contains("(badge)(&__doc, __parent, String::from(\"计数\"), count.get())"),
             "{{@render}} 应编译成调用且参数改写:\n{code}"
@@ -547,8 +647,16 @@ let count = $state(0i32);
             "card",
             PropsSig {
                 fields: Some(vec![
-                    PropsSigField { name: "title".into(), has_default: false, bindable: false },
-                    PropsSigField { name: "children".into(), has_default: false, bindable: false },
+                    PropsSigField {
+                        name: "title".into(),
+                        has_default: false,
+                        bindable: false,
+                    },
+                    PropsSigField {
+                        name: "children".into(),
+                        has_default: false,
+                        bindable: false,
+                    },
                 ]),
             },
         );
@@ -611,8 +719,16 @@ $props { value: $bindable(i32), step: i32 = 1 }
             "stepper",
             PropsSig {
                 fields: Some(vec![
-                    PropsSigField { name: "value".into(), has_default: false, bindable: true },
-                    PropsSigField { name: "step".into(), has_default: true, bindable: false },
+                    PropsSigField {
+                        name: "value".into(),
+                        has_default: false,
+                        bindable: true,
+                    },
+                    PropsSigField {
+                        name: "step".into(),
+                        has_default: true,
+                        bindable: false,
+                    },
                 ]),
             },
         );
@@ -632,8 +748,12 @@ let count = $state(0i32);
         syn::parse_file(&code2).unwrap();
 
         // 非 bindable 字段用 bind: 应报错
-        let err = compile_sv_with("<view><Stepper bind:step={1} value={$sig(x)} /></view>", "app", &registry)
-            .unwrap_err();
+        let err = compile_sv_with(
+            "<view><Stepper bind:step={1} value={$sig(x)} /></view>",
+            "app",
+            &registry,
+        )
+        .unwrap_err();
         assert!(err.message.contains("bindable"), "{err}");
     }
 
@@ -649,7 +769,10 @@ let items = $state(vec![(1i32, String::from("甲"))]);
 </view>
 "#;
         let code = compile_sv(src, "c").expect("应编译成功");
-        assert!(code.contains("each_block_keyed"), "(key) 应走 keyed 版本:\n{code}");
+        assert!(
+            code.contains("each_block_keyed"),
+            "(key) 应走 keyed 版本:\n{code}"
+        );
         assert!(code.contains("it.0"), "key 表达式应保留:\n{code}");
         syn::parse_file(&code).unwrap();
 
@@ -675,7 +798,10 @@ let items = $state(vec![(1i32, String::from("甲"))]);
 </style>
 "#;
         let code = compile_sv(src, "c").expect("应编译成功");
-        assert!(code.contains("s.font_size = 26f32"), "类样式应展开:\n{code}");
+        assert!(
+            code.contains("s.font_size = 26f32"),
+            "类样式应展开:\n{code}"
+        );
         assert!(code.contains("s.corner_radius = 6f32"), "\n{code}");
         // style="" 在类之后:padding 应被 99 覆盖(后写胜出)
         let btn_zone = code.split("create_button").nth(1).unwrap();
@@ -700,7 +826,10 @@ let n = $state(1i32);
 </view>
 "#;
         let code = compile_sv(src, "c").expect("应编译成功");
-        assert!(code.contains("[debug]") && code.contains("n.get()"), "\n{code}");
+        assert!(
+            code.contains("[debug]") && code.contains("n.get()"),
+            "\n{code}"
+        );
         syn::parse_file(&code).unwrap();
     }
 
@@ -710,7 +839,10 @@ let n = $state(1i32);
     fn comments_and_options_ignored() {
         let src = "<view><!-- 这是注释 --><svelte:options runes />\n<text>x</text></view>";
         let code = compile_sv(src, "c").expect("应编译成功");
-        assert!(!code.contains("这是注释") && !code.contains("options"), "\n{code}");
+        assert!(
+            !code.contains("这是注释") && !code.contains("options"),
+            "\n{code}"
+        );
         syn::parse_file(&code).unwrap();
     }
 
@@ -749,7 +881,10 @@ let title = String::from("你好");
 <view><Card {title} /></view>
 "#;
         let code = compile_sv_with(src, "app", &registry).expect("应编译成功");
-        assert!(code.contains("title: title"), "简写 {{title}} 应展开:\n{code}");
+        assert!(
+            code.contains("title: title"),
+            "简写 {{title}} 应展开:\n{code}"
+        );
         syn::parse_file(&code).unwrap();
     }
 
@@ -761,7 +896,10 @@ let n = $state(0i32);
 <view {@attach |d: &sv_ui::Doc, id: sv_ui::ViewId| { let _ = (d, id, n); }}></view>
 "#;
         let code = compile_sv(src, "c").expect("应编译成功");
-        assert!(code.contains("::sv_reactive::effect"), "{{@attach}} 应包进 effect:\n{code}");
+        assert!(
+            code.contains("::sv_reactive::effect"),
+            "{{@attach}} 应包进 effect:\n{code}"
+        );
         assert!(code.contains("n.get()"), "附着闭包内读应改写:\n{code}");
         syn::parse_file(&code).unwrap();
     }
@@ -782,11 +920,23 @@ let big = $state(true);
 </style>
 "#;
         let code = compile_sv(src, "c").expect("应编译成功");
-        assert!(code.contains("::sv_ui::bind_style"), "有条件类应整体重算:\n{code}");
-        assert!(code.contains("if muted.get()"), "简写条件即同名变量:\n{code}");
+        assert!(
+            code.contains("::sv_ui::bind_style"),
+            "有条件类应整体重算:\n{code}"
+        );
+        assert!(
+            code.contains("if muted.get()"),
+            "简写条件即同名变量:\n{code}"
+        );
         assert!(code.contains("if big.get()"), "\n{code}");
-        assert!(code.contains("Edges::all(4.0f32)"), "style: 指令应并入同一闭包:\n{code}");
-        assert!(!code.contains("bind_style_patch"), "并入后不应再有独立 patch:\n{code}");
+        assert!(
+            code.contains("Edges::all(4.0f32)"),
+            "style: 指令应并入同一闭包:\n{code}"
+        );
+        assert!(
+            !code.contains("bind_style_patch"),
+            "并入后不应再有独立 patch:\n{code}"
+        );
         syn::parse_file(&code).unwrap();
     }
 
@@ -799,7 +949,10 @@ let big = $state(true);
 "#;
         let code = compile_sv(src, "c").expect("应编译成功");
         assert!(code.contains("transition_in_fade"), "\n{code}");
-        assert!(code.contains("200u32") && code.contains("500u32"), "\n{code}");
+        assert!(
+            code.contains("200u32") && code.contains("500u32"),
+            "\n{code}"
+        );
         let err = compile_sv("<view out:fade><text>x</text></view>", "c").unwrap_err();
         assert!(err.message.contains("INERT"), "{err}");
         syn::parse_file(&code).unwrap();
@@ -814,8 +967,14 @@ let done = $state(false);
 "#;
         let code = compile_sv(src, "c").expect("应编译成功");
         assert!(code.contains("create_checkbox"), "\n{code}");
-        assert!(code.contains("set_checked(__b_el, __b_sig.get())"), "状态→视图:\n{code}");
-        assert!(code.contains("__b_sig.update(|__v| *__v = !*__v)"), "点击→状态:\n{code}");
+        assert!(
+            code.contains("set_checked(__b_el, __b_sig.get())"),
+            "状态→视图:\n{code}"
+        );
+        assert!(
+            code.contains("__b_sig.update(|__v| *__v = !*__v)"),
+            "点击→状态:\n{code}"
+        );
         syn::parse_file(&code).unwrap();
     }
 
@@ -834,7 +993,10 @@ let base = $state(1i32);
 "#;
         let code = compile_sv(src, "c").expect("应编译成功");
         assert!(code.contains("::sv_ui::tasks::await_block"), "\n{code}");
-        assert!(code.contains("base.get() + 1"), "future 工厂内读应改写(依赖变化即重启):\n{code}");
+        assert!(
+            code.contains("base.get() + 1"),
+            "future 工厂内读应改写(依赖变化即重启):\n{code}"
+        );
         syn::parse_file(&code).unwrap();
 
         let src2 = r#"<view>
@@ -848,7 +1010,10 @@ let base = $state(1i32);
 </view>
 "#;
         let code2 = compile_sv(src2, "c").expect("应编译成功");
-        assert!(code2.contains("await_block_result"), "带 catch 走 Result 版:\n{code2}");
+        assert!(
+            code2.contains("await_block_result"),
+            "带 catch 走 Result 版:\n{code2}"
+        );
         syn::parse_file(&code2).unwrap();
     }
 
@@ -873,10 +1038,22 @@ $effect(|| {
 <view><text>{snap} {id}</text></view>
 "#;
         let code = compile_sv(src, "c").expect("应编译成功");
-        assert!(code.contains("let snap = (count.get())"), "$state.snapshot:\n{code}");
-        assert!(code.contains("::sv_reactive::unique_id()"), "$props.id:\n{code}");
-        assert!(code.contains("::sv_reactive::is_tracking()"), "$effect.tracking:\n{code}");
-        assert!(code.contains("__sv_root.dispose()"), "$effect.root 返回销毁闭包:\n{code}");
+        assert!(
+            code.contains("let snap = (count.get())"),
+            "$state.snapshot:\n{code}"
+        );
+        assert!(
+            code.contains("::sv_reactive::unique_id()"),
+            "$props.id:\n{code}"
+        );
+        assert!(
+            code.contains("::sv_reactive::is_tracking()"),
+            "$effect.tracking:\n{code}"
+        );
+        assert!(
+            code.contains("__sv_root.dispose()"),
+            "$effect.root 返回销毁闭包:\n{code}"
+        );
         assert!(code.contains("[trace]"), "$inspect.trace:\n{code}");
         syn::parse_file(&code).unwrap();
     }
@@ -891,7 +1068,10 @@ let optimistic = || d = 99;
 <view><text>{d}</text></view>
 "#;
         let code = compile_sv(src, "c").expect("应编译成功");
-        assert!(code.contains("d.set(99)"), "写 derived 应改写(乐观 UI):\n{code}");
+        assert!(
+            code.contains("d.set(99)"),
+            "写 derived 应改写(乐观 UI):\n{code}"
+        );
         syn::parse_file(&code).unwrap();
     }
 
@@ -950,14 +1130,23 @@ text { font-size: 1.25rem; color: #334; }
             "var() + 四值简写:\n{code}"
         );
         // margin 四值
-        assert!(code.contains("bottom: 12f32") && code.contains("left: 16f32"), "margin 四值:\n{code}");
+        assert!(
+            code.contains("bottom: 12f32") && code.contains("left: 16f32"),
+            "margin 四值:\n{code}"
+        );
         // border + hsl 折叠(hsl(16,100%,50%) ≈ rgb(255,68,0))
         assert!(code.contains("::sv_ui::Border"), "border 简写:\n{code}");
-        assert!(code.contains("Color::rgba(255u8, 68u8, 0u8, 255u8)"), "hsl 编译期折叠:\n{code}");
+        assert!(
+            code.contains("Color::rgba(255u8, 68u8, 0u8, 255u8)"),
+            "hsl 编译期折叠:\n{code}"
+        );
         // cursor
         assert!(code.contains("Cursor::Pointer"), "cursor:\n{code}");
         // 嵌套伪类:hover + active 双状态接线
-        assert!(code.contains("__hv") && code.contains("__ac"), "嵌套 &:hover/&:active:\n{code}");
+        assert!(
+            code.contains("__hv") && code.contains("__ac"),
+            "嵌套 &:hover/&:active:\n{code}"
+        );
         assert!(
             code.contains("set_on_pointer_down") && code.contains("set_on_pointer_up"),
             ":active 应接按压事件:\n{code}"
@@ -993,24 +1182,36 @@ text { font-size: 1.25rem; color: #334; }
 </style>
 "##;
         let code = compile_sv(src, "c").expect("CSS 语法应编译成功");
-        assert!(code.contains("s.corner_radius = 6f32"), "px 单位应剥离:\n{code}");
-        assert!(code.contains("Color::rgba(255u8, 62u8, 0u8, 255u8)"), "rgb() 应解析:\n{code}");
-        assert!(code.contains("Color::rgba(255u8, 165u8, 0u8, 255u8)"), "颜色名 orange:\n{code}");
+        assert!(
+            code.contains("s.corner_radius = 6f32"),
+            "px 单位应剥离:\n{code}"
+        );
+        assert!(
+            code.contains("Color::rgba(255u8, 62u8, 0u8, 255u8)"),
+            "rgb() 应解析:\n{code}"
+        );
+        assert!(
+            code.contains("Color::rgba(255u8, 165u8, 0u8, 255u8)"),
+            "颜色名 orange:\n{code}"
+        );
         assert!(code.contains("__hv"), ":hover 应生成内部悬停状态:\n{code}");
         assert!(
             code.contains("set_on_pointer_enter") && code.contains("set_on_pointer_leave"),
             ":hover 应自动接线指针事件:\n{code}"
         );
-        assert!(code.contains("if __hv.get()"), ":hover 样式应条件生效:\n{code}");
+        assert!(
+            code.contains("if __hv.get()"),
+            ":hover 样式应条件生效:\n{code}"
+        );
         syn::parse_file(&code).unwrap();
 
         // 不支持的单位给出引导
-        let err = compile_sv(
-            "<view><text style=\"padding: 2em\">x</text></view>",
-            "c",
-        )
-        .unwrap_err();
-        assert!(err.message.contains("em") && err.message.contains("px"), "{err}");
+        let err =
+            compile_sv("<view><text style=\"padding: 2em\">x</text></view>", "c").unwrap_err();
+        assert!(
+            err.message.contains("em") && err.message.contains("px"),
+            "{err}"
+        );
     }
 
     // ---- 对抗审查回归测试(2026-07-17,docs 见审查 workflow)----
@@ -1025,8 +1226,14 @@ let count = $state(0i32);
 <view><text>{count} {msg.len()}</text></view>
 "##;
         let code = compile_sv(src, "c").expect("应编译成功");
-        assert!(!code.contains("Props"), "注释/字符串里的 $props 不应生成结构体:\n{code}");
-        assert!(code.contains("$props { fake: i32 }"), "字符串内容不应被改动:\n{code}");
+        assert!(
+            !code.contains("Props"),
+            "注释/字符串里的 $props 不应生成结构体:\n{code}"
+        );
+        assert!(
+            code.contains("$props { fake: i32 }"),
+            "字符串内容不应被改动:\n{code}"
+        );
         syn::parse_file(&code).unwrap();
     }
 
@@ -1039,7 +1246,10 @@ let count = $state(1i32);
 <view><text>{count}</text></view>
 "#;
         let code = compile_sv(src, "c").expect("应编译成功");
-        assert!(code.contains("\"$state 不是 rune\""), "字符串里的 $state 应保留原文:\n{code}");
+        assert!(
+            code.contains("\"$state 不是 rune\""),
+            "字符串里的 $state 应保留原文:\n{code}"
+        );
         syn::parse_file(&code).unwrap();
     }
 
@@ -1099,8 +1309,14 @@ $effect(|| {
             code.contains("count * 2") && !code.contains("count.get() * 2"),
             "fn 参数应遮蔽:\n{code}"
         );
-        assert!(code.contains("Some(count) => count + 1"), "match 模式应遮蔽:\n{code}");
-        assert!(!code.contains("for count in 0..3 { let _ = count.get()"), "for 模式应遮蔽:\n{code}");
+        assert!(
+            code.contains("Some(count) => count + 1"),
+            "match 模式应遮蔽:\n{code}"
+        );
+        assert!(
+            !code.contains("for count in 0..3 { let _ = count.get()"),
+            "for 模式应遮蔽:\n{code}"
+        );
         syn::parse_file(&code).unwrap();
     }
 
@@ -1114,8 +1330,14 @@ let v = if let Some(count) = opt { count + 1 } else { count };
 <view><text>{v}</text></view>
 "#;
         let code = compile_sv(src, "c").expect("应编译成功");
-        assert!(code.contains("{ count + 1 }"), "if let 模式应遮蔽 then 分支:\n{code}");
-        assert!(code.contains("else { count.get() }"), "else 分支仍应改写:\n{code}");
+        assert!(
+            code.contains("{ count + 1 }"),
+            "if let 模式应遮蔽 then 分支:\n{code}"
+        );
+        assert!(
+            code.contains("else { count.get() }"),
+            "else 分支仍应改写:\n{code}"
+        );
         syn::parse_file(&code).unwrap();
     }
 
@@ -1155,7 +1377,10 @@ let 数据 = $state(vec![1i32]);
     #[test]
     fn glued_block_keyword_not_misparsed() {
         let err = compile_sv("<view>{#iffy}</view>", "c").unwrap_err();
-        assert!(err.message.contains("未知块类型"), "{{#iffy}} 不应被当成 {{#if fy}}: {err}");
+        assert!(
+            err.message.contains("未知块类型"),
+            "{{#iffy}} 不应被当成 {{#if fy}}: {err}"
+        );
     }
 
     #[test]
@@ -1175,12 +1400,23 @@ let ch = $state('x');
     #[test]
     fn empty_props_decl_keeps_contract() {
         // 声明了空 $props:callee 带 props 参数,caller 也要传空结构体
-        let callee = compile_sv("<script>\n$props {}\n</script>\n<view><text>x</text></view>", "empty_comp")
-            .expect("空 $props 应编译成功");
-        assert!(callee.contains("props: EmptyCompProps"), "callee 应带 props 参数:\n{callee}");
+        let callee = compile_sv(
+            "<script>\n$props {}\n</script>\n<view><text>x</text></view>",
+            "empty_comp",
+        )
+        .expect("空 $props 应编译成功");
+        assert!(
+            callee.contains("props: EmptyCompProps"),
+            "callee 应带 props 参数:\n{callee}"
+        );
 
         let mut registry = PropsRegistry::new();
-        registry.insert("empty_comp", PropsSig { fields: Some(vec![]) });
+        registry.insert(
+            "empty_comp",
+            PropsSig {
+                fields: Some(vec![]),
+            },
+        );
         let caller = compile_sv_with("<view><EmptyComp /></view>", "app", &registry).unwrap();
         assert!(
             caller.contains("empty_comp(&__doc, __parent, EmptyCompProps {})"),
@@ -1210,7 +1446,10 @@ let rows = $derived(vec![count; 3]);
         // each 的行内 count 是模式绑定的普通值,不能被改写成 count.get()
         let row_part = code.split("each_block").nth(1).unwrap();
         let after_bind = row_part.split("bind_text").nth(1).unwrap();
-        assert!(!after_bind.contains("count.get()"), "被 pattern 遮蔽的名字不应改写:\n{code}");
+        assert!(
+            !after_bind.contains("count.get()"),
+            "被 pattern 遮蔽的名字不应改写:\n{code}"
+        );
         syn::parse_file(&code).unwrap();
     }
 }

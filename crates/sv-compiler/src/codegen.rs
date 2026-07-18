@@ -16,8 +16,8 @@ use quote::{ToTokens, format_ident, quote};
 use syn::parse::Parser as _;
 
 use crate::script::{self, ScriptOutput, collect_pat_idents};
-use crate::template::{Arm, Attr, AttrValue, ExprSrc, Node, Segment, Tag};
 use crate::style::StyleSheet;
+use crate::template::{Arm, Attr, AttrValue, ExprSrc, Node, Segment, Tag};
 use crate::{CompileError, PropsRegistry, style};
 
 /// 模板一处作用域
@@ -48,7 +48,11 @@ pub fn generate(
     let (props_struct, props_param, props_destructure) = match &script.props {
         Some(decl) => {
             let props_ty = format_ident!("{}Props", pascal(fn_name));
-            let fnames: Vec<_> = decl.fields.iter().map(|f| format_ident!("{}", f.name)).collect();
+            let fnames: Vec<_> = decl
+                .fields
+                .iter()
+                .map(|f| format_ident!("{}", f.name))
+                .collect();
             let ftys: Vec<_> = decl.fields.iter().map(|f| &f.ty).collect();
             for f in &decl.fields {
                 // $bindable 的解构名是反应式变量(script::transform 已预注册),
@@ -87,7 +91,13 @@ pub fn generate(
         None => (TokenStream::new(), TokenStream::new(), TokenStream::new()),
     };
 
-    let mut cg = Cg { source, script, registry, sheet, n: 0 };
+    let mut cg = Cg {
+        source,
+        script,
+        registry,
+        sheet,
+        n: 0,
+    };
     let body = cg.emit_nodes(nodes, &root_scope)?;
     let script_stmts = &script.stmts;
     let fn_ident = format_ident!("{fn_name}");
@@ -120,7 +130,11 @@ fn pascal(snake: &str) -> String {
         .filter(|s| !s.is_empty())
         .map(|s| {
             let mut c = s.chars();
-            let head: String = c.next().into_iter().flat_map(|c| c.to_uppercase()).collect();
+            let head: String = c
+                .next()
+                .into_iter()
+                .flat_map(|c| c.to_uppercase())
+                .collect();
             format!("{head}{}", c.as_str())
         })
         .collect()
@@ -180,7 +194,12 @@ impl Cg<'_> {
     }
 
     /// 解析模板表达式并做 runes 读写改写
-    fn expr(&self, e: &ExprSrc, scope: &Scope, force_move: bool) -> Result<syn::Expr, CompileError> {
+    fn expr(
+        &self,
+        e: &ExprSrc,
+        scope: &Scope,
+        force_move: bool,
+    ) -> Result<syn::Expr, CompileError> {
         let mut expr = self.parse_expr(e)?;
         script::rewrite_template_expr(
             &self.script.vars,
@@ -195,11 +214,7 @@ impl Cg<'_> {
 
     /// 值闭包(if 条件 / each 列表 / key)的表达式:若引用普通变量,
     /// 包 Clone::clone(&(..)) —— 闭包是被反复调用的 Fn,返回值不能移出环境
-    fn value_closure_expr(
-        &self,
-        e: &ExprSrc,
-        scope: &Scope,
-    ) -> Result<TokenStream, CompileError> {
+    fn value_closure_expr(&self, e: &ExprSrc, scope: &Scope) -> Result<TokenStream, CompileError> {
         let expr = self.expr(e, scope, false)?;
         let ts = expr.to_token_stream();
         if idents_within(ts.clone(), &scope.plain).is_empty() {
@@ -226,7 +241,12 @@ impl Cg<'_> {
                     scope.locals.insert(name.clone());
                 }
                 // {#snippet}:模板级可复用闭包(先声明后使用,不做 Svelte 式提升)
-                Node::Snippet { name, params, children, offset } => {
+                Node::Snippet {
+                    name,
+                    params,
+                    children,
+                    offset,
+                } => {
                     let mut inner = scope.clone();
                     let mut pnames = Vec::new();
                     let mut ptys = Vec::new();
@@ -278,17 +298,33 @@ impl Cg<'_> {
 
     fn emit_node(&mut self, node: &Node, scope: &Scope) -> Result<TokenStream, CompileError> {
         match node {
-            Node::Element { tag, attrs, children, offset } => {
-                self.emit_element(tag, attrs, children, *offset, scope)
-            }
+            Node::Element {
+                tag,
+                attrs,
+                children,
+                offset,
+            } => self.emit_element(tag, attrs, children, *offset, scope),
             Node::Text { segments } => {
                 let el = self.fresh("t");
                 let create = self.leaf_create(&el, &Tag::Text, segments, scope)?;
                 Ok(quote! { #create __doc.append(__parent, #el); })
             }
-            Node::If { arms, else_children, .. } => self.emit_if(arms, else_children, scope),
-            Node::Each { list, pat, pat_offset, index, key, children, else_children, offset } => {
-                self.emit_each(EachParts {
+            Node::If {
+                arms,
+                else_children,
+                ..
+            } => self.emit_if(arms, else_children, scope),
+            Node::Each {
+                list,
+                pat,
+                pat_offset,
+                index,
+                key,
+                children,
+                else_children,
+                offset,
+            } => self.emit_each(
+                EachParts {
                     list,
                     pat: pat,
                     pat_offset: *pat_offset,
@@ -297,8 +333,9 @@ impl Cg<'_> {
                     children,
                     else_children,
                     offset: *offset,
-                }, scope)
-            }
+                },
+                scope,
+            ),
             Node::Key { key, children, .. } => {
                 let key_expr = self.value_closure_expr(key, scope)?;
                 let children_ts = self.emit_nodes(children, scope)?;
@@ -372,7 +409,15 @@ impl Cg<'_> {
                 })
             }
             // {#await fut}{:then v}{:catch e}:pending → 完成/失败渲染
-            Node::Await { fut, pending, then_pat, then_children, catch_pat, catch_children, .. } => {
+            Node::Await {
+                fut,
+                pending,
+                then_pat,
+                then_children,
+                catch_pat,
+                catch_children,
+                ..
+            } => {
                 let fut_expr = self.expr(fut, scope, false)?;
                 let pending_ts = self.emit_nodes(pending, scope)?;
                 let pending_cl = self.rebuild_closure(pending_ts, scope);
@@ -572,7 +617,10 @@ impl Cg<'_> {
                     }
                     // 简写 class:muted → 条件即同名变量
                     AttrValue::Str { value, .. } if value.is_empty() => {
-                        let e = ExprSrc { src: cls.to_string(), offset: attr.offset };
+                        let e = ExprSrc {
+                            src: cls.to_string(),
+                            offset: attr.offset,
+                        };
                         let x = self.expr(&e, scope, false)?;
                         quote! { #x }
                     }
@@ -628,7 +676,9 @@ impl Cg<'_> {
             // 条件类 / :hover:该元素样式整体交给一个响应式重算闭包
             // (优先级:类 < style="" < 条件类 < :hover < style: 指令)
             let arms = class_conds.iter().map(|(c, s)| quote! { if #c { #s } });
-            let hover_arms = hover_conds.iter().map(|(c, h)| quote! { if #c && __hv.get() { #h } });
+            let hover_arms = hover_conds
+                .iter()
+                .map(|(c, h)| quote! { if #c && __hv.get() { #h } });
             let hover_block = if has_hover {
                 quote! { if __hv.get() { #(#hover_static)* } #(#hover_arms)* }
             } else {
@@ -751,7 +801,9 @@ impl Cg<'_> {
                 },
                 // {@attach fn}:挂载时以 (doc, 节点) 调用,依赖变化时重跑
                 "@attach" => {
-                    let AttrValue::Expr(e) = &attr.value else { unreachable!() };
+                    let AttrValue::Expr(e) = &attr.value else {
+                        unreachable!()
+                    };
                     let expr = self.expr(e, scope, true)?;
                     ts.extend(quote! {
                         {
@@ -779,7 +831,10 @@ impl Cg<'_> {
                     };
                     let sig_ts = if let Ok(syn::Expr::Path(p)) = syn::parse_str::<syn::Expr>(&e.src)
                         && p.path.segments.len() == 1
-                        && self.script.vars.contains(&p.path.segments[0].ident.to_string())
+                        && self
+                            .script
+                            .vars
+                            .contains(&p.path.segments[0].ident.to_string())
                     {
                         let id = p.path.segments[0].ident.clone();
                         quote! { #id }
@@ -839,7 +894,9 @@ impl Cg<'_> {
                             let x = self.expr(e, scope, false)?;
                             quote! { #x }
                         }
-                        AttrValue::Str { value, .. } if value.trim().is_empty() => quote! { 200u32 },
+                        AttrValue::Str { value, .. } if value.trim().is_empty() => {
+                            quote! { 200u32 }
+                        }
                         AttrValue::Str { value, offset } => {
                             let n: u32 = value.trim().parse().map_err(|_| {
                                 CompileError::at_offset(
@@ -918,7 +975,10 @@ impl Cg<'_> {
                 return Err(CompileError::at_offset(
                     self.source,
                     attr.offset,
-                    format!("组件 `<{tag_name}>` 没有声明 $props,不接受 prop `{}`", attr.name),
+                    format!(
+                        "组件 `<{tag_name}>` 没有声明 $props,不接受 prop `{}`",
+                        attr.name
+                    ),
                 ));
             }
             if !children.is_empty() {
@@ -933,7 +993,10 @@ impl Cg<'_> {
 
         // `bind:xxx` 归一化成 prop 名 xxx(仅 $bindable 字段可用)
         let norm_name = |attr: &Attr| -> String {
-            attr.name.strip_prefix("bind:").unwrap_or(&attr.name).to_string()
+            attr.name
+                .strip_prefix("bind:")
+                .unwrap_or(&attr.name)
+                .to_string()
         };
         for attr in attrs {
             let name = norm_name(attr);
@@ -1001,7 +1064,9 @@ impl Cg<'_> {
                         // 零参 snippet 名作为 prop:自动包成 sv_ui::Snippet
                         if let Ok(syn::Expr::Path(p)) = syn::parse_str::<syn::Expr>(&e.src)
                             && p.path.segments.len() == 1
-                            && scope.snippets.contains(&p.path.segments[0].ident.to_string())
+                            && scope
+                                .snippets
+                                .contains(&p.path.segments[0].ident.to_string())
                         {
                             let id = p.path.segments[0].ident.clone();
                             inits.push(quote! {
@@ -1015,7 +1080,10 @@ impl Cg<'_> {
                             && let Ok(syn::Expr::Path(p)) = syn::parse_str::<syn::Expr>(&e.src)
                             && p.qself.is_none()
                             && p.path.segments.len() == 1
-                            && self.script.vars.contains(&p.path.segments[0].ident.to_string())
+                            && self
+                                .script
+                                .vars
+                                .contains(&p.path.segments[0].ident.to_string())
                         {
                             let ident = &p.path.segments[0].ident;
                             quote! { #ident }
@@ -1112,12 +1180,28 @@ impl Cg<'_> {
         })
     }
 
-    fn emit_each(&mut self, parts: EachParts<'_>, scope: &Scope) -> Result<TokenStream, CompileError> {
-        let EachParts { list, pat: pat_src, pat_offset, index, key, children, else_children, offset } =
-            parts;
+    fn emit_each(
+        &mut self,
+        parts: EachParts<'_>,
+        scope: &Scope,
+    ) -> Result<TokenStream, CompileError> {
+        let EachParts {
+            list,
+            pat: pat_src,
+            pat_offset,
+            index,
+            key,
+            children,
+            else_children,
+            offset,
+        } = parts;
         let list_expr = self.value_closure_expr(list, scope)?;
         let pat = syn::Pat::parse_single.parse_str(pat_src).map_err(|e| {
-            CompileError::at_offset(self.source, pat_offset, format!("{{#each}} 模式解析失败: {e}"))
+            CompileError::at_offset(
+                self.source,
+                pat_offset,
+                format!("{{#each}} 模式解析失败: {e}"),
+            )
         })?;
         let mut inner_scope = scope.clone();
         let mut pat_binds = HashSet::new();

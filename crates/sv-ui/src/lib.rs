@@ -67,7 +67,12 @@ pub struct Edges {
 
 impl Edges {
     pub const fn all(v: f32) -> Self {
-        Self { top: v, right: v, bottom: v, left: v }
+        Self {
+            top: v,
+            right: v,
+            bottom: v,
+            left: v,
+        }
     }
     pub fn horizontal(&self) -> f32 {
         self.left + self.right
@@ -358,7 +363,9 @@ impl Doc {
     pub fn set_text(&self, id: ViewId, text: &str) {
         {
             let mut inner = self.0.borrow_mut();
-            let Some(n) = inner.nodes.get_mut(id) else { return };
+            let Some(n) = inner.nodes.get_mut(id) else {
+                return;
+            };
             if n.text == text {
                 return;
             }
@@ -370,7 +377,9 @@ impl Doc {
     pub fn set_checked(&self, id: ViewId, checked: bool) {
         {
             let mut inner = self.0.borrow_mut();
-            let Some(n) = inner.nodes.get_mut(id) else { return };
+            let Some(n) = inner.nodes.get_mut(id) else {
+                return;
+            };
             if n.checked == checked {
                 return; // 相等不 bump:渲染端不用白白重绘
             }
@@ -382,7 +391,9 @@ impl Doc {
     pub fn set_style(&self, id: ViewId, style: Style) {
         {
             let mut inner = self.0.borrow_mut();
-            let Some(n) = inner.nodes.get_mut(id) else { return };
+            let Some(n) = inner.nodes.get_mut(id) else {
+                return;
+            };
             if n.style == style {
                 return;
             }
@@ -395,7 +406,9 @@ impl Doc {
     pub fn update_style(&self, id: ViewId, f: impl FnOnce(&mut Style)) {
         {
             let mut inner = self.0.borrow_mut();
-            let Some(n) = inner.nodes.get_mut(id) else { return };
+            let Some(n) = inner.nodes.get_mut(id) else {
+                return;
+            };
             f(&mut n.style);
         }
         self.bump();
@@ -404,7 +417,9 @@ impl Doc {
     pub fn set_on_click(&self, id: ViewId, f: impl Fn() + 'static) {
         {
             let mut inner = self.0.borrow_mut();
-            let Some(n) = inner.nodes.get_mut(id) else { return };
+            let Some(n) = inner.nodes.get_mut(id) else {
+                return;
+            };
             n.on_click = Some(Rc::new(f));
         }
         self.bump();
@@ -412,13 +427,19 @@ impl Doc {
 
     /// 取出点击回调(clone 出来调用,避免调用期间持有树的借用)
     pub fn click_handler(&self, id: ViewId) -> Option<Rc<dyn Fn()>> {
-        self.0.borrow().nodes.get(id).and_then(|n| n.on_click.clone())
+        self.0
+            .borrow()
+            .nodes
+            .get(id)
+            .and_then(|n| n.on_click.clone())
     }
 
     pub fn set_on_pointer_enter(&self, id: ViewId, f: impl Fn() + 'static) {
         {
             let mut inner = self.0.borrow_mut();
-            let Some(n) = inner.nodes.get_mut(id) else { return };
+            let Some(n) = inner.nodes.get_mut(id) else {
+                return;
+            };
             n.on_pointer_enter = Some(Rc::new(f));
         }
         self.bump();
@@ -427,7 +448,9 @@ impl Doc {
     pub fn set_on_pointer_leave(&self, id: ViewId, f: impl Fn() + 'static) {
         {
             let mut inner = self.0.borrow_mut();
-            let Some(n) = inner.nodes.get_mut(id) else { return };
+            let Some(n) = inner.nodes.get_mut(id) else {
+                return;
+            };
             n.on_pointer_leave = Some(Rc::new(f));
         }
         self.bump();
@@ -435,18 +458,28 @@ impl Doc {
 
     /// 取出悬停进入回调(同 [`Doc::click_handler`]:clone 出来调用,不持树借用)
     pub fn pointer_enter_handler(&self, id: ViewId) -> Option<Rc<dyn Fn()>> {
-        self.0.borrow().nodes.get(id).and_then(|n| n.on_pointer_enter.clone())
+        self.0
+            .borrow()
+            .nodes
+            .get(id)
+            .and_then(|n| n.on_pointer_enter.clone())
     }
 
     /// 取出悬停离开回调
     pub fn pointer_leave_handler(&self, id: ViewId) -> Option<Rc<dyn Fn()>> {
-        self.0.borrow().nodes.get(id).and_then(|n| n.on_pointer_leave.clone())
+        self.0
+            .borrow()
+            .nodes
+            .get(id)
+            .and_then(|n| n.on_pointer_leave.clone())
     }
 
     pub fn set_on_pointer_down(&self, id: ViewId, f: impl Fn() + 'static) {
         {
             let mut inner = self.0.borrow_mut();
-            let Some(n) = inner.nodes.get_mut(id) else { return };
+            let Some(n) = inner.nodes.get_mut(id) else {
+                return;
+            };
             n.on_pointer_down = Some(Rc::new(f));
         }
         self.bump();
@@ -455,18 +488,28 @@ impl Doc {
     pub fn set_on_pointer_up(&self, id: ViewId, f: impl Fn() + 'static) {
         {
             let mut inner = self.0.borrow_mut();
-            let Some(n) = inner.nodes.get_mut(id) else { return };
+            let Some(n) = inner.nodes.get_mut(id) else {
+                return;
+            };
             n.on_pointer_up = Some(Rc::new(f));
         }
         self.bump();
     }
 
     pub fn pointer_down_handler(&self, id: ViewId) -> Option<Rc<dyn Fn()>> {
-        self.0.borrow().nodes.get(id).and_then(|n| n.on_pointer_down.clone())
+        self.0
+            .borrow()
+            .nodes
+            .get(id)
+            .and_then(|n| n.on_pointer_down.clone())
     }
 
     pub fn pointer_up_handler(&self, id: ViewId) -> Option<Rc<dyn Fn()>> {
-        self.0.borrow().nodes.get(id).and_then(|n| n.on_pointer_up.clone())
+        self.0
+            .borrow()
+            .nodes
+            .get(id)
+            .and_then(|n| n.on_pointer_up.clone())
     }
 
     /// 调试:把树 dump 成缩进文本
@@ -752,7 +795,11 @@ pub fn mount(doc: &Doc, parent: ViewId, f: impl FnOnce(&Doc, ViewId) + 'static) 
     let d = doc.clone();
     // untrack:若在某个 effect 内调用 mount,构建期的散读不应订阅到该 effect 上
     let (_, scope) = create_root(|| untrack(|| f(&d, container)));
-    MountHandle { doc: d, container, scope }
+    MountHandle {
+        doc: d,
+        container,
+        scope,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -783,7 +830,11 @@ mod tests {
         let h = doc.click_handler(btn).unwrap();
         h();
         h();
-        assert!(doc.dump().contains("Count: 2"), "点击后文本应精准更新:\n{}", doc.dump());
+        assert!(
+            doc.dump().contains("Count: 2"),
+            "点击后文本应精准更新:\n{}",
+            doc.dump()
+        );
     }
 
     #[test]
@@ -889,9 +940,7 @@ mod tests {
                 |doc, parent, slot, _i| {
                     let t = doc.create_text("");
                     doc.append(parent, t);
-                    bind_text(doc, t, move || {
-                        slot.get().unwrap_or_else(|| "空".into())
-                    });
+                    bind_text(doc, t, move || slot.get().unwrap_or_else(|| "空".into()));
                 },
             );
         });
@@ -904,13 +953,23 @@ mod tests {
         let before = nodes;
         offset.set(500_000);
         let dump = doc.dump();
-        assert!(dump.contains("行 500000") && dump.contains("行 500029"), "\n{dump}");
-        assert_eq!(doc.read(|inner| inner.nodes.len()), before, "滚动不应增删节点");
+        assert!(
+            dump.contains("行 500000") && dump.contains("行 500029"),
+            "\n{dump}"
+        );
+        assert_eq!(
+            doc.read(|inner| inner.nodes.len()),
+            before,
+            "滚动不应增删节点"
+        );
 
         // 滚到尾部越界:空槽显示空态
         offset.set(999_990);
         let dump = doc.dump();
-        assert!(dump.contains("行 999999") && dump.contains("空"), "\n{dump}");
+        assert!(
+            dump.contains("行 999999") && dump.contains("空"),
+            "\n{dump}"
+        );
     }
 
     #[test]
@@ -1082,11 +1141,17 @@ mod tests {
         });
         tick.set(1);
         let dump = doc.dump();
-        assert!(dump.contains("一号:1") && dump.contains("二号:1"), "\n{dump}");
+        assert!(
+            dump.contains("一号:1") && dump.contains("二号:1"),
+            "\n{dump}"
+        );
 
         h1.unmount();
         let dump = doc.dump();
-        assert!(!dump.contains("一号") && dump.contains("二号:1"), "\n{dump}");
+        assert!(
+            !dump.contains("一号") && dump.contains("二号:1"),
+            "\n{dump}"
+        );
         tick.set(2); // 一号的作用域已销毁,只有二号还在响应
         assert!(doc.dump().contains("二号:2"));
 
@@ -1125,7 +1190,10 @@ mod tests {
             );
         });
         let dump = doc.dump();
-        assert!(dump.contains("1:dark") && dump.contains("2:dark"), "\n{dump}");
+        assert!(
+            dump.contains("1:dark") && dump.contains("2:dark"),
+            "\n{dump}"
+        );
         // 列表更新后新建的行(effect 重跑里建的 root)同样取得到
         items.update(|v| v.push(3));
         assert!(doc.dump().contains("3:dark"), "\n{}", doc.dump());
@@ -1169,7 +1237,10 @@ mod memory_probe {
     fn core_struct_sizes_within_budget() {
         let vn = std::mem::size_of::<ViewNode>();
         let st = std::mem::size_of::<Style>();
-        println!("[probe] ViewNode={vn}B Style={st}B Edges={}B", std::mem::size_of::<Edges>());
+        println!(
+            "[probe] ViewNode={vn}B Style={st}B Edges={}B",
+            std::mem::size_of::<Edges>()
+        );
         assert!(st <= 128, "Style 超预算: {st}B");
         assert!(vn <= 320, "ViewNode 超预算: {vn}B");
     }

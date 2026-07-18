@@ -52,9 +52,20 @@ pub struct Arm {
 #[derive(Debug)]
 #[allow(dead_code)] // offset 字段留给后续诊断增强
 pub enum Node {
-    Element { tag: Tag, attrs: Vec<Attr>, children: Vec<Node>, offset: usize },
-    Text { segments: Vec<Segment> },
-    If { arms: Vec<Arm>, else_children: Vec<Node>, offset: usize },
+    Element {
+        tag: Tag,
+        attrs: Vec<Attr>,
+        children: Vec<Node>,
+        offset: usize,
+    },
+    Text {
+        segments: Vec<Segment>,
+    },
+    If {
+        arms: Vec<Arm>,
+        else_children: Vec<Node>,
+        offset: usize,
+    },
     Each {
         list: ExprSrc,
         pat: String,
@@ -68,9 +79,17 @@ pub enum Node {
         offset: usize,
     },
     /// `{#key expr} ... {/key}`:key 变化时销毁重建
-    Key { key: ExprSrc, children: Vec<Node>, offset: usize },
+    Key {
+        key: ExprSrc,
+        children: Vec<Node>,
+        offset: usize,
+    },
     /// `{@const name = expr}`:块级 derived
-    Const { name: String, expr: ExprSrc, offset: usize },
+    Const {
+        name: String,
+        expr: ExprSrc,
+        offset: usize,
+    },
     /// `{#snippet name(param: Type, ...)} ... {/snippet}`:模板级可复用闭包
     Snippet {
         name: String,
@@ -80,9 +99,15 @@ pub enum Node {
         offset: usize,
     },
     /// `{@render name(args...)}`
-    Render { call: ExprSrc, offset: usize },
+    Render {
+        call: ExprSrc,
+        offset: usize,
+    },
     /// `{@debug a, b}`:依赖变化时 Debug 打印
-    Debug { args: Vec<ExprSrc>, offset: usize },
+    Debug {
+        args: Vec<ExprSrc>,
+        offset: usize,
+    },
     /// `{#await fut}...{:then v}...{:catch e}...{/await}`
     Await {
         fut: ExprSrc,
@@ -96,7 +121,11 @@ pub enum Node {
 }
 
 pub fn parse(source: &str, span: &Span) -> Result<Vec<Node>, CompileError> {
-    let mut p = Parser { source, pos: span.start, end: span.end };
+    let mut p = Parser {
+        source,
+        pos: span.start,
+        end: span.end,
+    };
     let nodes = p.parse_nodes(&[])?;
     p.skip_ws();
     if p.pos < p.end {
@@ -143,7 +172,11 @@ impl<'a> Parser<'a> {
     }
 
     fn expect(&mut self, s: &str, what: &str) -> Result<(), CompileError> {
-        if self.eat(s) { Ok(()) } else { Err(self.err(self.pos, format!("此处应为 `{s}`({what})"))) }
+        if self.eat(s) {
+            Ok(())
+        } else {
+            Err(self.err(self.pos, format!("此处应为 `{s}`({what})")))
+        }
     }
 
     fn skip_ws(&mut self) {
@@ -220,12 +253,12 @@ impl<'a> Parser<'a> {
                 flush_segments(&mut segments, &mut nodes);
                 nodes.push(self.parse_debug()?);
             } else if self.starts("{@") {
-                return Err(self.err(self.pos, "未知 {@...} 标记(支持 {@const}/{@render}/{@debug})"));
-            } else if self.starts("{#") {
                 return Err(self.err(
                     self.pos,
-                    "未知块类型(支持 {#if}/{#each}/{#key}/{#snippet})",
+                    "未知 {@...} 标记(支持 {@const}/{@render}/{@debug})",
                 ));
+            } else if self.starts("{#") {
+                return Err(self.err(self.pos, "未知块类型(支持 {#if}/{#each}/{#key}/{#snippet})"));
             } else if self.starts("{:") || self.starts("{/") {
                 return Err(self.err(self.pos, "意外的块标记(没有对应的开启块)"));
             } else if self.starts("{") {
@@ -273,7 +306,12 @@ impl<'a> Parser<'a> {
         loop {
             self.skip_ws();
             if self.eat("/>") {
-                return Ok(Node::Element { tag, attrs, children: Vec::new(), offset: off });
+                return Ok(Node::Element {
+                    tag,
+                    attrs,
+                    children: Vec::new(),
+                    offset: off,
+                });
             }
             if self.eat(">") {
                 break;
@@ -289,14 +327,29 @@ impl<'a> Parser<'a> {
             return Err(self.err(off, format!("`<{name}>` 缺少闭合标签 `{close}`")));
         }
         match tag {
-            Tag::View => Ok(Node::Element { tag, attrs, children, offset: off }),
+            Tag::View => Ok(Node::Element {
+                tag,
+                attrs,
+                children,
+                offset: off,
+            }),
             // 组件 children:非自闭合形态的子内容编译成隐式 children snippet
-            Tag::Component(_) => Ok(Node::Element { tag, attrs, children, offset: off }),
+            Tag::Component(_) => Ok(Node::Element {
+                tag,
+                attrs,
+                children,
+                offset: off,
+            }),
             Tag::Checkbox => {
                 if !children.is_empty() {
                     return Err(self.err(off, "`<checkbox>` 是叶子元素,请自闭合"));
                 }
-                Ok(Node::Element { tag, attrs, children, offset: off })
+                Ok(Node::Element {
+                    tag,
+                    attrs,
+                    children,
+                    offset: off,
+                })
             }
             Tag::Text | Tag::Button => {
                 // 叶子标签:内容折叠成一段文本
@@ -352,7 +405,10 @@ impl<'a> Parser<'a> {
             self.expect("}", "简写属性结束")?;
             return Ok(Attr {
                 name: name.clone(),
-                value: AttrValue::Expr(ExprSrc { src: name, offset: off + 1 }),
+                value: AttrValue::Expr(ExprSrc {
+                    src: name,
+                    offset: off + 1,
+                }),
                 offset: off,
             });
         }
@@ -365,7 +421,10 @@ impl<'a> Parser<'a> {
         if !self.starts("=") {
             return Ok(Attr {
                 name,
-                value: AttrValue::Str { value: String::new(), offset: off },
+                value: AttrValue::Str {
+                    value: String::new(),
+                    offset: off,
+                },
                 offset: off,
             });
         }
@@ -383,7 +442,10 @@ impl<'a> Parser<'a> {
             }
             let value = self.source[start..self.pos].to_string();
             self.expect("\"", "字符串属性值结束")?;
-            AttrValue::Str { value, offset: voff }
+            AttrValue::Str {
+                value,
+                offset: voff,
+            }
         } else if self.starts("{") {
             let voff = self.pos + 1;
             self.pos += 1;
@@ -391,9 +453,16 @@ impl<'a> Parser<'a> {
             self.expect("}", "表达式属性值结束")?;
             AttrValue::Expr(ExprSrc { src, offset: voff })
         } else {
-            return Err(self.err(self.pos, format!("属性 `{name}` 的值应为 \"...\" 或 {{...}}")));
+            return Err(self.err(
+                self.pos,
+                format!("属性 `{name}` 的值应为 \"...\" 或 {{...}}"),
+            ));
         };
-        Ok(Attr { name, value, offset: off })
+        Ok(Attr {
+            name,
+            value,
+            offset: off,
+        })
     }
 
     fn parse_if(&mut self) -> Result<Node, CompileError> {
@@ -408,7 +477,10 @@ impl<'a> Parser<'a> {
         // `</` 也作为终止符:块里遇到的闭合标签必然属于祖先元素,
         // 交回上层处理;若 {/if} 缺失,下面会在 {#if} 处报错
         let mut arms = vec![Arm {
-            cond: ExprSrc { src: cond, offset: cond_off },
+            cond: ExprSrc {
+                src: cond,
+                offset: cond_off,
+            },
             children: self.parse_nodes(&["{:else", "{/if}", "</"])?,
         }];
         let mut else_children = Vec::new();
@@ -421,7 +493,10 @@ impl<'a> Parser<'a> {
                     let cond = self.read_balanced()?;
                     self.expect("}", "{:else if 条件} 结束")?;
                     arms.push(Arm {
-                        cond: ExprSrc { src: cond, offset: coff },
+                        cond: ExprSrc {
+                            src: cond,
+                            offset: coff,
+                        },
                         children: self.parse_nodes(&["{:else", "{/if}", "</"])?,
                     });
                 } else {
@@ -436,7 +511,11 @@ impl<'a> Parser<'a> {
         if !self.eat("{/if}") {
             return Err(self.err(off, "{#if} 没有对应的 {/if}"));
         }
-        Ok(Node::If { arms, else_children, offset: off })
+        Ok(Node::If {
+            arms,
+            else_children,
+            offset: off,
+        })
     }
 
     fn parse_each(&mut self) -> Result<Node, CompileError> {
@@ -465,7 +544,10 @@ impl<'a> Parser<'a> {
                 return Err(self.err(off, "{#each} 没有对应的 {/each}"));
             }
             return Ok(Node::Each {
-                list: ExprSrc { src: header.trim().to_string(), offset: header_off },
+                list: ExprSrc {
+                    src: header.trim().to_string(),
+                    offset: header_off,
+                },
                 pat: "_".to_string(),
                 pat_offset: header_off,
                 index: None,
@@ -489,7 +571,10 @@ impl<'a> Parser<'a> {
                 if key_src.is_empty() {
                     return Err(self.err(off, "{#each} 的 (key) 不能为空"));
                 }
-                key = Some(ExprSrc { src: key_src, offset: header_off + as_pos + 2 + paren + 1 });
+                key = Some(ExprSrc {
+                    src: key_src,
+                    offset: header_off + as_pos + 2 + paren + 1,
+                });
                 binding = &binding[..paren];
             }
         }
@@ -523,7 +608,10 @@ impl<'a> Parser<'a> {
             return Err(self.err(off, "{#each} 没有对应的 {/each}"));
         }
         Ok(Node::Each {
-            list: ExprSrc { src: list_src, offset: header_off },
+            list: ExprSrc {
+                src: list_src,
+                offset: header_off,
+            },
             pat: pat_src,
             pat_offset: header_off + as_pos + 2,
             index,
@@ -587,7 +675,12 @@ impl<'a> Parser<'a> {
         if !self.eat("{/snippet}") {
             return Err(self.err(off, "{#snippet} 没有对应的 {/snippet}"));
         }
-        Ok(Node::Snippet { name, params, children, offset: off })
+        Ok(Node::Snippet {
+            name,
+            params,
+            children,
+            offset: off,
+        })
     }
 
     fn parse_await(&mut self) -> Result<Node, CompileError> {
@@ -602,18 +695,19 @@ impl<'a> Parser<'a> {
         self.expect("}", "{#await 表达式} 结束")?;
         let pending = self.parse_nodes(&["{:then", "{:catch", "{/await}", "</"])?;
 
-        let mut read_arm = |p: &mut Self, kw: &str| -> Result<(Option<String>, Vec<Node>), CompileError> {
-            p.pos += kw.len();
-            p.skip_ws();
-            let pat = {
-                let name = p.read_name();
-                if name.is_empty() { None } else { Some(name) }
+        let mut read_arm =
+            |p: &mut Self, kw: &str| -> Result<(Option<String>, Vec<Node>), CompileError> {
+                p.pos += kw.len();
+                p.skip_ws();
+                let pat = {
+                    let name = p.read_name();
+                    if name.is_empty() { None } else { Some(name) }
+                };
+                p.skip_ws();
+                p.expect("}", "分支头结束")?;
+                let children = p.parse_nodes(&["{:then", "{:catch", "{/await}", "</"])?;
+                Ok((pat, children))
             };
-            p.skip_ws();
-            p.expect("}", "分支头结束")?;
-            let children = p.parse_nodes(&["{:then", "{:catch", "{/await}", "</"])?;
-            Ok((pat, children))
-        };
 
         let (mut then_pat, mut then_children) = (None, Vec::new());
         let (mut catch_pat, mut catch_children) = (None, Vec::new());
@@ -640,7 +734,18 @@ impl<'a> Parser<'a> {
         if !has_then {
             return Err(self.err(off, "{#await} 需要 {:then} 分支(v0 不支持纯 pending 形态)"));
         }
-        Ok(Node::Await { fut: ExprSrc { src: fut, offset: fut_off }, pending, then_pat, then_children, catch_pat, catch_children, offset: off })
+        Ok(Node::Await {
+            fut: ExprSrc {
+                src: fut,
+                offset: fut_off,
+            },
+            pending,
+            then_pat,
+            then_children,
+            catch_pat,
+            catch_children,
+            offset: off,
+        })
     }
 
     fn parse_render(&mut self) -> Result<Node, CompileError> {
@@ -653,7 +758,13 @@ impl<'a> Parser<'a> {
             return Err(self.err(off, "{@render} 需要 snippet 调用,如 {@render row(item)}"));
         }
         self.expect("}", "{@render} 结束")?;
-        Ok(Node::Render { call: ExprSrc { src, offset: call_off }, offset: off })
+        Ok(Node::Render {
+            call: ExprSrc {
+                src,
+                offset: call_off,
+            },
+            offset: off,
+        })
     }
 
     fn parse_debug(&mut self) -> Result<Node, CompileError> {
@@ -667,7 +778,10 @@ impl<'a> Parser<'a> {
             .into_iter()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
-            .map(|s| ExprSrc { src: s, offset: args_off })
+            .map(|s| ExprSrc {
+                src: s,
+                offset: args_off,
+            })
             .collect::<Vec<_>>();
         if args.is_empty() {
             return Err(self.err(off, "{@debug} 需要至少一个表达式"));
@@ -688,7 +802,14 @@ impl<'a> Parser<'a> {
         if !self.eat("{/key}") {
             return Err(self.err(off, "{#key} 没有对应的 {/key}"));
         }
-        Ok(Node::Key { key: ExprSrc { src: key, offset: key_off }, children, offset: off })
+        Ok(Node::Key {
+            key: ExprSrc {
+                src: key,
+                offset: key_off,
+            },
+            children,
+            offset: off,
+        })
     }
 
     fn parse_const(&mut self) -> Result<Node, CompileError> {
@@ -707,7 +828,14 @@ impl<'a> Parser<'a> {
             return Err(self.err(off, "{@const} 缺少表达式"));
         }
         self.expect("}", "{@const} 结束")?;
-        Ok(Node::Const { name, expr: ExprSrc { src: expr, offset: expr_off }, offset: off })
+        Ok(Node::Const {
+            name,
+            expr: ExprSrc {
+                src: expr,
+                offset: expr_off,
+            },
+            offset: off,
+        })
     }
 
     /// 读到深度 0 的 `}` 为止(不消费)。跳过字符串/字符字面量与 `//`、`/* */` 注释,

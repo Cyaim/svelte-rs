@@ -50,7 +50,10 @@ fn parse_children(input: ParseStream, in_element: bool) -> Result<Vec<Node>> {
             if in_element {
                 break;
             }
-            return Err(Error::new(input.span(), "多余的闭合标签:此处没有待闭合的元素"));
+            return Err(Error::new(
+                input.span(),
+                "多余的闭合标签:此处没有待闭合的元素",
+            ));
         }
         nodes.push(parse_node(input)?);
     }
@@ -123,8 +126,15 @@ fn parse_element(input: ParseStream) -> Result<Node> {
         input.parse::<Token![/]>()?;
         input.parse::<Token![>]>()?;
         return Ok(match leaf_kind {
-            None => Node::View(ViewElem { attrs, children: Vec::new() }),
-            Some(kind) => Node::Leaf(LeafElem { kind, attrs, segments: Vec::new() }),
+            None => Node::View(ViewElem {
+                attrs,
+                children: Vec::new(),
+            }),
+            Some(kind) => Node::Leaf(LeafElem {
+                kind,
+                attrs,
+                segments: Vec::new(),
+            }),
         });
     }
 
@@ -136,7 +146,11 @@ fn parse_element(input: ParseStream) -> Result<Node> {
         }
         Some(kind) => {
             let segments = parse_leaf_segments(input, &name)?;
-            Node::Leaf(LeafElem { kind, attrs, segments })
+            Node::Leaf(LeafElem {
+                kind,
+                attrs,
+                segments,
+            })
         }
     };
     parse_closing_tag(input, &name)?;
@@ -190,7 +204,10 @@ fn parse_leaf_segments(input: ParseStream, tag: &Ident) -> Result<Vec<Segment>> 
             break;
         }
         if input.is_empty() {
-            return Err(Error::new(tag.span(), format!("<{tag}> 缺少闭合标签 </{tag}>")));
+            return Err(Error::new(
+                tag.span(),
+                format!("<{tag}> 缺少闭合标签 </{tag}>"),
+            ));
         }
         if input.peek(LitStr) {
             segments.push(Segment::Lit(input.parse()?));
@@ -211,7 +228,10 @@ fn parse_leaf_segments(input: ParseStream, tag: &Ident) -> Result<Vec<Segment>> 
 /// 消费 `</tag>`,并检查与开标签匹配
 fn parse_closing_tag(input: ParseStream, open: &Ident) -> Result<()> {
     if input.is_empty() {
-        return Err(Error::new(open.span(), format!("<{open}> 缺少闭合标签 </{open}>")));
+        return Err(Error::new(
+            open.span(),
+            format!("<{open}> 缺少闭合标签 </{open}>"),
+        ));
     }
     input.parse::<Token![<]>()?;
     input.parse::<Token![/]>()?;
@@ -249,7 +269,11 @@ fn parse_if(input: ParseStream) -> Result<Node> {
             return Err(input.error("else 后期望 `if` 或 `{ ... }`"));
         }
     }
-    Ok(Node::If(IfNode { cond, then_nodes, else_nodes }))
+    Ok(Node::If(IfNode {
+        cond,
+        then_nodes,
+        else_nodes,
+    }))
 }
 
 fn parse_for(input: ParseStream) -> Result<Node> {
@@ -266,5 +290,10 @@ fn parse_for(input: ParseStream) -> Result<Node> {
     let body;
     braced!(body in input);
     let body = parse_children(&body, false)?;
-    Ok(Node::For(ForNode { pat, index, items, body }))
+    Ok(Node::For(ForNode {
+        pat,
+        index,
+        items,
+        body,
+    }))
 }

@@ -29,7 +29,11 @@ fn counter() {
         <text>"Count: " {count.get()}</text>
         <button on_click(move || count.update(|c| *c += 1))>"+1"</button>
     };
-    assert!(doc.dump().contains("Count: 0"), "初始 dump:\n{}", doc.dump());
+    assert!(
+        doc.dump().contains("Count: 0"),
+        "初始 dump:\n{}",
+        doc.dump()
+    );
     assert!(doc.dump().contains("[button \"+1\"]"));
 
     // 模拟点击:遍历 nodes 找 Button 节点取 handler
@@ -38,7 +42,11 @@ fn counter() {
     let h = doc.click_handler(buttons[0]).unwrap();
     h();
     h();
-    assert!(doc.dump().contains("Count: 2"), "点击后 dump:\n{}", doc.dump());
+    assert!(
+        doc.dump().contains("Count: 2"),
+        "点击后 dump:\n{}",
+        doc.dump()
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -165,7 +173,10 @@ fn for_with_index() {
         }
     };
     let dump = doc.dump();
-    assert!(dump.contains("0:a") && dump.contains("1:b"), "dump:\n{dump}");
+    assert!(
+        dump.contains("0:a") && dump.contains("1:b"),
+        "dump:\n{dump}"
+    );
 
     items.update(|v| v.push("c".into()));
     assert!(doc.dump().contains("2:c"));
@@ -174,7 +185,10 @@ fn for_with_index() {
         v.remove(0);
     });
     let dump = doc.dump();
-    assert!(!dump.contains(":a") && dump.contains("0:b") && dump.contains("1:c"), "dump:\n{dump}");
+    assert!(
+        !dump.contains(":a") && dump.contains("0:b") && dump.contains("1:c"),
+        "dump:\n{dump}"
+    );
 }
 
 #[test]
@@ -216,18 +230,27 @@ fn nested_view_if_for() {
         </view>
     };
     let dump = doc.dump();
-    assert!(dump.contains("header") && dump.contains("item0=10") && dump.contains("item1=20"), "dump:\n{dump}");
+    assert!(
+        dump.contains("header") && dump.contains("item0=10") && dump.contains("item1=20"),
+        "dump:\n{dump}"
+    );
 
     show.set(false);
     let dump = doc.dump();
-    assert!(dump.contains("collapsed") && !dump.contains("item0"), "dump:\n{dump}");
+    assert!(
+        dump.contains("collapsed") && !dump.contains("item0"),
+        "dump:\n{dump}"
+    );
 
     items.update(|v| v.push(30)); // 隐藏期间更新列表:each 已随分支销毁,不应有影响
     assert!(!doc.dump().contains("item2"));
 
     show.set(true); // 重建分支,each 读到最新列表
     let dump = doc.dump();
-    assert!(dump.contains("item0=10") && dump.contains("item2=30"), "dump:\n{dump}");
+    assert!(
+        dump.contains("item0=10") && dump.contains("item2=30"),
+        "dump:\n{dump}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -246,7 +269,11 @@ fn reactive_style() {
     let vid = doc.read(|inner| inner.nodes[inner.root].children[0]);
     assert_eq!(doc.read(|inner| inner.nodes[vid].style.padding.left), 0.0);
     count.set(4);
-    assert_eq!(doc.read(|inner| inner.nodes[vid].style.padding.left), 4.0, "样式应随 signal 更新");
+    assert_eq!(
+        doc.read(|inner| inner.nodes[vid].style.padding.left),
+        4.0,
+        "样式应随 signal 更新"
+    );
 }
 
 #[test]
@@ -265,11 +292,19 @@ fn style_in_each_row_captures_row_scope() {
     });
     assert_eq!(rows.len(), 2);
     let pads = |doc: &Doc| {
-        doc.read(|inner| rows.iter().map(|id| inner.nodes[*id].style.padding.left).collect::<Vec<_>>())
+        doc.read(|inner| {
+            rows.iter()
+                .map(|id| inner.nodes[*id].style.padding.left)
+                .collect::<Vec<_>>()
+        })
     };
     assert_eq!(pads(&doc), vec![1.0, 2.0], "style 闭包应捕获行索引");
     unit.set(2.0);
-    assert_eq!(pads(&doc), vec![2.0, 4.0], "行内 style 绑定应随 signal 更新");
+    assert_eq!(
+        pads(&doc),
+        vec![2.0, 4.0],
+        "行内 style 绑定应随 signal 更新"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -284,7 +319,11 @@ fn self_closing_elements() {
         <view />
         <button on_click(move || clicked.set(true)) />
     };
-    assert!(doc.dump().contains("[button \"\"]"), "自闭合 button 的 label 应为空串:\n{}", doc.dump());
+    assert!(
+        doc.dump().contains("[button \"\"]"),
+        "自闭合 button 的 label 应为空串:\n{}",
+        doc.dump()
+    );
     assert_eq!(doc.read(|inner| inner.nodes[inner.root].children.len()), 2);
 
     let buttons = find_kind(&doc, ElementKind::Button);

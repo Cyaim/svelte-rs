@@ -15,7 +15,10 @@ include!(concat!(env!("OUT_DIR"), "/task_row.rs"));
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if let Some(i) = args.iter().position(|a| a == "--png") {
-        let path = args.get(i + 1).cloned().unwrap_or_else(|| "showcase.png".into());
+        let path = args
+            .get(i + 1)
+            .cloned()
+            .unwrap_or_else(|| "showcase.png".into());
         let doc = sv_ui::Doc::new();
         let d = doc.clone();
         let (_, _scope) = sv_reactive::create_root(move || showcase(&d, d.root()));
@@ -33,11 +36,7 @@ fn main() {
 
 /// 按文档顺序找第一个匹配文本的按钮并点击
 fn click(doc: &sv_ui::Doc, label: &str) {
-    fn walk(
-        inner: &sv_ui::DocumentInner,
-        id: sv_ui::ViewId,
-        label: &str,
-    ) -> Option<sv_ui::ViewId> {
+    fn walk(inner: &sv_ui::DocumentInner, id: sv_ui::ViewId, label: &str) -> Option<sv_ui::ViewId> {
         let n = &inner.nodes[id];
         if n.kind == sv_ui::ElementKind::Button && n.text == label {
             return Some(id);
@@ -66,9 +65,15 @@ mod tests {
         click(&doc, "+2");
         let dump = doc.dump();
         assert!(dump.contains("外部读同一信号"), "\n{dump}");
-        assert!(dump.contains("\"4\""), "bind:value 双向生效,count=4:\n{dump}");
+        assert!(
+            dump.contains("\"4\""),
+            "bind:value 双向生效,count=4:\n{dump}"
+        );
         assert!(dump.contains("\"8\""), "$derived 双倍=8:\n{dump}");
-        assert!(dump.contains("3 项任务 · 计数 4"), "{{@const}} 联动:\n{dump}");
+        assert!(
+            dump.contains("3 项任务 · 计数 4"),
+            "{{@const}} 联动:\n{dump}"
+        );
 
         // keyed:勾选第一行(#1),反转后状态跟着行走
         click(&doc, "[ ]");
@@ -84,7 +89,10 @@ mod tests {
         // 删除第一行(反转后是 #3)
         click(&doc, "删");
         let dump = doc.dump();
-        assert!(!dump.contains("#3") && dump.contains("2 项任务"), "\n{dump}");
+        assert!(
+            !dump.contains("#3") && dump.contains("2 项任务"),
+            "\n{dump}"
+        );
 
         // 清空到 {#if} 空状态
         click(&doc, "删");
@@ -100,7 +108,9 @@ mod tests {
 
         // {#await}:pending → then
         assert!(doc.dump().contains("后台计算中"), "\n{}", doc.dump());
-        assert!(sv_ui::tasks::pump_until_idle(std::time::Duration::from_secs(5)));
+        assert!(sv_ui::tasks::pump_until_idle(
+            std::time::Duration::from_secs(5)
+        ));
         assert!(doc.dump().contains("异步答案:42"), "\n{}", doc.dump());
 
         // bind:checked:点击复选框 → 状态翻转 → {#if} 打开(带 in:fade)
@@ -121,7 +131,11 @@ mod tests {
 
         // in:fade:起点全透明,pump 动画后到 1.0
         let faded = doc.read(|inner| {
-            fn find_text(inner: &sv_ui::DocumentInner, id: sv_ui::ViewId, s: &str) -> Option<sv_ui::ViewId> {
+            fn find_text(
+                inner: &sv_ui::DocumentInner,
+                id: sv_ui::ViewId,
+                s: &str,
+            ) -> Option<sv_ui::ViewId> {
                 let n = &inner.nodes[id];
                 if n.text.contains(s) {
                     return Some(id);

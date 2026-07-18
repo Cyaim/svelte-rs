@@ -15,7 +15,9 @@ mod render;
 #[cfg(feature = "backend-vello")]
 mod vello_backend;
 
-pub use paint::{GlyphKey, GlyphPos, PaintCmd, Painter, PainterCaps, RecordingPainter, TinySkiaPainter};
+pub use paint::{
+    GlyphKey, GlyphPos, PaintCmd, Painter, PainterCaps, RecordingPainter, TinySkiaPainter,
+};
 pub use render::{Placed, Rect, hit_click_target, layout_tree, paint_tree, render_frame};
 #[cfg(feature = "backend-vello")]
 pub use vello_backend::{VelloPainter, VelloWin, render_frame_vello};
@@ -83,7 +85,10 @@ fn cpu_presenter(window: &Arc<Window>) -> Presenter {
     let context = softbuffer::Context::new(window.clone()).expect("sv-shell: 创建绘图上下文失败");
     let surface =
         softbuffer::Surface::new(&context, window.clone()).expect("sv-shell: 创建 surface 失败");
-    Presenter::Cpu { surface, _context: context }
+    Presenter::Cpu {
+        surface,
+        _context: context,
+    }
 }
 
 struct WinState {
@@ -137,7 +142,8 @@ impl App {
                 let (pixmap, placed) = render_frame(&self.doc, size.width, size.height, scale);
                 self.placed = placed;
 
-                let (Some(w), Some(h)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
+                let (Some(w), Some(h)) =
+                    (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
                 else {
                     return;
                 };
@@ -181,7 +187,10 @@ impl App {
     fn update_hover(&mut self) {
         let Some(ws) = &self.win else { return };
         let scale = ws.window.scale_factor();
-        let (lx, ly) = ((self.cursor.0 / scale) as f32, (self.cursor.1 / scale) as f32);
+        let (lx, ly) = (
+            (self.cursor.0 / scale) as f32,
+            (self.cursor.1 / scale) as f32,
+        );
         let target = self
             .placed
             .iter()
@@ -214,7 +223,8 @@ impl App {
                 if !p.rect.contains(lx, ly) {
                     return None;
                 }
-                self.doc.read(|inner| inner.nodes.get(p.id).and_then(|n| n.style.cursor))
+                self.doc
+                    .read(|inner| inner.nodes.get(p.id).and_then(|n| n.style.cursor))
             })
             .map(|c| match c {
                 sv_ui::Cursor::Pointer => winit::window::CursorIcon::Pointer,
@@ -232,7 +242,10 @@ impl App {
     fn click(&mut self) {
         let Some(ws) = &self.win else { return };
         let scale = ws.window.scale_factor();
-        let (lx, ly) = ((self.cursor.0 / scale) as f32, (self.cursor.1 / scale) as f32);
+        let (lx, ly) = (
+            (self.cursor.0 / scale) as f32,
+            (self.cursor.1 / scale) as f32,
+        );
         if let Some(id) = hit_click_target(&self.doc, &self.placed, lx, ly)
             && let Some(handler) = self.doc.click_handler(id)
         {
@@ -250,7 +263,11 @@ impl ApplicationHandler for App {
         let attrs = Window::default_attributes()
             .with_title(self.title.clone())
             .with_inner_size(LogicalSize::new(480.0, 400.0));
-        let window = Arc::new(event_loop.create_window(attrs).expect("sv-shell: 创建窗口失败"));
+        let window = Arc::new(
+            event_loop
+                .create_window(attrs)
+                .expect("sv-shell: 创建窗口失败"),
+        );
         let presenter = match self.backend {
             #[cfg(feature = "backend-vello")]
             Backend::Vello => {
@@ -304,16 +321,25 @@ impl ApplicationHandler for App {
                 self.cursor = (position.x, position.y);
                 self.update_hover();
             }
-            WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
+            } => {
                 // :active / 按压回调:先派发 pointer_down,再派发点击
                 let Some(ws) = &self.win else { return };
                 let scale = ws.window.scale_factor();
-                let (lx, ly) = ((self.cursor.0 / scale) as f32, (self.cursor.1 / scale) as f32);
+                let (lx, ly) = (
+                    (self.cursor.0 / scale) as f32,
+                    (self.cursor.1 / scale) as f32,
+                );
                 self.pressed = self
                     .placed
                     .iter()
                     .rev()
-                    .find(|p| p.rect.contains(lx, ly) && self.doc.pointer_down_handler(p.id).is_some())
+                    .find(|p| {
+                        p.rect.contains(lx, ly) && self.doc.pointer_down_handler(p.id).is_some()
+                    })
                     .map(|p| p.id);
                 if let Some(id) = self.pressed
                     && let Some(h) = self.doc.pointer_down_handler(id)
@@ -322,7 +348,11 @@ impl ApplicationHandler for App {
                 }
                 self.click();
             }
-            WindowEvent::MouseInput { state: ElementState::Released, button: MouseButton::Left, .. } => {
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button: MouseButton::Left,
+                ..
+            } => {
                 if let Some(id) = self.pressed.take()
                     && let Some(h) = self.doc.pointer_up_handler(id)
                 {
@@ -432,7 +462,11 @@ mod tests {
         );
         let target = hit_click_target(&doc, &placed, cx, cy).expect("按钮中心应命中");
         doc.click_handler(target).unwrap()();
-        assert!(doc.dump().contains("Count: 1"), "点击后应精准更新:\n{}", doc.dump());
+        assert!(
+            doc.dump().contains("Count: 1"),
+            "点击后应精准更新:\n{}",
+            doc.dump()
+        );
     }
 
     /// 可切换后端的支点验证:同一 paint_tree 对记录型后端产出稳定命令流
@@ -446,7 +480,10 @@ mod tests {
             doc.update_style(card, |s| {
                 s.bg = Some(sv_ui::Color::rgb(240, 240, 246));
                 s.corner_radius = 10.0;
-                s.border = Some(sv_ui::Border { width: 2.0, color: sv_ui::Color::rgb(0, 0, 128) });
+                s.border = Some(sv_ui::Border {
+                    width: 2.0,
+                    color: sv_ui::Color::rgb(0, 0, 128),
+                });
                 s.padding = 8.0.into();
             });
             let t = doc.create_text("你好");
@@ -489,7 +526,10 @@ mod tests {
             doc.update_style(card, |s| {
                 s.bg = Some(sv_ui::Color::rgb(240, 240, 246));
                 s.corner_radius = 10.0;
-                s.border = Some(sv_ui::Border { width: 2.0, color: sv_ui::Color::rgb(0, 0, 128) });
+                s.border = Some(sv_ui::Border {
+                    width: 2.0,
+                    color: sv_ui::Color::rgb(0, 0, 128),
+                });
                 s.padding = 12.0.into();
             });
             let t = doc.create_text("你好,vello!");
@@ -505,7 +545,10 @@ mod tests {
         let (pixmap, _) = render_frame(&doc, w, h, scale);
 
         let non_white = |r: u8, g: u8, b: u8| r < 250 || g < 250 || b < 250;
-        let gpu_count = gpu.chunks_exact(4).filter(|p| non_white(p[0], p[1], p[2])).count();
+        let gpu_count = gpu
+            .chunks_exact(4)
+            .filter(|p| non_white(p[0], p[1], p[2]))
+            .count();
         let cpu_count = pixmap
             .pixels()
             .iter()

@@ -292,13 +292,21 @@ mod tests {
                     doc.append(parent, t);
                 },
             );
-            assert!(doc.dump().contains("加载中"), "初始应为 pending:\n{}", doc.dump());
+            assert!(
+                doc.dump().contains("加载中"),
+                "初始应为 pending:\n{}",
+                doc.dump()
+            );
             assert!(pump_until_idle(Duration::from_secs(5)));
             assert!(doc.dump().contains("结果 10"), "\n{}", doc.dump());
 
             // 依赖变化 → 回 pending → 新结果
             base.set(2);
-            assert!(doc.dump().contains("加载中"), "重启应回 pending:\n{}", doc.dump());
+            assert!(
+                doc.dump().contains("加载中"),
+                "重启应回 pending:\n{}",
+                doc.dump()
+            );
             assert!(pump_until_idle(Duration::from_secs(5)));
             assert!(doc.dump().contains("结果 20"), "\n{}", doc.dump());
         });

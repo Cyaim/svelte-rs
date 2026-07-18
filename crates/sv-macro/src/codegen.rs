@@ -12,7 +12,9 @@ use proc_macro2::{Span, TokenStream};
 use quote::{format_ident, quote};
 use syn::Ident;
 
-use crate::ir::{Attr, AttrKind, ForNode, IfNode, LeafElem, LeafKind, Node, Segment, ViewElem, ViewInput};
+use crate::ir::{
+    Attr, AttrKind, ForNode, IfNode, LeafElem, LeafKind, Node, Segment, ViewElem, ViewInput,
+};
 
 pub fn generate(input: &ViewInput) -> TokenStream {
     let mut cx = Cx::default();
