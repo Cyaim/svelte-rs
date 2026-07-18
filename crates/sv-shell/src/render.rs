@@ -98,7 +98,11 @@ fn measure(
     }
     let n = &inner.nodes[id];
     let s = &n.style;
-    let fs = if s.font_size.is_nan() { inherited_font } else { s.font_size };
+    let fs = if s.font_size.is_nan() {
+        inherited_font
+    } else {
+        s.font_size
+    };
     let bw = s.border.map(|b| b.width).unwrap_or(0.0);
     let (mut w, mut h) = match n.kind {
         ElementKind::Text | ElementKind::Button => {
@@ -173,13 +177,20 @@ fn place(
     out: &mut Vec<Placed>,
 ) {
     let (w, h) = forced.unwrap_or_else(|| measure(inner, font, id, cache, inherited_font));
-    out.push(Placed { id, rect: Rect { x, y, w, h } });
+    out.push(Placed {
+        id,
+        rect: Rect { x, y, w, h },
+    });
     let n = &inner.nodes[id];
     if n.kind != ElementKind::View {
         return;
     }
     let s = n.style.clone();
-    let fs = if s.font_size.is_nan() { inherited_font } else { s.font_size };
+    let fs = if s.font_size.is_nan() {
+        inherited_font
+    } else {
+        s.font_size
+    };
     let bw = s.border.map(|b| b.width).unwrap_or(0.0);
     let mut cx = x + s.padding.left + bw;
     let mut cy = y + s.padding.top + bw;
@@ -188,11 +199,31 @@ fn place(
         let m = inner.nodes[*c].style.margin;
         match s.direction {
             Direction::Row => {
-                place(inner, font, cache, *c, cx + m.left, cy + m.top, None, fs, out);
+                place(
+                    inner,
+                    font,
+                    cache,
+                    *c,
+                    cx + m.left,
+                    cy + m.top,
+                    None,
+                    fs,
+                    out,
+                );
                 cx += cw + m.horizontal() + s.gap;
             }
             Direction::Column => {
-                place(inner, font, cache, *c, cx + m.left, cy + m.top, None, fs, out);
+                place(
+                    inner,
+                    font,
+                    cache,
+                    *c,
+                    cx + m.left,
+                    cy + m.top,
+                    None,
+                    fs,
+                    out,
+                );
                 cy += ch + m.vertical() + s.gap;
             }
         }
@@ -207,7 +238,12 @@ pub fn layout_tree_cached(doc: &Doc, logical_w: f32, logical_h: f32) -> Vec<Plac
         static CACHE: RefCell<Option<(usize, u64, u32, u32, Vec<Placed>)>> =
             const { RefCell::new(None) };
     }
-    let key = (doc.identity(), doc.version(), logical_w.to_bits(), logical_h.to_bits());
+    let key = (
+        doc.identity(),
+        doc.version(),
+        logical_w.to_bits(),
+        logical_h.to_bits(),
+    );
     CACHE.with(|c| {
         let mut slot = c.borrow_mut();
         if let Some((id, ver, w, h, placed)) = slot.as_ref()
@@ -299,17 +335,31 @@ pub fn paint_tree(doc: &Doc, placed: &[Placed], painter: &mut dyn Painter, scale
     let font = ui_font();
     doc.read(|inner| {
         for p in placed {
-            let Some(n) = inner.nodes.get(p.id) else { continue };
+            let Some(n) = inner.nodes.get(p.id) else {
+                continue;
+            };
             let s = &n.style;
             let op = effective_opacity(inner, p.id);
             let fs = resolve_font_size(inner, p.id) * scale;
             let bw = s.border.map(|b| b.width).unwrap_or(0.0);
-            let (x, y, w, h) = (p.rect.x * scale, p.rect.y * scale, p.rect.w * scale, p.rect.h * scale);
+            let (x, y, w, h) = (
+                p.rect.x * scale,
+                p.rect.y * scale,
+                p.rect.w * scale,
+                p.rect.h * scale,
+            );
             let inset = (s.padding.left + bw) * scale;
             let inset_top = (s.padding.top + bw) * scale;
 
             if let Some(bg) = s.bg {
-                painter.fill_rounded_rect(x, y, w, h, s.corner_radius * scale, with_opacity(bg, op));
+                painter.fill_rounded_rect(
+                    x,
+                    y,
+                    w,
+                    h,
+                    s.corner_radius * scale,
+                    with_opacity(bg, op),
+                );
             }
             if let Some(b) = s.border {
                 painter.stroke_rounded_rect(
@@ -332,12 +382,17 @@ pub fn paint_tree(doc: &Doc, placed: &[Placed], painter: &mut dyn Painter, scale
                 ElementKind::Button => {
                     let fg = with_opacity(s.fg.unwrap_or(Color::WHITE), op);
                     let (tw, th) = measure_text(&font, &n.text, fs);
-                    let run = shape_text(&font, &n.text, fs, x + (w - tw) / 2.0, y + (h - th) / 2.0);
+                    let run =
+                        shape_text(&font, &n.text, fs, x + (w - tw) / 2.0, y + (h - th) / 2.0);
                     painter.glyph_run(&run, fg);
                 }
                 ElementKind::Checkbox => {
                     let boxc = with_opacity(s.bg.unwrap_or(Color::rgb(221, 221, 234)), op);
-                    let r = if s.corner_radius > 0.0 { s.corner_radius } else { 4.0 };
+                    let r = if s.corner_radius > 0.0 {
+                        s.corner_radius
+                    } else {
+                        4.0
+                    };
                     painter.fill_rounded_rect(x, y, w, h, r * scale, boxc);
                     if n.checked {
                         let accent = with_opacity(s.fg.unwrap_or(Color::rgb(255, 62, 0)), op);
@@ -366,7 +421,9 @@ pub fn render_frame(doc: &Doc, phys_w: u32, phys_h: u32, scale: f32) -> (Pixmap,
 
     let mut pixmap = Pixmap::new(phys_w.max(1), phys_h.max(1)).expect("sv-shell: 创建 pixmap 失败");
     pixmap.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
-    let mut painter = TinySkiaPainter { pixmap: &mut pixmap };
+    let mut painter = TinySkiaPainter {
+        pixmap: &mut pixmap,
+    };
     paint_tree(doc, &placed, &mut painter, scale);
 
     (pixmap, placed)

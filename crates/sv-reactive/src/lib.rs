@@ -213,7 +213,9 @@ fn assert_writable(rtc: &RefCell<Runtime>) {
         && matches!(n.kind, NodeKind::Derived { .. })
     {
         drop(rt);
-        panic!("sv-reactive: 不允许在 derived 计算过程中写入 state(对应 Svelte 的 state_unsafe_mutation)");
+        panic!(
+            "sv-reactive: 不允许在 derived 计算过程中写入 state(对应 Svelte 的 state_unsafe_mutation)"
+        );
     }
 }
 
@@ -256,7 +258,10 @@ fn flush(rtc: &RefCell<Runtime>) {
             batch.into_iter().partition(|id| {
                 matches!(
                     rt.nodes.get(*id).map(|n| &n.kind),
-                    Some(NodeKind::Effect { phase: EffectPhase::Pre, .. })
+                    Some(NodeKind::Effect {
+                        phase: EffectPhase::Pre,
+                        ..
+                    })
                 )
             })
         };
@@ -278,7 +283,10 @@ fn update_if_necessary(rtc: &RefCell<Runtime>, id: NodeId) {
         for s in sources {
             let src_is_derived = {
                 let rt = rtc.borrow();
-                matches!(rt.nodes.get(s).map(|n| &n.kind), Some(NodeKind::Derived { .. }))
+                matches!(
+                    rt.nodes.get(s).map(|n| &n.kind),
+                    Some(NodeKind::Derived { .. })
+                )
             };
             if src_is_derived {
                 update_if_necessary(rtc, s);
@@ -392,7 +400,11 @@ fn run_node(rtc: &RefCell<Runtime>, id: NodeId) {
             rt.owner = self.owner;
         }
     }
-    let _g = Restore { rtc, obs: prev_obs, owner: prev_owner };
+    let _g = Restore {
+        rtc,
+        obs: prev_obs,
+        owner: prev_owner,
+    };
 
     // 以下用户闭包均在 RefCell 未借用状态下执行
     match job {
@@ -475,8 +487,16 @@ fn with_value<T: 'static, R>(
 /// `$state`:创建一个响应式状态,返回 `Copy` 句柄
 pub fn state<T: 'static>(value: T) -> Signal<T> {
     RT.with(|rtc| {
-        let id = create_node(rtc, NodeKind::Signal, Some(Box::new(value)), Dirtiness::Clean);
-        Signal { id, _t: PhantomData }
+        let id = create_node(
+            rtc,
+            NodeKind::Signal,
+            Some(Box::new(value)),
+            Dirtiness::Clean,
+        );
+        Signal {
+            id,
+            _t: PhantomData,
+        }
     })
 }
 
@@ -490,7 +510,10 @@ pub fn derived<T: PartialEq + 'static>(f: impl Fn() -> T + 'static) -> Derived<T
             None,
             Dirtiness::Dirty,
         );
-        Derived { id, _t: PhantomData }
+        Derived {
+            id,
+            _t: PhantomData,
+        }
     })
 }
 
@@ -769,7 +792,9 @@ impl<T: 'static> Signal<T> {
                     .take()
                     .expect("sv-reactive: 检测到对同一个 signal 的重入访问")
             };
-            f(boxed.downcast_mut::<T>().expect("sv-reactive: 内部错误——值类型不匹配"));
+            f(boxed
+                .downcast_mut::<T>()
+                .expect("sv-reactive: 内部错误——值类型不匹配"));
             {
                 let mut rt = rtc.borrow_mut();
                 if let Some(node) = rt.nodes.get_mut(self.id) {
@@ -887,7 +912,9 @@ impl<T: 'static> Derived<T> {
                     .take()
                     .expect("sv-reactive: 检测到对同一个 derived 的重入访问")
             };
-            f(boxed.downcast_mut::<T>().expect("sv-reactive: 内部错误——值类型不匹配"));
+            f(boxed
+                .downcast_mut::<T>()
+                .expect("sv-reactive: 内部错误——值类型不匹配"));
             {
                 let mut rt = rtc.borrow_mut();
                 if let Some(node) = rt.nodes.get_mut(self.id) {
@@ -1274,7 +1301,11 @@ mod tests {
         });
         order.borrow_mut().clear();
         a.set(1);
-        assert_eq!(*order.borrow(), vec!["pre", "普通"], "同一轮 flush 里 pre 应先跑");
+        assert_eq!(
+            *order.borrow(),
+            vec!["pre", "普通"],
+            "同一轮 flush 里 pre 应先跑"
+        );
         pre.dispose();
         a.set(2);
         assert_eq!(*order.borrow(), vec!["pre", "普通", "普通"]);
@@ -1293,7 +1324,11 @@ mod tests {
             s.borrow_mut().push(is_tracking());
             s.borrow_mut().push(untrack(is_tracking));
         });
-        assert_eq!(*seen.borrow(), vec![true, false], "effect 内 true、untrack 内 false");
+        assert_eq!(
+            *seen.borrow(),
+            vec![true, false],
+            "effect 内 true、untrack 内 false"
+        );
         // derived 计算过程中同样处于追踪上下文
         let d = derived(is_tracking);
         assert!(d.get());
@@ -1378,7 +1413,11 @@ mod tests {
                 });
             });
         });
-        assert_eq!(*seen.borrow(), vec!["dark"], "create_root 内应取到外层 context");
+        assert_eq!(
+            *seen.borrow(),
+            vec!["dark"],
+            "create_root 内应取到外层 context"
+        );
         root.dispose();
     }
 }

@@ -41,7 +41,6 @@ fn aa_config() -> AaConfig {
     }
 }
 
-
 // ---------------------------------------------------------------------------
 // VelloPainter:Painter → Scene
 // ---------------------------------------------------------------------------
@@ -57,7 +56,10 @@ impl VelloPainter {
         // 与 CPU 端 swash 共用同一份 'static 字节;Blob 只包一层 Arc<&[u8]>,零拷贝。
         // glyph id 语义一致:swash FontRef::from_index(0) 与这里的 index 0 同一字体
         let font = FontData::new(Blob::new(Arc::new(bytes)), index);
-        Self { scene: Scene::new(), font }
+        Self {
+            scene: Scene::new(),
+            font,
+        }
     }
 }
 
@@ -71,7 +73,10 @@ impl Painter for VelloPainter {
     fn caps(&self) -> PainterCaps {
         // vello 有 draw_blurred_rounded_rect → blur 可用;
         // 外部纹理合成(<surface3d>)还没接 → false
-        PainterCaps { external_texture: false, blur: true }
+        PainterCaps {
+            external_texture: false,
+            blur: true,
+        }
     }
 
     fn fill_rounded_rect(&mut self, x: f32, y: f32, w: f32, h: f32, radius: f32, color: Color) {
@@ -82,10 +87,20 @@ impl Painter for VelloPainter {
             (y + h) as f64,
             radius as f64,
         );
-        self.scene.fill(Fill::NonZero, Affine::IDENTITY, pcolor(color), None, &rect);
+        self.scene
+            .fill(Fill::NonZero, Affine::IDENTITY, pcolor(color), None, &rect);
     }
 
-    fn stroke_rounded_rect(&mut self, x: f32, y: f32, w: f32, h: f32, radius: f32, width: f32, color: Color) {
+    fn stroke_rounded_rect(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        radius: f32,
+        width: f32,
+        color: Color,
+    ) {
         // 与 CPU 后端一致:沿边框中心线描边(内缩半宽),视觉贴合 border-box
         let half = width / 2.0;
         let rect = RoundedRect::new(
@@ -114,7 +129,11 @@ impl Painter for VelloPainter {
             .brush(pcolor(color))
             .draw(
                 Fill::NonZero,
-                glyphs.iter().map(|g| Glyph { id: g.id as u32, x: g.ox, y: g.oy }),
+                glyphs.iter().map(|g| Glyph {
+                    id: g.id as u32,
+                    x: g.ox,
+                    y: g.oy,
+                }),
             );
     }
 }
@@ -132,7 +151,11 @@ pub struct VelloWin {
 
 impl VelloWin {
     /// 建 surface + renderer;失败(无 adapter / surface 不兼容)由调用方回退 CPU
-    pub fn new(window: Arc<Window>, width: u32, height: u32) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(
+        window: Arc<Window>,
+        width: u32,
+        height: u32,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let mut context = RenderContext::new();
         let surface = pollster::block_on(context.create_surface(
             window,
@@ -146,7 +169,12 @@ impl VelloWin {
             RendererOptions::default(),
         )
         .map_err(|e| format!("vello Renderer 创建失败: {e}"))?;
-        Ok(Self { context, renderer, surface, painter: VelloPainter::new() })
+        Ok(Self {
+            context,
+            renderer,
+            surface,
+            painter: VelloPainter::new(),
+        })
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -156,7 +184,8 @@ impl VelloWin {
         if self.surface.config.width == width && self.surface.config.height == height {
             return;
         }
-        self.context.resize_surface(&mut self.surface, width, height);
+        self.context
+            .resize_surface(&mut self.surface, width, height);
     }
 
     /// 渲染一帧到窗口。返回 (布局结果, 是否已成功呈现);
@@ -166,10 +195,16 @@ impl VelloWin {
     }
 
     /// `scene_unchanged=true` 时跳过场景重编码(布局走版本缓存),只重渲染呈现
-    pub fn render_cached(&mut self, doc: &Doc, scale: f32, scene_unchanged: bool) -> (Vec<Placed>, bool) {
+    pub fn render_cached(
+        &mut self,
+        doc: &Doc,
+        scale: f32,
+        scene_unchanged: bool,
+    ) -> (Vec<Placed>, bool) {
         let width = self.surface.config.width;
         let height = self.surface.config.height;
-        let placed = crate::render::layout_tree_cached(doc, width as f32 / scale, height as f32 / scale);
+        let placed =
+            crate::render::layout_tree_cached(doc, width as f32 / scale, height as f32 / scale);
 
         if !scene_unchanged {
             self.painter.scene.reset();
@@ -213,14 +248,19 @@ impl VelloWin {
             }
         };
 
-        let mut encoder = device_handle
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("sv-shell surface blit") });
+        let mut encoder =
+            device_handle
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("sv-shell surface blit"),
+                });
         self.surface.blitter.copy(
             &device_handle.device,
             &mut encoder,
             &self.surface.target_view,
-            &surface_texture.texture.create_view(&wgpu::TextureViewDescriptor::default()),
+            &surface_texture
+                .texture
+                .create_view(&wgpu::TextureViewDescriptor::default()),
         );
         device_handle.queue.submit([encoder.finish()]);
         surface_texture.present();
@@ -298,7 +338,11 @@ fn offscreen_targets(
     width: u32,
     height: u32,
 ) -> (wgpu::Texture, wgpu::TextureView, wgpu::Buffer, u32) {
-    let size = wgpu::Extent3d { width, height, depth_or_array_layers: 1 };
+    let size = wgpu::Extent3d {
+        width,
+        height,
+        depth_or_array_layers: 1,
+    };
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("sv-shell offscreen target"),
         size,
@@ -376,9 +420,14 @@ fn render_offscreen_frame(
     let view = &off.view;
     let buffer = &off.buffer;
     let padded_bytes_per_row = off.padded_bytes_per_row;
-    let size = wgpu::Extent3d { width, height, depth_or_array_layers: 1 };
+    let size = wgpu::Extent3d {
+        width,
+        height,
+        depth_or_array_layers: 1,
+    };
 
-    let placed = crate::render::layout_tree_cached(doc, width as f32 / scale, height as f32 / scale);
+    let placed =
+        crate::render::layout_tree_cached(doc, width as f32 / scale, height as f32 / scale);
     let mut painter = VelloPainter::new();
     paint_tree(doc, &placed, &mut painter, scale);
 
@@ -399,8 +448,9 @@ fn render_offscreen_frame(
     }
 
     // 回读:bytes_per_row 已 256 对齐(offscreen_targets),取回后去 padding
-    let mut encoder = device
-        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("sv-shell readback") });
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("sv-shell readback"),
+    });
     encoder.copy_texture_to_buffer(
         target.as_image_copy(),
         wgpu::TexelCopyBufferInfo {

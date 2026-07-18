@@ -117,11 +117,21 @@ pub fn parse_style_block(
 ) -> Result<StyleSheet, CompileError> {
     let mut sheet = StyleSheet::default();
     let mut vars: HashMap<String, String> = HashMap::new();
-    let mut p = BlockParser { source, block, offset, pos: 0 };
+    let mut p = BlockParser {
+        source,
+        block,
+        offset,
+        pos: 0,
+    };
 
     // 第一遍:提取 :root { --x: v } 变量(可写在任意位置,先收齐再解析规则)
     {
-        let mut q = BlockParser { source, block, offset, pos: 0 };
+        let mut q = BlockParser {
+            source,
+            block,
+            offset,
+            pos: 0,
+        };
         loop {
             q.skip_trivia()?;
             if q.pos >= block.len() {
@@ -144,7 +154,9 @@ pub fn parse_style_block(
                     };
                     let k = k.trim();
                     if !k.starts_with("--") {
-                        return Err(q.err(q.pos, ":root 里只放 --自定义属性(普通样式写到类/元素规则)"));
+                        return Err(
+                            q.err(q.pos, ":root 里只放 --自定义属性(普通样式写到类/元素规则)")
+                        );
                     }
                     vars.insert(k.to_string(), v.trim().to_string());
                 }
@@ -192,7 +204,10 @@ pub fn parse_style_block(
         if !is_class && !ELEMENT_NAMES.contains(&name.as_str()) {
             return Err(p.err(
                 name_rel,
-                format!("未知元素选择器 `{name}`(支持 {}; 类选择器加 `.` 前缀)", ELEMENT_NAMES.join("/")),
+                format!(
+                    "未知元素选择器 `{name}`(支持 {}; 类选择器加 `.` 前缀)",
+                    ELEMENT_NAMES.join("/")
+                ),
             ));
         }
         // 可选伪类(规则头形态 `.btn:hover`)
@@ -207,7 +222,9 @@ pub fn parse_style_block(
                 other => {
                     return Err(p.err(
                         rel,
-                        format!("暂支持 :hover/:active(:focus/:disabled 随焦点链 C2),收到 `:{other}`"),
+                        format!(
+                            "暂支持 :hover/:active(:focus/:disabled 随焦点链 C2),收到 `:{other}`"
+                        ),
                     ));
                 }
             });
@@ -275,7 +292,12 @@ fn parse_rule_body(
     let mut decls = String::new();
     let mut hover = None;
     let mut active = None;
-    let mut p = BlockParser { source, block: body, offset, pos: 0 };
+    let mut p = BlockParser {
+        source,
+        block: body,
+        offset,
+        pos: 0,
+    };
     loop {
         p.skip_trivia()?;
         if p.pos >= body.len() {
@@ -328,19 +350,24 @@ fn parse_rule_body(
 }
 
 /// 解析声明串(内联 style="" 与简写属性也走这里;无变量环境)
-pub fn parse_style(source: &str, style_str: &str, offset: usize) -> Result<TokenStream, CompileError> {
+pub fn parse_style(
+    source: &str,
+    style_str: &str,
+    offset: usize,
+) -> Result<TokenStream, CompileError> {
     parse_style_with_vars(source, style_str, offset, &HashMap::new())
 }
 
-fn substitute_vars(
-    value: &str,
-    vars: &HashMap<String, String>,
-) -> Result<String, String> {
+fn substitute_vars(value: &str, vars: &HashMap<String, String>) -> Result<String, String> {
     let mut out = value.to_string();
     for _ in 0..8 {
-        let Some(pos) = out.find("var(") else { return Ok(out) };
+        let Some(pos) = out.find("var(") else {
+            return Ok(out);
+        };
         let after = &out[pos + 4..];
-        let Some(close) = after.find(')') else { return Err("var( 未闭合".into()) };
+        let Some(close) = after.find(')') else {
+            return Err("var( 未闭合".into());
+        };
         let inner = &after[..close];
         let (name, fallback) = match inner.split_once(',') {
             Some((n, f)) => (n.trim(), Some(f.trim())),
@@ -350,10 +377,19 @@ fn substitute_vars(
             Some(v) => v.clone(),
             None => match fallback {
                 Some(f) => f.to_string(),
-                None => return Err(format!("未定义的变量 `{name}`(在 :root 里声明,或给 fallback)")),
+                None => {
+                    return Err(format!(
+                        "未定义的变量 `{name}`(在 :root 里声明,或给 fallback)"
+                    ));
+                }
             },
         };
-        out = format!("{}{}{}", &out[..pos], replacement, &out[pos + 4 + close + 1..]);
+        out = format!(
+            "{}{}{}",
+            &out[..pos],
+            replacement,
+            &out[pos + 4 + close + 1..]
+        );
     }
     Ok(out)
 }
@@ -387,16 +423,18 @@ fn parse_style_with_vars(
 
         let num = |v: &str| -> Result<f32, CompileError> { parse_length(key, v).map_err(&err) };
         let nums = || -> Result<Vec<f32>, CompileError> {
-            value.split_whitespace().map(|v| parse_length(key, v).map_err(&err)).collect()
+            value
+                .split_whitespace()
+                .map(|v| parse_length(key, v).map_err(&err))
+                .collect()
         };
 
         let stmt = match key {
             // ---- 盒模型 ----
             "padding" | "margin" => {
                 let vs = nums()?;
-                let (t, r, b, l) = expand_shorthand(&vs).ok_or_else(|| {
-                    err(format!("`{key}` 接受 1–4 个长度值,收到 {}", vs.len()))
-                })?;
+                let (t, r, b, l) = expand_shorthand(&vs)
+                    .ok_or_else(|| err(format!("`{key}` 接受 1–4 个长度值,收到 {}", vs.len())))?;
                 let field = quote::format_ident!("{key}");
                 quote! { s.#field = ::sv_ui::Edges { top: #t, right: #r, bottom: #b, left: #l }; }
             }
@@ -441,15 +479,32 @@ fn parse_style_with_vars(
                     quote! { s.border = Some(::sv_ui::Border { width: #w, color: #c }); }
                 }
             }
-            "gap" | "row-gap" | "column-gap" => { let v = num(value)?; quote! { s.gap = #v; } }
-            "font-size" | "font_size" => { let v = num(value)?; quote! { s.font_size = #v; } }
-            "radius" | "corner-radius" | "border-radius" => { let v = num(value)?; quote! { s.corner_radius = #v; } }
+            "gap" | "row-gap" | "column-gap" => {
+                let v = num(value)?;
+                quote! { s.gap = #v; }
+            }
+            "font-size" | "font_size" => {
+                let v = num(value)?;
+                quote! { s.font_size = #v; }
+            }
+            "radius" | "corner-radius" | "border-radius" => {
+                let v = num(value)?;
+                quote! { s.corner_radius = #v; }
+            }
             "opacity" => {
-                let v: f32 = value.parse().map_err(|_| err(format!("opacity `{value}` 不是数字")))?;
+                let v: f32 = value
+                    .parse()
+                    .map_err(|_| err(format!("opacity `{value}` 不是数字")))?;
                 quote! { s.opacity = #v; }
             }
-            "width" => { let v = num(value)?; quote! { s.width = Some(#v); } }
-            "height" => { let v = num(value)?; quote! { s.height = Some(#v); } }
+            "width" => {
+                let v = num(value)?;
+                quote! { s.width = Some(#v); }
+            }
+            "height" => {
+                let v = num(value)?;
+                quote! { s.height = Some(#v); }
+            }
             "direction" | "flex-direction" => match value {
                 "row" => quote! { s.direction = ::sv_ui::Direction::Row; },
                 "column" => quote! { s.direction = ::sv_ui::Direction::Column; },
@@ -462,7 +517,11 @@ fn parse_style_with_vars(
                     "text" => quote! { ::sv_ui::Cursor::Text },
                     "grab" => quote! { ::sv_ui::Cursor::Grab },
                     "not-allowed" => quote! { ::sv_ui::Cursor::NotAllowed },
-                    _ => return Err(err(format!("cursor 支持 pointer/default/text/grab/not-allowed,收到 `{value}`"))),
+                    _ => {
+                        return Err(err(format!(
+                            "cursor 支持 pointer/default/text/grab/not-allowed,收到 `{value}`"
+                        )));
+                    }
                 };
                 quote! { s.cursor = Some(#c); }
             }
@@ -507,10 +566,17 @@ fn expand_shorthand(vs: &[f32]) -> Option<(f32, f32, f32, f32)> {
 fn parse_length(key: &str, v: &str) -> Result<f32, String> {
     let v = v.trim();
     if let Some(n) = v.strip_suffix("rem") {
-        return n.trim().parse::<f32>().map(|x| x * REM).map_err(|_| format!("`{v}` 不是数字"));
+        return n
+            .trim()
+            .parse::<f32>()
+            .map(|x| x * REM)
+            .map_err(|_| format!("`{v}` 不是数字"));
     }
     if let Some(n) = v.strip_suffix("px") {
-        return n.trim().parse::<f32>().map_err(|_| format!("`{v}` 不是数字"));
+        return n
+            .trim()
+            .parse::<f32>()
+            .map_err(|_| format!("`{v}` 不是数字"));
     }
     for bad in ["em", "%", "vw", "vh", "vmin", "vmax", "pt", "ch"] {
         if v.ends_with(bad) && v[..v.len() - bad.len()].trim().parse::<f32>().is_ok() {
@@ -519,10 +585,13 @@ fn parse_length(key: &str, v: &str) -> Result<f32, String> {
                 "%" | "vw" | "vh" => "需要布局系统(taffy,C2)",
                 _ => "长尾单位,见 CSS-SUPPORT 矩阵",
             };
-            return Err(format!("单位 `{bad}` 暂不支持——{why};请用 px/rem/裸数(`{key}: 8px`)"));
+            return Err(format!(
+                "单位 `{bad}` 暂不支持——{why};请用 px/rem/裸数(`{key}: 8px`)"
+            ));
         }
     }
-    v.parse::<f32>().map_err(|_| format!("样式 `{key}` 的值 `{v}` 不是长度"))
+    v.parse::<f32>()
+        .map_err(|_| format!("样式 `{key}` 的值 `{v}` 不是长度"))
 }
 
 // ---------------------------------------------------------------------------
@@ -606,7 +675,11 @@ fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (u8, u8, u8) {
         let v = (l * 255.0).round() as u8;
         return (v, v, v);
     }
-    let q = if l < 0.5 { l * (1.0 + s) } else { l + s - l * s };
+    let q = if l < 0.5 {
+        l * (1.0 + s)
+    } else {
+        l + s - l * s
+    };
     let p = 2.0 * l - q;
     let f = |mut t: f32| {
         if t < 0.0 {
@@ -654,9 +727,13 @@ fn parse_alpha(a: Option<String>) -> Result<u8, String> {
         Some(s) => {
             let s = s.trim();
             let f = if let Some(pct) = s.strip_suffix('%') {
-                pct.trim().parse::<f32>().map_err(|_| format!("alpha `{s}` 不是数字"))? / 100.0
+                pct.trim()
+                    .parse::<f32>()
+                    .map_err(|_| format!("alpha `{s}` 不是数字"))?
+                    / 100.0
             } else {
-                s.parse::<f32>().map_err(|_| format!("alpha `{s}` 不是数字"))?
+                s.parse::<f32>()
+                    .map_err(|_| format!("alpha `{s}` 不是数字"))?
             };
             Ok((f.clamp(0.0, 1.0) * 255.0).round() as u8)
         }
@@ -676,9 +753,15 @@ fn color(value: &str) -> Result<TokenStream, String> {
     {
         let (parts, alpha) = color_args(inner);
         if parts.len() != 3 {
-            return Err(format!("颜色 `{value}` 应为 rgb(r g b [/ a]) 或 rgb(r, g, b[, a])"));
+            return Err(format!(
+                "颜色 `{value}` 应为 rgb(r g b [/ a]) 或 rgb(r, g, b[, a])"
+            ));
         }
-        let ch = |s: &str| s.trim().parse::<u8>().map_err(|_| format!("颜色分量 `{s}` 不是 0-255"));
+        let ch = |s: &str| {
+            s.trim()
+                .parse::<u8>()
+                .map_err(|_| format!("颜色分量 `{s}` 不是 0-255"))
+        };
         let (r, g, b) = (ch(&parts[0])?, ch(&parts[1])?, ch(&parts[2])?);
         let a = parse_alpha(alpha)?;
         return Ok(quote! { ::sv_ui::Color::rgba(#r, #g, #b, #a) });
@@ -742,17 +825,27 @@ fn color(value: &str) -> Result<TokenStream, String> {
     let hex = value
         .strip_prefix('#')
         .ok_or_else(|| format!("颜色 `{value}` 应为 #hex、rgb()/hsl()/hwb() 或颜色名"))?;
-    let expand = |s: &str| u8::from_str_radix(s, 16).map_err(|_| format!("颜色 `{value}` 不是合法十六进制"));
+    let expand =
+        |s: &str| u8::from_str_radix(s, 16).map_err(|_| format!("颜色 `{value}` 不是合法十六进制"));
     let (r, g, b, a) = match hex.len() {
         3 | 4 => {
             let d = |i: usize| expand(&hex[i..i + 1]).map(|v| v * 17);
-            (d(0)?, d(1)?, d(2)?, if hex.len() == 4 { d(3)? } else { 255 })
+            (
+                d(0)?,
+                d(1)?,
+                d(2)?,
+                if hex.len() == 4 { d(3)? } else { 255 },
+            )
         }
         6 | 8 => (
             expand(&hex[0..2])?,
             expand(&hex[2..4])?,
             expand(&hex[4..6])?,
-            if hex.len() == 8 { expand(&hex[6..8])? } else { 255 },
+            if hex.len() == 8 {
+                expand(&hex[6..8])?
+            } else {
+                255
+            },
         ),
         _ => return Err(format!("颜色 `{value}` 应为 3/4/6/8 位十六进制")),
     };

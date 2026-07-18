@@ -40,7 +40,10 @@ pub fn split(source: &str) -> Result<Sfc, CompileError> {
                 ));
             }
             (
-                Some(Span { start: content_start, end: content_end }),
+                Some(Span {
+                    start: content_start,
+                    end: content_end,
+                }),
                 content_end + "</script>".len(),
             )
         }
@@ -63,14 +66,23 @@ pub fn split(source: &str) -> Result<Sfc, CompileError> {
                     "<style> 之后不允许再有模板内容(style 块应在文件底部)",
                 ));
             }
-            (Some(Span { start: content_start, end: content_end }), open)
+            (
+                Some(Span {
+                    start: content_start,
+                    end: content_end,
+                }),
+                open,
+            )
         }
         None => (None, source.len()),
     };
 
     Ok(Sfc {
         script,
-        template: Span { start: template_start, end: template_end },
+        template: Span {
+            start: template_start,
+            end: template_end,
+        },
         style,
     })
 }

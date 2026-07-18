@@ -12,7 +12,10 @@ include!(concat!(env!("OUT_DIR"), "/todo_item.rs"));
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if let Some(i) = args.iter().position(|a| a == "--png") {
-        let path = args.get(i + 1).cloned().unwrap_or_else(|| "todo.png".into());
+        let path = args
+            .get(i + 1)
+            .cloned()
+            .unwrap_or_else(|| "todo.png".into());
         // 先模拟几次交互再截图,展示非空状态
         let doc = sv_ui::Doc::new();
         let d = doc.clone();
@@ -30,11 +33,7 @@ fn main() {
 
 /// 按文档顺序找第一个匹配文本的按钮并点击(--png 演示与测试共用)
 fn click_first_button(doc: &sv_ui::Doc, label: &str) {
-    fn walk(
-        inner: &sv_ui::DocumentInner,
-        id: sv_ui::ViewId,
-        label: &str,
-    ) -> Option<sv_ui::ViewId> {
+    fn walk(inner: &sv_ui::DocumentInner, id: sv_ui::ViewId, label: &str) -> Option<sv_ui::ViewId> {
         let n = &inner.nodes[id];
         if n.kind == sv_ui::ElementKind::Button && n.text == label {
             return Some(id);
@@ -81,30 +80,52 @@ mod tests {
         let (_, _scope) = sv_reactive::create_root(move || todo(&d, d.root()));
 
         // {#each}{:else}:初始空状态
-        assert!(doc.dump().contains("空空如也"), "初始应显示空状态:\n{}", doc.dump());
-        assert!(doc.dump().contains("共 0 项"), "{{@const}} 摘要:\n{}", doc.dump());
+        assert!(
+            doc.dump().contains("空空如也"),
+            "初始应显示空状态:\n{}",
+            doc.dump()
+        );
+        assert!(
+            doc.dump().contains("共 0 项"),
+            "{{@const}} 摘要:\n{}",
+            doc.dump()
+        );
 
         // 添加三项:组件行出现,{@const} 联动
         click(&doc, "添加");
         click(&doc, "添加");
         click(&doc, "添加");
         let dump = doc.dump();
-        assert!(dump.contains("1. 事项 1") && dump.contains("3. 事项 3"), "应有三行:\n{dump}");
+        assert!(
+            dump.contains("1. 事项 1") && dump.contains("3. 事项 3"),
+            "应有三行:\n{dump}"
+        );
         assert!(dump.contains("共 3 项"), "{{@const}} 应联动:\n{dump}");
         assert!(!dump.contains("空空如也"));
 
         // 组件内局部状态:勾选第一行
         click(&doc, "[ ]"); // 第一个未勾选按钮
-        assert!(doc.dump().contains("[x]"), "行内 done 状态应翻转:\n{}", doc.dump());
+        assert!(
+            doc.dump().contains("[x]"),
+            "行内 done 状态应翻转:\n{}",
+            doc.dump()
+        );
 
         // 闭包 prop:删除第一行 → 索引重排
         click(&doc, "删除");
         let dump = doc.dump();
-        assert!(!dump.contains("事项 1") && dump.contains("1. 事项 2"), "删除后应重排:\n{dump}");
+        assert!(
+            !dump.contains("事项 1") && dump.contains("1. 事项 2"),
+            "删除后应重排:\n{dump}"
+        );
         assert!(dump.contains("共 2 项"));
 
         // 清空 → 回到 {:else}
         click(&doc, "清空");
-        assert!(doc.dump().contains("空空如也"), "清空后应回空状态:\n{}", doc.dump());
+        assert!(
+            doc.dump().contains("空空如也"),
+            "清空后应回空状态:\n{}",
+            doc.dump()
+        );
     }
 }

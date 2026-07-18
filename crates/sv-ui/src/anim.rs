@@ -86,7 +86,10 @@ mod tests {
         let mid_early = opacity_of(&doc, t);
         assert!(pump(1050.0));
         let mid = opacity_of(&doc, t);
-        assert!(mid > mid_early && mid < 1.0, "中途应介于两端:{mid_early} → {mid}");
+        assert!(
+            mid > mid_early && mid < 1.0,
+            "中途应介于两端:{mid_early} → {mid}"
+        );
         assert!(!pump(1200.0), "超时应完成并出队");
         assert_eq!(opacity_of(&doc, t), 1.0);
         assert!(!active());

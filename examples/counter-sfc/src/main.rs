@@ -11,7 +11,10 @@ include!(concat!(env!("OUT_DIR"), "/counter.rs"));
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if let Some(i) = args.iter().position(|a| a == "--png") {
-        let path = args.get(i + 1).cloned().unwrap_or_else(|| "counter-sfc.png".into());
+        let path = args
+            .get(i + 1)
+            .cloned()
+            .unwrap_or_else(|| "counter-sfc.png".into());
         sv_shell::render_to_png(|doc, root| counter(doc, root), 960, 800, 2.0, &path)
             .expect("离屏渲染失败");
         println!("已渲染到 {path}");

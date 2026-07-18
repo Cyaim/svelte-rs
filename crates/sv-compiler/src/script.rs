@@ -313,16 +313,19 @@ pub fn extract_props(content: &str) -> Result<(String, Option<PropsDecl>), Strin
             } else {
                 None
             };
-            Ok(Field { name, ty, default, bindable })
+            Ok(Field {
+                name,
+                ty,
+                default,
+                bindable,
+            })
         }
     }
     // `$bindable(T)` 在类型位:$ 进不了 syn,先占位替换,借 Fn-sugar 解析
     let inner_pre = inner.replace("$bindable", "__sv_bindable");
-    let fields = syn::parse::Parser::parse_str(
-        Punctuated::<Field, Token![,]>::parse_terminated,
-        &inner_pre,
-    )
-    .map_err(|e| format!("$props 声明解析失败: {e}"))?;
+    let fields =
+        syn::parse::Parser::parse_str(Punctuated::<Field, Token![,]>::parse_terminated, &inner_pre)
+            .map_err(|e| format!("$props 声明解析失败: {e}"))?;
 
     let decl = PropsDecl {
         fields: fields
@@ -356,13 +359,14 @@ pub fn extract_props(content: &str) -> Result<(String, Option<PropsDecl>), Strin
 
 pub fn transform(source: &str, span: &Span) -> Result<ScriptOutput, CompileError> {
     let content = span.text(source);
-    let (content, props) = extract_props(content)
-        .map_err(|msg| CompileError::at_offset(source, span.start, msg))?;
+    let (content, props) =
+        extract_props(content).map_err(|msg| CompileError::at_offset(source, span.start, msg))?;
     // `$` 不是合法 Rust token,先做占位替换再交给 syn。
     // (`$state.raw` / `$derived.by` / `$effect.pre` 因前缀替换自动变成方法调用形态)
     let pre = replace_runes(&content);
     let wrapped = format!("{{\n{pre}\n}}");
-    let block: Block = syn::parse_str(&wrapped).map_err(|e| syn_err(source, span, &e, "script 解析失败"))?;
+    let block: Block =
+        syn::parse_str(&wrapped).map_err(|e| syn_err(source, span, &e, "script 解析失败"))?;
 
     let mut vars = VarTable::default();
     // $bindable props 在 callee 里就是反应式变量:预注册进变量表,
@@ -376,9 +380,7 @@ pub fn transform(source: &str, span: &Span) -> Result<ScriptOutput, CompileError
     let mut out = TokenStream::new();
     for stmt in block.stmts {
         let is_rune_local = matches!(&stmt, Stmt::Local(l) if l.init.as_ref().is_some_and(|i| is_rune_init(&i.expr)));
-        if !is_rune_local
-            && let Stmt::Local(l) = &stmt
-        {
+        if !is_rune_local && let Stmt::Local(l) = &stmt {
             // 普通 let:记录为"普通变量"(模板闭包捕获它们时需预克隆)
             collect_pat_idents(&l.pat, &mut plain_vars);
         }
@@ -389,7 +391,12 @@ pub fn transform(source: &str, span: &Span) -> Result<ScriptOutput, CompileError
     for name in vars.map.keys() {
         plain_vars.remove(name);
     }
-    Ok(ScriptOutput { stmts: out, vars, props, plain_vars })
+    Ok(ScriptOutput {
+        stmts: out,
+        vars,
+        props,
+        plain_vars,
+    })
 }
 
 /// rune 占位替换:只替换掩码文本上命中的位置(注释/字符串免疫),
@@ -488,18 +495,31 @@ fn rewrite_stmt(
     {
         let (kind, ctor): (VarKind, fn(&Expr) -> TokenStream) = if p.path.is_ident("__sv_derived") {
             // $derived.by(f):f 就是计算闭包
-            (VarKind::Derived, |arg| quote! { ::sv_reactive::derived(#arg) })
+            (
+                VarKind::Derived,
+                |arg| quote! { ::sv_reactive::derived(#arg) },
+            )
         } else {
             // $state.raw(v):本实现无深层响应,等价于 $state
             (VarKind::State, |arg| quote! { ::sv_reactive::state(#arg) })
         };
         let Pat::Ident(pi) = &mut local.pat else {
-            return Err(syn_err(source, span, &syn::Error::new_spanned(&local.pat, "x"), "rune 只能绑定到简单变量名"));
+            return Err(syn_err(
+                source,
+                span,
+                &syn::Error::new_spanned(&local.pat, "x"),
+                "rune 只能绑定到简单变量名",
+            ));
         };
         pi.mutability = None;
         let name = pi.ident.clone();
         if mc.args.len() != 1 {
-            return Err(syn_err(source, span, &syn::Error::new_spanned(&mc.method, "x"), "rune 需要恰好一个参数"));
+            return Err(syn_err(
+                source,
+                span,
+                &syn::Error::new_spanned(&mc.method, "x"),
+                "rune 需要恰好一个参数",
+            ));
         }
         let mut arg = mc.args.first().unwrap().clone();
         rewrite_checked(source, span, vars, |rw| rw.visit_expr_mut(&mut arg))?;
@@ -551,9 +571,7 @@ fn rewrite_stmt(
 
     // `$effect(...)` / `$effect.pre(...)`(pre 的"渲染前"语义待帧调度落地,当前等价)
     let effect_arg = match &mut stmt {
-        Stmt::Expr(Expr::Call(call), _)
-            if matches!(call.func.as_ref(), Expr::Path(p) if p.path.is_ident("__sv_effect")) =>
-        {
+        Stmt::Expr(Expr::Call(call), _) if matches!(call.func.as_ref(), Expr::Path(p) if p.path.is_ident("__sv_effect")) => {
             Some((&mut call.args, "$effect"))
         }
         Stmt::Expr(Expr::MethodCall(mc), _)
@@ -665,11 +683,21 @@ pub struct Rewriter<'a> {
 
 impl<'a> Rewriter<'a> {
     pub fn new(vars: &'a VarTable) -> Self {
-        Rewriter { vars, locals: HashSet::new(), shadowed: HashSet::new(), errors: Vec::new() }
+        Rewriter {
+            vars,
+            locals: HashSet::new(),
+            shadowed: HashSet::new(),
+            errors: Vec::new(),
+        }
     }
 
     fn child(&self, shadowed: HashSet<String>) -> Rewriter<'a> {
-        Rewriter { vars: self.vars, locals: self.locals.clone(), shadowed, errors: Vec::new() }
+        Rewriter {
+            vars: self.vars,
+            locals: self.locals.clone(),
+            shadowed,
+            errors: Vec::new(),
+        }
     }
 
     fn is_reactive(&self, name: &str) -> bool {
@@ -696,9 +724,26 @@ impl<'a> Rewriter<'a> {
 /// 参数会被当作表达式列表改写的宏白名单(std 的 fmt/断言/集合系)。
 /// 其它宏参数保持原样;若里面出现反应式变量则硬错误,引导先绑快照
 const EXPR_ARG_MACROS: &[&str] = &[
-    "format", "print", "println", "eprint", "eprintln", "write", "writeln", "format_args",
-    "panic", "assert", "assert_eq", "assert_ne", "debug_assert", "debug_assert_eq",
-    "debug_assert_ne", "vec", "dbg", "todo", "unimplemented", "unreachable",
+    "format",
+    "print",
+    "println",
+    "eprint",
+    "eprintln",
+    "write",
+    "writeln",
+    "format_args",
+    "panic",
+    "assert",
+    "assert_eq",
+    "assert_ne",
+    "debug_assert",
+    "debug_assert_eq",
+    "debug_assert_ne",
+    "vec",
+    "dbg",
+    "todo",
+    "unimplemented",
+    "unreachable",
 ];
 
 /// 模板表达式改写入口(codegen 用)。返回首个改写错误的消息(如有)
@@ -709,8 +754,12 @@ pub fn rewrite_template_expr(
     expr: &mut Expr,
     force_move_closure: bool,
 ) -> Result<(), String> {
-    let mut rw =
-        Rewriter { vars, locals: locals.clone(), shadowed: shadowed.clone(), errors: Vec::new() };
+    let mut rw = Rewriter {
+        vars,
+        locals: locals.clone(),
+        shadowed: shadowed.clone(),
+        errors: Vec::new(),
+    };
     rw.visit_expr_mut(expr);
     if let Some(e) = rw.errors.first() {
         return Err(e.to_string());
@@ -800,7 +849,10 @@ pub fn collect_pat_idents(pat: &Pat, out: &mut HashSet<String>) {
         }
         Pat::Tuple(t) => t.elems.iter().for_each(|p| collect_pat_idents(p, out)),
         Pat::TupleStruct(t) => t.elems.iter().for_each(|p| collect_pat_idents(p, out)),
-        Pat::Struct(s) => s.fields.iter().for_each(|f| collect_pat_idents(&f.pat, out)),
+        Pat::Struct(s) => s
+            .fields
+            .iter()
+            .for_each(|f| collect_pat_idents(&f.pat, out)),
         Pat::Slice(s) => s.elems.iter().for_each(|p| collect_pat_idents(p, out)),
         Pat::Or(o) => o.cases.iter().for_each(|p| collect_pat_idents(p, out)),
         Pat::Paren(p) => collect_pat_idents(&p.pat, out),
@@ -814,8 +866,7 @@ impl VisitMut for Rewriter<'_> {
     fn visit_expr_mut(&mut self, e: &mut Expr) {
         match e {
             // $sig(x) 逃生舱:取出裸句柄,内部不做任何改写
-            Expr::Call(call)
-                if matches!(call.func.as_ref(), Expr::Path(p) if p.path.is_ident("__sv_sig")) =>
+            Expr::Call(call) if matches!(call.func.as_ref(), Expr::Path(p) if p.path.is_ident("__sv_sig")) =>
             {
                 if call.args.len() == 1 {
                     *e = call.args.first().unwrap().clone();
@@ -869,10 +920,10 @@ impl VisitMut for Rewriter<'_> {
                         *e = parse_quote!( (#arg) );
                     }
                     ("__sv_props", "id") => {
-                        *e = parse_quote!( ::sv_reactive::unique_id() );
+                        *e = parse_quote!(::sv_reactive::unique_id());
                     }
                     ("__sv_effect", "tracking") => {
-                        *e = parse_quote!( ::sv_reactive::is_tracking() );
+                        *e = parse_quote!(::sv_reactive::is_tracking());
                     }
                     // $effect.root(f) → 返回销毁闭包
                     ("__sv_effect", "root") if mc.args.len() == 1 => {
@@ -890,13 +941,17 @@ impl VisitMut for Rewriter<'_> {
                     }
                     // $effect.pending():进行中的 {#await}/后台任务数(响应式)
                     ("__sv_effect", "pending") => {
-                        *e = parse_quote!( ::sv_ui::tasks::pending_count() );
+                        *e = parse_quote!(::sv_ui::tasks::pending_count());
                     }
                     // $inspect.trace(标签):所在 effect 每次重跑时打印
                     ("__sv_inspect", "trace") => {
-                        let label = mc.args.first().cloned().map(|a| quote! { #a })
+                        let label = mc
+                            .args
+                            .first()
+                            .cloned()
+                            .map(|a| quote! { #a })
                             .unwrap_or_else(|| quote! { "trace" });
-                        *e = parse_quote!( ::std::println!("[trace] {} 重跑", #label) );
+                        *e = parse_quote!(::std::println!("[trace] {} 重跑", #label));
                     }
                     // 这些留给 rewrite_stmt 的语句级处理($derived.by/$state.raw 等)
                     ("__sv_state", "raw") | ("__sv_derived", _) => {
@@ -914,8 +969,10 @@ impl VisitMut for Rewriter<'_> {
             // 显式句柄方法调用的接收者不再包 .get()
             Expr::MethodCall(mc) => {
                 let m = mc.method.to_string();
-                if matches!(m.as_str(), "get" | "set" | "update" | "with" | "get_untracked" | "with_untracked")
-                    && path_single_ident(&mc.receiver).is_some_and(|n| self.is_reactive(&n))
+                if matches!(
+                    m.as_str(),
+                    "get" | "set" | "update" | "with" | "get_untracked" | "with_untracked"
+                ) && path_single_ident(&mc.receiver).is_some_and(|n| self.is_reactive(&n))
                 {
                     for arg in mc.args.iter_mut() {
                         self.visit_expr_mut(arg);
@@ -932,7 +989,8 @@ impl VisitMut for Rewriter<'_> {
                 let mut inner = self.child(shadowed);
                 inner.visit_expr_mut(&mut c.body);
                 if c.capture.is_none() {
-                    let refs = tokens_reference(c.body.to_token_stream(), &|n| inner.is_reactive(n));
+                    let refs =
+                        tokens_reference(c.body.to_token_stream(), &|n| inner.is_reactive(n));
                     if refs {
                         c.capture = Some(Default::default());
                     }
@@ -1045,9 +1103,7 @@ impl VisitMut for Rewriter<'_> {
             }
             return;
         }
-        if let Ok(mut args) =
-            mac.parse_body_with(Punctuated::<Expr, Token![,]>::parse_terminated)
-        {
+        if let Ok(mut args) = mac.parse_body_with(Punctuated::<Expr, Token![,]>::parse_terminated) {
             for a in args.iter_mut() {
                 self.visit_expr_mut(a);
             }
