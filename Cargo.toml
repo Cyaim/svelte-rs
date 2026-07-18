@@ -10,6 +10,7 @@ members = [
     "examples/counter-sfc",
     "examples/todo-sfc",
     "examples/showcase",
+    "examples/membench",
 ]
 
 [workspace.package]
