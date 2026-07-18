@@ -151,7 +151,7 @@
 |---|---|---|
 | `font-size` | ✅ | |
 | `color`(文本色) | ✅ | |
-| `font-family` / `@font-face` | ⏳ | 随 Parley/fontique 字体系统(M2);现为系统字体单栈 |
+| `font-family` / `@font-face` | 🚧 基建已换轨(R3-P1) | fontique 系统字体发现 + script fallback 已接管 Text/Button(CJK/Latin 混排双字体、.notdef 消除、zh-Hans locale);`font-family` **样式键**尚未暴露(现恒 sans-serif 族),随组件需求开 |
 | `font-weight` / `font-style` | 📅 C2 | 需字体子族选择,Parley 前可先假粗斜 |
 | `line-height` / `letter-spacing` | 📅 C1/C2 | line-height 进继承白名单 |
 | `text-align` | ✅ left/center/right(R2) | 逐行 x 偏移;justify 永不做 |

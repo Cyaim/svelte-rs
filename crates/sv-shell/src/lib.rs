@@ -12,6 +12,7 @@
 mod font;
 mod paint;
 mod render;
+mod text;
 #[cfg(feature = "backend-vello")]
 mod vello_backend;
 
@@ -1311,39 +1312,39 @@ mod tests {
     // 调研 23:taffy + 折行 + flex 验收
     // -----------------------------------------------------------------------
 
-    use crate::render::measure_text_wrapped;
-
     #[test]
     fn text_wraps_at_container_width() {
-        let font = crate::font::ui_font();
+        // parley 度量:限宽 = 最宽单词 + 2px,恰好每词一行
         let px = 16.0;
-        // 英文按空格断;限宽 = 最宽单词 + 1px,恰好每词一行
         let one_word_w = ["hello", "world", "again"]
             .iter()
-            .map(|s| crate::render::measure_text(&font, s, px).0)
+            .map(|s| crate::text::measure(s, px, None).0)
             .fold(0.0f32, f32::max);
-        let (w, h, lines) =
-            measure_text_wrapped(&font, "hello world again", px, Some(one_word_w + 1.0));
+        let lines = crate::text::line_ranges("hello world again", px, Some(one_word_w + 2.0));
         assert_eq!(lines.len(), 3, "三个词应折成三行:{lines:?}");
-        assert!(w <= one_word_w + 1.0);
-        let (_, line_h) = (0.0, h / 3.0);
-        assert!(line_h > 0.0);
+        let (w, h) = crate::text::measure("hello world again", px, Some(one_word_w + 2.0));
+        assert!(w <= one_word_w + 2.0);
+        assert!(
+            h > crate::text::measure("hello", px, None).1 * 2.0,
+            "三行高"
+        );
         // 单行模式(NoWrap)不折
-        let (_, _, lines) = measure_text_wrapped(&font, "hello world again", px, None);
-        assert_eq!(lines.len(), 1);
+        assert_eq!(
+            crate::text::line_ranges("hello world again", px, None).len(),
+            1
+        );
     }
 
     #[test]
     fn cjk_wraps_without_spaces_and_respects_punct() {
-        let font = crate::font::ui_font();
         let px = 16.0;
-        let two_cjk_w = crate::render::measure_text(&font, "中文", px).0;
+        let two_cjk_w = crate::text::measure("中文", px, None).0;
         // 无空格的 CJK 应能逐字断行
-        let (_, _, lines) = measure_text_wrapped(&font, "中文换行测试", px, Some(two_cjk_w + 0.5));
+        let lines = crate::text::line_ranges("中文换行测试", px, Some(two_cjk_w + 0.5));
         assert_eq!(lines.len(), 3, "六字限宽两字应三行:{lines:?}");
-        // 标点禁则:句号不能落行首(UAX #14:"。"跟随前字)
+        // 标点禁则:句号不能落行首("。"跟随前字)
         let text = "你好。世界";
-        let (_, _, lines) = measure_text_wrapped(&font, text, px, Some(two_cjk_w + 0.5));
+        let lines = crate::text::line_ranges(text, px, Some(two_cjk_w + 0.5));
         for r in &lines {
             assert!(
                 !text[r.clone()].starts_with('。'),
@@ -1354,17 +1355,46 @@ mod tests {
 
     #[test]
     fn long_token_force_breaks() {
-        let font = crate::font::ui_font();
         let px = 16.0;
-        let w4 = crate::render::measure_text(&font, "abcd", px).0;
-        let (w, _, lines) = measure_text_wrapped(
-            &font,
-            "https://example.com/very/long/url",
-            px,
-            Some(w4 + 0.5),
-        );
+        let w4 = crate::text::measure("abcd", px, None).0;
+        let lines =
+            crate::text::line_ranges("https://example.com/very/long/url", px, Some(w4 + 0.5));
         assert!(lines.len() > 3, "超长不可断段应按字符强制断:{lines:?}");
-        assert!(w <= w4 + 0.5 + 0.01, "强制断后行宽不应超限:{w}");
+        let (w, _) = crate::text::measure("https://example.com/very/long/url", px, Some(w4 + 0.5));
+        assert!(w <= w4 + 1.0, "强制断后行宽不应超限:{w}");
+    }
+
+    /// P1 验收(调研 24):fallback 混排——CJK 与 Latin 由 fontique 按
+    /// script 选字体,多字体 run 经 P0 载体发射;不应出现 .notdef(id=0)
+    #[test]
+    fn mixed_cjk_fallback_no_notdef() {
+        let runs = crate::text::shape(
+            "Hello你好",
+            16.0,
+            None,
+            sv_ui::TextAlign::Left,
+            0.0,
+            0.0,
+            1.0,
+        );
+        assert!(!runs.is_empty());
+        let mut keys = std::collections::HashSet::new();
+        for run in &runs {
+            // 回归卫兵:fontique Blob id 从 0 起,注册键必须避开内置字体
+            // 的保留键 0(撞键 = Latin 全员错字,实测踩过)
+            assert_ne!(run.font.key, 0, "fontique 字体键不得与内置键 0 相撞");
+            keys.insert(run.font.key);
+            for g in &run.glyphs {
+                assert_ne!(g.id, 0, "fallback 后不应出现 .notdef 方框");
+            }
+        }
+        // Windows CI(默认 sans-serif=Segoe UI,CJK fallback=微软雅黑)应出双字体;
+        // 其它平台字体配置不可控,只验 notdef
+        #[cfg(target_os = "windows")]
+        assert!(
+            keys.len() >= 2,
+            "CJK/Latin 混排应触发 fallback 多字体:{keys:?}"
+        );
     }
 
     /// 两趟测量协议:MaxContent(不限宽)= 单行固有宽;

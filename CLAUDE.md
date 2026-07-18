@@ -34,5 +34,6 @@ runes 源变换 + build.rs 集成,示例 examples/counter-sfc)。
 - derived 计算中禁止写 state(会 panic,对应 Svelte state_unsafe_mutation)。
 - sv-ui 是宏的编译目标:改绑定原语签名要同步改 sv-macro codegen 与其测试。
 - 布局已迁 taffy 0.12(封在 sv-shell layout_tree 内,`Vec<Placed>` 契约);
-  折行为 swash + unicode-linebreak 过渡(计划内报废);文本栈 Parley 在 R3。
-  渲染 CPU/vello 双后端(Painter 抽象)。
+  文本栈已迁 Parley 0.11 + fontique(封在 sv-shell text.rs 门面,全仓唯一
+  parley import;fallback 混排/折行/对齐);TextInput 编辑几何仍走 swash
+  线性路径(R3-P3 随 PlainEditor 切换)。渲染 CPU/vello 双后端(Painter 抽象)。
