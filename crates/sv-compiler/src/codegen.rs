@@ -557,7 +557,7 @@ impl Cg<'_> {
         }
         for attr in attrs {
             match attr.name.as_str() {
-                "class" | "checked" | "@attach" | "autofocus" | "placeholder" => {}
+                "class" | "checked" | "@attach" | "autofocus" | "placeholder" | "aria-label" => {}
                 "value" if *tag == Tag::Input => {}
                 name if name == "onclick"
                     || name.starts_with("on")
@@ -873,6 +873,24 @@ impl Cg<'_> {
                         }
                     });
                 }
+                // aria-label:无障碍名称覆盖(调研 24 §4.1;任意元素可用)
+                "aria-label" => match &attr.value {
+                    AttrValue::Str { value, .. } => {
+                        ts.extend(quote! { __doc.set_accessible_label(#el, #value); });
+                    }
+                    AttrValue::Expr(e) => {
+                        let expr = self.expr(e, scope, false)?;
+                        ts.extend(quote! {
+                            {
+                                let __a_doc = __doc.clone();
+                                let __a_el = #el;
+                                ::sv_reactive::effect(move || {
+                                    __a_doc.set_accessible_label(__a_el, &(#expr));
+                                });
+                            }
+                        });
+                    }
+                },
                 // <input> 专属:placeholder / value 单向 / bind:value 双向 /
                 // oninput / onsubmit(调研 21 §2.7,复刻 bind:checked 模板)
                 "placeholder" => {

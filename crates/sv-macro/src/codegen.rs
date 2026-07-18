@@ -187,6 +187,15 @@ fn gen_attrs(attrs: &[Attr], var: &Ident) -> TokenStream {
                 AttrKind::OnInput => quote! { __doc.set_on_input(#var, #expr); },
                 AttrKind::OnSubmit => quote! { __doc.set_on_submit(#var, #expr); },
                 AttrKind::OnScroll => quote! { __doc.set_on_scroll(#var, #expr); },
+                AttrKind::AriaLabel => quote! {
+                    {
+                        let __a_doc = __doc.clone();
+                        let __a_el = #var;
+                        ::sv_reactive::effect(move || {
+                            __a_doc.set_accessible_label(__a_el, &(#expr));
+                        });
+                    }
+                },
                 // 延后发射(桥链式保留既有 on_scroll,与 on_scroll 共存)
                 AttrKind::BindScrollY => TokenStream::new(),
                 // 下方合成进单一 set_on_focus_change
