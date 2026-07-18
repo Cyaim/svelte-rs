@@ -98,6 +98,7 @@ cargo run -p membench --release --features backend-vello -- --backend vello --co
 | `SV_RENDERER` | `cpu` \| `vello` | Override backend selection (see above) |
 | `SV_VELLO_AA` | `area` \| `msaa8` \| `msaa16` | vello antialiasing; default `msaa16`. `area` is analytic AA with zero MSAA buffers — measured memory-neutral on the dev machine (research 17) |
 | `SV_SHOW_FPS` | `1` | Continuous redraw + print `FPS <n>` to stdout every 30 frames (benchmark/diagnostics) |
+| `SV_ALLOW_SOFTWARE_GPU` | `1` | Accept software rasterizer adapters (WARP/lavapipe, `DeviceType::Cpu`). Rejected by default: they offer no benefit over the CPU backend, and WARP has crashed mid-pipeline on GPU-less CI runners. CI enables this on Linux to keep lavapipe render coverage |
 
 ## The text stack
 

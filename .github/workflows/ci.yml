@@ -38,9 +38,13 @@ jobs:
       - name: Test (CPU backend)
         run: cargo test --workspace
 
-      # vello/wgpu 路径:无 adapter 的跑道自动跳过 GPU 测试(探测回退逻辑本身也被覆盖)
+      # vello/wgpu 路径:软件适配器默认被拒(Windows WARP 会在管线执行中访问违例),
+      # Linux 显式启用 lavapipe(mesa-vulkan-drivers)保留真渲染覆盖;
+      # 无可用 adapter 时 GPU 测试自动跳过(探测回退逻辑本身也被覆盖)
       - name: Test (vello backend)
         run: cargo test -p sv-shell --features backend-vello
+        env:
+          SV_ALLOW_SOFTWARE_GPU: ${{ runner.os == 'Linux' && '1' || '0' }}
 
       - name: Build benchmark harness (vello)
         run: cargo build -p membench --features backend-vello

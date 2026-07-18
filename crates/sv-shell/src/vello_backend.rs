@@ -275,8 +275,36 @@ impl VelloWin {
 
 /// 是否有可用 GPU adapter(后端自动选择用;拿不到则回退 CPU)
 pub fn probe_adapter() -> bool {
-    let mut context = RenderContext::new();
-    pollster::block_on(context.device(None)).is_some()
+    usable_adapter().is_some()
+}
+
+/// 拿一个"可用"的 adapter。默认拒绝软件光栅(`DeviceType::Cpu`,即 WARP/
+/// lavapipe):无 GPU 的 CI 跑道上 WARP 曾在管线执行中访问违例(0xc0000005),
+/// 且软件 GPU 相对 CPU 后端毫无收益;`SV_ALLOW_SOFTWARE_GPU=1` 显式启用
+/// (Linux CI 用 lavapipe 跑真渲染覆盖就走这个开关)
+fn usable_adapter() -> Option<wgpu::Adapter> {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        display: None,
+        backends: wgpu::Backends::from_env().unwrap_or_default(),
+        flags: wgpu::InstanceFlags::from_build_config().with_env(),
+        memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
+        backend_options: wgpu::BackendOptions::from_env_or_default(),
+    });
+    let adapter = pollster::block_on(wgpu::util::initialize_adapter_from_env_or_default(
+        &instance, None,
+    ))
+    .ok()?;
+    let info = adapter.get_info();
+    if info.device_type == wgpu::DeviceType::Cpu
+        && std::env::var("SV_ALLOW_SOFTWARE_GPU").as_deref() != Ok("1")
+    {
+        eprintln!(
+            "sv-shell: 忽略软件渲染 adapter「{}」(SV_ALLOW_SOFTWARE_GPU=1 可启用)",
+            info.name
+        );
+        return None;
+    }
+    Some(adapter)
 }
 
 /// 离屏上下文缓存:device/renderer 建一次,目标纹理与回读缓冲按尺寸复用。
@@ -306,17 +334,7 @@ thread_local! {
 /// 自建离屏 device:存储缓冲绑定上限抬到 adapter 实际能力
 /// (vello scene buffer 随控件数线性膨胀,100k 档 ≈192MB)
 fn create_offscreen_device() -> Option<(wgpu::Device, wgpu::Queue)> {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-        display: None,
-        backends: wgpu::Backends::from_env().unwrap_or_default(),
-        flags: wgpu::InstanceFlags::from_build_config().with_env(),
-        memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
-        backend_options: wgpu::BackendOptions::from_env_or_default(),
-    });
-    let adapter = pollster::block_on(wgpu::util::initialize_adapter_from_env_or_default(
-        &instance, None,
-    ))
-    .ok()?;
+    let adapter = usable_adapter()?;
     let caps = adapter.limits();
     let limits = wgpu::Limits {
         max_storage_buffer_binding_size: caps.max_storage_buffer_binding_size,
