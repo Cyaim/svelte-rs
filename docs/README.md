@@ -25,7 +25,7 @@ research reports — is currently Chinese-only and linked as-is.
 
 ## Research
 
-Nineteen internet-verified research reports (Chinese) that back the ADRs, 2026-07:
+Twenty-five internet-verified research reports (Chinese) that back the ADRs, 2026-07:
 
 | # | Report |
 |---|---|
@@ -48,6 +48,12 @@ Nineteen internet-verified research reports (Chinese) that back the ADRs, 2026-0
 | 17 | [Per-backend × per-scenario memory & fps](research/17-backend-memory-fps.md) |
 | 18 | [Million controls @ 144fps: swash + virtualization](research/18-million-controls-144fps.md) |
 | 19 | [Commercialization gap: four-way audit & staged verdict](research/19-commercialization-gap.md) |
+| 20 | [Keyboard events + focus chain + shortcuts](research/20-keyboard-focus.md) |
+| 21 | [Text input + IME + clipboard](research/21-text-input-ime-clipboard.md) |
+| 22 | [Scroll system (clip, wheel, scrollbar, virtual_list bridge)](research/22-scroll-system.md) |
+| 23 | [taffy layout + text wrapping](research/23-taffy-text-wrap.md) |
+| 24 | [Parley migration + AccessKit](research/24-parley-accesskit.md) |
+| 25 | [Overlay system + release engineering](research/25-overlay-release-engineering.md) |
 
 ## Conventions
 

@@ -24,7 +24,7 @@
 
 ## 调研报告
 
-19 份联网核实的调研报告(2026-07),ADR 的依据:
+25 份联网核实的调研报告(2026-07),ADR 的依据:
 
 | # | 报告 |
 |---|---|
@@ -47,6 +47,12 @@
 | 17 | [分后端×分场景内存构成与帧率](research/17-backend-memory-fps.md) |
 | 18 | [百万控件@144fps:swash 迁移 + 视口虚拟化](research/18-million-controls-144fps.md) |
 | 19 | [距离可商用还有多远:四路审计与分档判决](research/19-commercialization-gap.md) |
+| 20 | [键盘事件通道+焦点链+快捷键](research/20-keyboard-focus.md) |
+| 21 | [文本输入+IME+剪贴板](research/21-text-input-ime-clipboard.md) |
+| 22 | [滚动体系(裁剪/滚轮/滚动条/virtual_list 桥)](research/22-scroll-system.md) |
+| 23 | [taffy 布局接入+文本换行](research/23-taffy-text-wrap.md) |
+| 24 | [Parley 迁移+AccessKit](research/24-parley-accesskit.md) |
+| 25 | [弹层体系+发布工程](research/25-overlay-release-engineering.md) |
 
 ## 约定
 
