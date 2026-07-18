@@ -17,19 +17,23 @@
 use sv_ui::Color;
 use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, PremultipliedColorU8, Stroke, Transform};
 
-/// 字形光栅键:字形 id + 字号(f32 以位模式存储,保 Hash/Eq)。
-/// 单字体前提下这两项唯一决定一张覆盖度位图(HiDPI 已把 scale 乘进 px)
+/// 字形光栅键:字体身份 + 字形 id + 字号(f32 以位模式存储,保 Hash/Eq)。
+/// 三项唯一决定一张覆盖度位图(HiDPI 已把 scale 乘进 px;调研 24 P0:
+/// font_key 让 fallback 后同帧多字体的缓存不串位)
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct GlyphKey {
-    /// 字形 id(swash charmap 映射;TTC 内 collection index 0 的字体)
+    /// 字体身份([`crate::font::FontHandle::key`];单字体阶段恒 0)
+    pub font_key: u64,
+    /// 字形 id(swash charmap 映射)
     pub id: u16,
     /// 字号的 f32 位模式(`f32::to_bits`)
     pub px_bits: u32,
 }
 
 impl GlyphKey {
-    pub fn new(id: u16, px: f32) -> Self {
+    pub fn new(font: crate::font::FontHandle, id: u16, px: f32) -> Self {
         Self {
+            font_key: font.key,
             id,
             px_bits: px.to_bits(),
         }
@@ -93,9 +97,10 @@ pub trait Painter {
         width: f32,
         color: Color,
     );
-    /// 一段已定位字形(shaping 已完成;backend 只负责光栅/上屏。
-    /// 字体是全局单字体 UI 字体——`font::ui_font()` / vello FontData 各自持有)
-    fn glyph_run(&mut self, glyphs: &[GlyphPos], color: Color);
+    /// 一段已定位字形(shaping 已完成;backend 只负责光栅/上屏)。
+    /// run 级带字体身份(调研 24 P0):CPU 端按 GlyphKey.font_key 光栅,
+    /// GPU 端按 handle 取/建 FontData——fallback 混排即同帧多次调用
+    fn glyph_run(&mut self, font: crate::font::FontHandle, glyphs: &[GlyphPos], color: Color);
     /// 压入矩形裁剪(嵌套取交集;TextInput 溢出与滚动容器共用——调研 21/22。
     /// 物理像素坐标。radius:CPU 后端 v0 矩形近似(角部最多溢出 ~radius²px,
     /// 调研 22 §2.3 裁决),vello 端精确)
@@ -129,6 +134,8 @@ pub enum PaintCmd {
     Glyphs {
         count: usize,
         color: Color,
+        /// 字体身份(对拍多字体 run 的发射顺序;单字体阶段恒 0)
+        font_key: u64,
     },
     PushClip {
         x: i32,
@@ -178,10 +185,11 @@ impl Painter for RecordingPainter {
         });
     }
 
-    fn glyph_run(&mut self, glyphs: &[GlyphPos], color: Color) {
+    fn glyph_run(&mut self, font: crate::font::FontHandle, glyphs: &[GlyphPos], color: Color) {
         self.cmds.push(PaintCmd::Glyphs {
             count: glyphs.len(),
             color,
+            font_key: font.key,
         });
     }
 
@@ -261,11 +269,9 @@ mod glyph_cache {
     fn rasterize(key: GlyphKey) -> (Placement, Vec<u8>) {
         CTX.with(|ctx| {
             let mut ctx = ctx.borrow_mut();
-            let mut scaler = ctx
-                .builder(crate::font::ui_font())
-                .size(key.px())
-                .hint(false)
-                .build();
+            // 按字形键里的字体身份取 FontRef(调研 24 P0;单字体阶段即 UI 字体)
+            let font = crate::font::FontHandle { key: key.font_key }.font_ref();
+            let mut scaler = ctx.builder(font).size(key.px()).hint(false).build();
             // Outline → alpha 覆盖度位图;Placement 的 top 是基线上方距离
             Render::new(&[Source::Outline])
                 .format(Format::Alpha)
@@ -423,7 +429,8 @@ impl Painter for TinySkiaPainter<'_> {
         }
     }
 
-    fn glyph_run(&mut self, glyphs: &[GlyphPos], color: Color) {
+    fn glyph_run(&mut self, _font: crate::font::FontHandle, glyphs: &[GlyphPos], color: Color) {
+        // 字体身份已编进每个 GlyphKey(光栅缓存按其分桶),此处不需再用。
         // 字形走手动混合,mask 不经过 fill_path——用裁剪矩形逐像素判界
         let clip = self.clips.last().map(|c| {
             [
