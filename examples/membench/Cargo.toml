@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
+[features]
+backend-vello = ["sv-shell/backend-vello"]
+
 [dependencies]
 sv-reactive = { workspace = true }
 sv-ui = { workspace = true }

@@ -31,6 +31,17 @@ fn pcolor(c: Color) -> vello::peniko::Color {
 
 const BASE_WHITE: Color = Color::WHITE;
 
+/// 抗锯齿方式:SV_VELLO_AA=area|msaa8|msaa16(默认 msaa16;area 为解析式 AA,
+/// 零 MSAA 缓冲——内存敏感场景用,基准 17 号做归因)
+fn aa_config() -> AaConfig {
+    match std::env::var("SV_VELLO_AA").as_deref() {
+        Ok("area") => AaConfig::Area,
+        Ok("msaa8") => AaConfig::Msaa8,
+        _ => AaConfig::Msaa16,
+    }
+}
+
+
 // ---------------------------------------------------------------------------
 // VelloPainter:Painter → Scene
 // ---------------------------------------------------------------------------
@@ -167,7 +178,7 @@ impl VelloWin {
                 base_color: pcolor(BASE_WHITE),
                 width,
                 height,
-                antialiasing_method: AaConfig::Msaa16,
+                antialiasing_method: aa_config(),
             },
         ) {
             eprintln!("sv-shell: vello render_to_texture 失败: {e}");
@@ -220,29 +231,31 @@ pub fn probe_adapter() -> bool {
     pollster::block_on(context.device(None)).is_some()
 }
 
-/// 离屏渲染一帧,返回紧致 RGBA8 字节(len = w*h*4);无 GPU adapter 时 None
-pub fn render_frame_vello(doc: &Doc, phys_w: u32, phys_h: u32, scale: f32) -> Option<Vec<u8>> {
-    let width = phys_w.max(1);
-    let height = phys_h.max(1);
+/// 离屏上下文缓存:device/renderer 建一次,目标纹理与回读缓冲按尺寸复用。
+/// (基准测试与连续离屏渲染的帧率口径需要稳态,而非每帧重建管线)
+struct Offscreen {
+    context: RenderContext,
+    device_id: usize,
+    renderer: Renderer,
+    target: wgpu::Texture,
+    view: wgpu::TextureView,
+    buffer: wgpu::Buffer,
+    padded_bytes_per_row: u32,
+    size: (u32, u32),
+}
 
-    let mut context = RenderContext::new();
-    let device_id = pollster::block_on(context.device(None))?;
-    let device_handle = &context.devices[device_id];
-    let device = &device_handle.device;
-    let queue = &device_handle.queue;
+thread_local! {
+    // ManuallyDrop:缓存与进程同寿命。TLS 析构期 drop wgpu 资源会触碰
+    // wgpu-core 自己已销毁的 TLS(LockTrace)而 abort——刻意泄漏以避开
+    static OFFSCREEN: std::cell::RefCell<Option<std::mem::ManuallyDrop<Offscreen>>> =
+        const { std::cell::RefCell::new(None) };
+}
 
-    let mut renderer = match Renderer::new(device, RendererOptions::default()) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("sv-shell: vello Renderer 创建失败: {e}");
-            return None;
-        }
-    };
-
-    let placed = layout_tree(doc, width as f32 / scale, height as f32 / scale);
-    let mut painter = VelloPainter::new();
-    paint_tree(doc, &placed, &mut painter, scale);
-
+fn offscreen_targets(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+) -> (wgpu::Texture, wgpu::TextureView, wgpu::Buffer, u32) {
     let size = wgpu::Extent3d { width, height, depth_or_array_layers: 1 };
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("sv-shell offscreen target"),
@@ -255,37 +268,104 @@ pub fn render_frame_vello(doc: &Doc, phys_w: u32, phys_h: u32, scale: f32) -> Op
         view_formats: &[],
     });
     let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+    let padded = (width * 4).next_multiple_of(256);
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("sv-shell readback"),
+        size: (padded as u64) * (height as u64),
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    (target, view, buffer, padded)
+}
+
+/// 离屏渲染一帧,返回紧致 RGBA8 字节(len = w*h*4);无 GPU adapter 时 None
+pub fn render_frame_vello(doc: &Doc, phys_w: u32, phys_h: u32, scale: f32) -> Option<Vec<u8>> {
+    let width = phys_w.max(1);
+    let height = phys_h.max(1);
+
+    OFFSCREEN.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        // 惰性建上下文;尺寸变化只重建纹理/缓冲
+        if slot.is_none() {
+            let mut context = RenderContext::new();
+            let device_id = pollster::block_on(context.device(None))?;
+            let device = &context.devices[device_id].device;
+            let renderer = match Renderer::new(device, RendererOptions::default()) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("sv-shell: vello Renderer 创建失败: {e}");
+                    return None;
+                }
+            };
+            let (target, view, buffer, padded) = offscreen_targets(device, width, height);
+            *slot = Some(std::mem::ManuallyDrop::new(Offscreen {
+                context,
+                device_id,
+                renderer,
+                target,
+                view,
+                buffer,
+                padded_bytes_per_row: padded,
+                size: (width, height),
+            }));
+        }
+        let off = slot.as_mut().unwrap();
+        if off.size != (width, height) {
+            let device = &off.context.devices[off.device_id].device;
+            let (target, view, buffer, padded) = offscreen_targets(device, width, height);
+            off.target = target;
+            off.view = view;
+            off.buffer = buffer;
+            off.padded_bytes_per_row = padded;
+            off.size = (width, height);
+        }
+        render_offscreen_frame(doc, off, width, height, scale)
+    })
+}
+
+fn render_offscreen_frame(
+    doc: &Doc,
+    off: &mut Offscreen,
+    width: u32,
+    height: u32,
+    scale: f32,
+) -> Option<Vec<u8>> {
+    let device = &off.context.devices[off.device_id].device;
+    let queue = &off.context.devices[off.device_id].queue;
+    let renderer = &mut off.renderer;
+    let target = &off.target;
+    let view = &off.view;
+    let buffer = &off.buffer;
+    let padded_bytes_per_row = off.padded_bytes_per_row;
+    let size = wgpu::Extent3d { width, height, depth_or_array_layers: 1 };
+
+    let placed = layout_tree(doc, width as f32 / scale, height as f32 / scale);
+    let mut painter = VelloPainter::new();
+    paint_tree(doc, &placed, &mut painter, scale);
 
     if let Err(e) = renderer.render_to_texture(
         device,
         queue,
         &painter.scene,
-        &view,
+        view,
         &RenderParams {
             base_color: pcolor(BASE_WHITE),
             width,
             height,
-            antialiasing_method: AaConfig::Msaa16,
+            antialiasing_method: aa_config(),
         },
     ) {
         eprintln!("sv-shell: vello 离屏渲染失败: {e}");
         return None;
     }
 
-    // 回读:bytes_per_row 需 256 对齐,取回后去 padding
-    let padded_bytes_per_row = (width * 4).next_multiple_of(256);
-    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("sv-shell readback"),
-        size: (padded_bytes_per_row as u64) * (height as u64),
-        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
+    // 回读:bytes_per_row 已 256 对齐(offscreen_targets),取回后去 padding
     let mut encoder = device
         .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("sv-shell readback") });
     encoder.copy_texture_to_buffer(
         target.as_image_copy(),
         wgpu::TexelCopyBufferInfo {
-            buffer: &buffer,
+            buffer,
             layout: wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(padded_bytes_per_row),
@@ -310,5 +390,8 @@ pub fn render_frame_vello(doc: &Doc, phys_w: u32, phys_h: u32, scale: f32) -> Op
         let start = (row * padded_bytes_per_row) as usize;
         out.extend_from_slice(&data[start..start + (width * 4) as usize]);
     }
+    // 缓冲是跨帧复用的:必须显式解除映射,否则下一帧 map_async panic
+    drop(data);
+    buffer.unmap();
     Some(out)
 }
