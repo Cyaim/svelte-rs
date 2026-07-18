@@ -39,9 +39,9 @@
 ├────────────────────────────────────────────────────────┤
 │ sv-shell   窗口壳 + 渲染器                               │
 │   窗口:桌面=winit;鸿蒙=XComponent(窄窗口抽象 trait)   │
-│   渲染:v0=CPU(softbuffer+tiny-skia+fontdue)           │
+│   渲染:v0=CPU(softbuffer+tiny-skia+swash)             │
 │         v1=vello 家族(vello / vello_hybrid / vello_cpu)│
-│   文本:v0=fontdue → v1=Parley(fontique+HarfRust+swash)│
+│   文本:v0=swash 直用 → v1=Parley(fontique+HarfRust)   │
 │   布局:v0=行列堆叠 → v1=taffy(flexbox/grid)           │
 │   无障碍:AccessKit(Win/mac/Linux),鸿蒙需自研桥        │
 └────────────────────────────────────────────────────────┘
@@ -147,6 +147,15 @@ glyph 走 GlyphPos 的 id/基线原点直上 draw_glyphs(fontdue 与 peniko::Fon
 自动探测失败静默回退 CPU;双后端开窗冒烟均通过。caps:vello 报 `blur: true`
 (消费方待 box-shadow 落地)。
 
+**文本栈已迁 swash(2026-07-18,调研 18)**:fontdue 急切解析 CJK 轮廓
+(~173MB)且 2025-02 起停更,整体替换为 swash 0.2.10(skrifa 后端零拷贝懒解析):
+基线内存 198→27MB、首帧 573→11ms、CPU 光栅 30k 档快约一倍,GPU/CPU parity
+1.017。shaping 仍是线性排版(无 kerning/连字),M2 Parley 迁移点不变,只动
+shaping 门面。字形缓存为两代(hot/cold)淘汰——超限整代降冷而非清空,
+消除"缓存清空帧"的 1% low 长尾。离屏 vello 自建 device 按 adapter 能力抬高
+`max_storage_buffer_binding_size`(修复 100k 档 scene buffer 192MB > 128MB
+默认上限的崩溃;窗口路径仍受 RenderContext 默认值,上游工程项)。
+
 ### ADR-4 窗口层:窄抽象 trait,不以 winit 为架构前提(调研 03)
 winit 上游没有鸿蒙 backend(issue 仍 open,无回应)。抽一个六七个接口的窄窗口 trait
 (建窗/尺寸/scale/重绘请求/输入事件/vsync):桌面端 winit 实现;鸿蒙端基于
@@ -214,6 +223,19 @@ winit redraw 时机,鸿蒙接 OH_NativeVSync。目前原型是写入即同步 fl
 - **现代 CSS 全面差距表**(91 项逐条,含 2023–2026 新浪潮的逐项裁决)见
   [CSS-SUPPORT.md](CSS-SUPPORT.md)。
 
+### ADR-9(2026-07-18)规模策略:视口虚拟化,帧成本与逻辑控件数解耦
+> 目标"百万控件 1% low 稳定 144fps"(帧预算 6.94ms)。全量建树在 10k+ 档
+> 已是几十 ms(调研 17/18),常数优化救不了数量级——答案是架构性削减每帧工作集。
+
+`sv_ui::virtual_list` 原语:视口 N 行固定槽位(每槽 `Signal<Option<T>>`),
+滚动 = 逐槽 `.set()` 走 bind_text 定点更新,**零节点创建/销毁、零结构变化**
+(1% low 稳定性的来源);`item_at` 懒取数,逻辑条目永不物化。
+**实测验收(调研 18)**:100 万控件(20 万行×5)连续滚动最坏工况,CPU 后端
+p99=5.28ms、1% low=174fps、WS 28MB;窗口口径 ~800fps(softbuffer 无 vsync)。
+配套:字形缓存分代淘汰(见 ADR-3b 附注)。
+后续阶梯:帧调度 ADR-6(mailbox 让 vello 窗口口径突破 vsync 60)→ 增量场景
+编码(RecordingPainter diff,惠及全量档)→ 局部布局(dirty 子树)→ 滚动物理。
+
 ## 4. 原型现状(本仓库,全部测试绿)
 
 | crate | 内容 | 测试 |
@@ -248,8 +270,8 @@ winit redraw 时机,鸿蒙接 OH_NativeVSync。目前原型是写入即同步 fl
 1. **`.sv` 的 IDE 体验**是编译器路线转正的最大悬置(Volar 式转发 LSP 未 spike;
    第一年靠"生成代码可读 + sv check 诊断重映射 + 只读 LSP 特性"止血,调研 07)。
 2. **鸿蒙 IME/无障碍**完成度(自绘 surface 上无免费午餐;AccessKit 无 OHOS 后端)。
-3. **fontdue 急切解析 CJK 字体 ≈188MB 运行内存**(实测,调研 15)+ 停更风险:
-   Parley/swash 迁移提级为 M1.5;字体迁移前不承诺轻量场景内存指标。
+3. ~~fontdue 急切解析 CJK 字体 ≈188MB + 停更风险~~ **已消除**(2026-07-18
+   swash 迁移落地,基线 27MB,调研 18);遗留:线性排版无 kerning/换行,M2 Parley。
 3. **vello_hybrid 成熟度**(sparse strips 仍 beta)——有 vello classic 与 vello_cpu 双兜底。
 4. **编译时间**——坚持"生成数据而非类型";增量编译基准纳入 CI。
 5. 单人/小团队维护面过宽——渲染/文本/布局/无障碍全部复用 Linebender,自研面收敛到
@@ -280,3 +302,4 @@ winit redraw 时机,鸿蒙接 OH_NativeVSync。目前原型是写入即同步 fl
 - [15 三类场景现状分析(轻量内存/复杂界面/复杂界面+3D,含实测基线)](research/15-scenario-analysis.md)
 - [16 分场景内存基准测试与分析(membench 测试台,0.5KB/控件,字体占 97.7%)](research/16-memory-benchmarks.md)
 - [17 分后端×分场景内存构成与帧率(CPU vs vello;三个阴性实验;device 固定成本实测)](research/17-backend-memory-fps.md)
+- [18 百万控件@144fps:swash 迁移(198→27MB)+ 视口虚拟化(1M p99=5.28ms/1% low 174fps)](research/18-million-controls-144fps.md)
