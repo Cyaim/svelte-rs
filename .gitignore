@@ -1,3 +1,7 @@
 /target
 **/*.rs.bk
 Cargo.lock.orig
+
+# 调试渲染产物
+*.png
+!docs/**/*.png
