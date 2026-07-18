@@ -1074,3 +1074,19 @@ mod tests {
         assert_eq!(*builds.borrow(), 1);
     }
 }
+
+#[cfg(test)]
+mod memory_probe {
+    use super::*;
+
+    /// 内存预算护栏:核心结构体大小(轻量场景关注点,docs/research/15)。
+    /// 变大要有充分理由——这是每个节点/信号都要付的钱
+    #[test]
+    fn core_struct_sizes_within_budget() {
+        let vn = std::mem::size_of::<ViewNode>();
+        let st = std::mem::size_of::<Style>();
+        println!("[probe] ViewNode={vn}B Style={st}B Edges={}B", std::mem::size_of::<Edges>());
+        assert!(st <= 128, "Style 超预算: {st}B");
+        assert!(vn <= 320, "ViewNode 超预算: {vn}B");
+    }
+}
