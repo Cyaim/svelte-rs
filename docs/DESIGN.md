@@ -279,3 +279,4 @@ winit redraw 时机,鸿蒙接 OH_NativeVSync。目前原型是写入即同步 fl
 - [14 可切换 Painter 抽象:先例、设计与迁移八步](research/14-switchable-painter.md)
 - [15 三类场景现状分析(轻量内存/复杂界面/复杂界面+3D,含实测基线)](research/15-scenario-analysis.md)
 - [16 分场景内存基准测试与分析(membench 测试台,0.5KB/控件,字体占 97.7%)](research/16-memory-benchmarks.md)
+- [17 分后端×分场景内存构成与帧率(CPU vs vello;三个阴性实验;device 固定成本实测)](research/17-backend-memory-fps.md)
