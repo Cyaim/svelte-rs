@@ -240,6 +240,8 @@ winit redraw 时机,鸿蒙接 OH_NativeVSync。目前原型是写入即同步 fl
 1. **`.sv` 的 IDE 体验**是编译器路线转正的最大悬置(Volar 式转发 LSP 未 spike;
    第一年靠"生成代码可读 + sv check 诊断重映射 + 只读 LSP 特性"止血,调研 07)。
 2. **鸿蒙 IME/无障碍**完成度(自绘 surface 上无免费午餐;AccessKit 无 OHOS 后端)。
+3. **fontdue 急切解析 CJK 字体 ≈188MB 运行内存**(实测,调研 15)+ 停更风险:
+   Parley/swash 迁移提级为 M1.5;字体迁移前不承诺轻量场景内存指标。
 3. **vello_hybrid 成熟度**(sparse strips 仍 beta)——有 vello classic 与 vello_cpu 双兜底。
 4. **编译时间**——坚持"生成数据而非类型";增量编译基准纳入 CI。
 5. 单人/小团队维护面过宽——渲染/文本/布局/无障碍全部复用 Linebender,自研面收敛到
@@ -267,3 +269,4 @@ winit redraw 时机,鸿蒙接 OH_NativeVSync。目前原型是写入即同步 fl
 第四轮(渲染后端专题,2026-07-18):
 - [13 七类渲染后端逐一优劣对比(对准本项目工作负载)](research/13-render-backends.md)
 - [14 可切换 Painter 抽象:先例、设计与迁移八步](research/14-switchable-painter.md)
+- [15 三类场景现状分析(轻量内存/复杂界面/复杂界面+3D,含实测基线)](research/15-scenario-analysis.md)
