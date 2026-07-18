@@ -599,6 +599,28 @@ let y = $state(0.0f32);
     }
 
     #[test]
+    fn aria_label_compiles() {
+        let src = r#"<script>
+let n = $state(0i32);
+</script>
+<view>
+  <button aria-label="增加计数" onclick={|| n += 1}>+</button>
+  <text aria-label={format!("当前 {}", n)}>{n}</text>
+</view>
+"#;
+        let code = compile_sv(src, "c").expect("应编译成功");
+        assert!(
+            code.contains("set_accessible_label"),
+            "aria-label 应编译成 set_accessible_label:\n{code}"
+        );
+        assert!(
+            code.contains("::sv_reactive::effect"),
+            "动态 aria-label 应走响应式 effect:\n{code}"
+        );
+        syn::parse_file(&code).unwrap();
+    }
+
+    #[test]
     fn on_keydown_legacy_form_rejected_with_hint() {
         let src = "<view on:keydown={|e| ()}>x</view>";
         let err = compile_sv(src, "c").unwrap_err();

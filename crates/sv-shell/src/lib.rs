@@ -9,6 +9,7 @@
 //! - [`run_app`]:开窗运行,树变更自动 request_redraw,点击自动派发。
 //! - [`render_to_png`]:离屏渲染一帧存 PNG(CI / 可视化验证用,不需要窗口)。
 
+mod a11y;
 mod font;
 mod paint;
 mod render;
@@ -16,6 +17,7 @@ mod text;
 #[cfg(feature = "backend-vello")]
 mod vello_backend;
 
+pub use a11y::{build_tree_update, dispatch_action};
 pub use font::{FontHandle, ui_font_handle};
 pub use paint::{
     GlyphKey, GlyphPos, PaintCmd, Painter, PainterCaps, RecordingPainter, TinySkiaPainter,
@@ -98,9 +100,23 @@ fn cpu_presenter(window: &Arc<Window>) -> Presenter {
     }
 }
 
+/// 事件循环用户事件:后台任务唤醒 + AccessKit 事件(调研 24 §4.2)
+enum UserEvent {
+    Wake,
+    Access(accesskit_winit::Event),
+}
+
+impl From<accesskit_winit::Event> for UserEvent {
+    fn from(e: accesskit_winit::Event) -> Self {
+        UserEvent::Access(e)
+    }
+}
+
 struct WinState {
     window: Arc<Window>,
     presenter: Presenter,
+    /// AccessKit 平台适配器(懒激活:AT 首次请求前零成本,egui PR#2294 形态)
+    access: accesskit_winit::Adapter,
 }
 
 struct App {
@@ -125,7 +141,7 @@ struct App {
     show_fps: bool,
     fps_frames: u32,
     fps_t0: std::time::Instant,
-    proxy: winit::event_loop::EventLoopProxy<()>,
+    proxy: winit::event_loop::EventLoopProxy<UserEvent>,
 }
 
 impl App {
@@ -202,6 +218,18 @@ impl App {
         if animating {
             ws.window.request_redraw();
         }
+        // 语义树跟随版本节拍(静止帧短路已在上方 return;懒激活未开时零成本)
+        self.push_access_tree();
+    }
+
+    /// 语义树推送:全量 TreeUpdate(v1;增量列档 B,调研 24 §4.2)
+    fn push_access_tree(&mut self) {
+        let Some(ws) = &mut self.win else { return };
+        let scale = ws.window.scale_factor() as f32;
+        let doc = self.doc.clone();
+        let placed = &self.placed;
+        ws.access
+            .update_if_active(|| a11y::build_tree_update(&doc, placed, scale));
     }
 
     /// 悬停派发:命中最上层带 enter/leave 回调的节点,变化时先 leave 后 enter
@@ -387,19 +415,27 @@ fn map_key(
     Some(e)
 }
 
-impl ApplicationHandler for App {
+impl ApplicationHandler<UserEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.win.is_some() {
             return;
         }
+        // AccessKit 要求:adapter 必须在窗口首次可见前创建 → 先隐身建窗
         let attrs = Window::default_attributes()
             .with_title(self.title.clone())
-            .with_inner_size(LogicalSize::new(480.0, 400.0));
+            .with_inner_size(LogicalSize::new(480.0, 400.0))
+            .with_visible(false);
         let window = Arc::new(
             event_loop
                 .create_window(attrs)
                 .expect("sv-shell: 创建窗口失败"),
         );
+        let access = accesskit_winit::Adapter::with_event_loop_proxy(
+            event_loop,
+            &window,
+            self.proxy.clone(),
+        );
+        window.set_visible(true);
         let presenter = match self.backend {
             #[cfg(feature = "backend-vello")]
             Backend::Vello => {
@@ -426,21 +462,50 @@ impl ApplicationHandler for App {
         self.doc.set_on_mutate(move || w.request_redraw());
         let proxy = self.proxy.clone();
         sv_ui::tasks::set_waker(move || {
-            let _ = proxy.send_event(());
+            let _ = proxy.send_event(UserEvent::Wake);
         });
 
-        self.win = Some(WinState { window, presenter });
+        self.win = Some(WinState {
+            window,
+            presenter,
+            access,
+        });
     }
 
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: ()) {
-        // 后台任务完成的唤醒:立即套用并请求重绘
-        sv_ui::tasks::pump();
-        if let Some(ws) = &self.win {
-            ws.window.request_redraw();
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
+        match event {
+            UserEvent::Wake => {
+                // 后台任务完成的唤醒:立即套用并请求重绘
+                sv_ui::tasks::pump();
+                if let Some(ws) = &self.win {
+                    ws.window.request_redraw();
+                }
+            }
+            UserEvent::Access(ev) => match ev.window_event {
+                accesskit_winit::WindowEvent::InitialTreeRequested => {
+                    // 懒激活:AT 首次请求时才建全量语义树
+                    self.push_access_tree();
+                }
+                accesskit_winit::WindowEvent::ActionRequested(req) => {
+                    if req.target_tree == accesskit::TreeId::ROOT
+                        && a11y::dispatch_action(&self.doc, req.action, req.target_node)
+                    {
+                        // 树可能因动作变化(焦点/点击),下一帧节拍推送
+                        if let Some(ws) = &self.win {
+                            ws.window.request_redraw();
+                        }
+                    }
+                }
+                accesskit_winit::WindowEvent::AccessibilityDeactivated => {}
+            },
         }
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        // 每个 winit 事件先过 AccessKit 适配器(官方要求的接线形态)
+        if let Some(ws) = &mut self.win {
+            ws.access.process_event(&ws.window, &event);
+        }
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::RedrawRequested => self.paint(),
@@ -597,7 +662,7 @@ pub fn run_app(
     title: &str,
     build: impl FnOnce(&Doc, ViewId) + 'static,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let event_loop = EventLoop::new()?;
+    let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     let proxy = event_loop.create_proxy();
     // 系统剪贴板接入编辑内核(Ctrl+C/X/V;测试路径注入假实现,互不相扰)
     sv_ui::set_clipboard(ShellClipboard::default());
@@ -1541,6 +1606,97 @@ mod tests {
                 "30k 全量布局 {ms:.2}ms 出现灾难性回归(基线 ~130–160ms)"
             );
         }
+    }
+
+    /// AccessKit 语义树金样(调研 24 P4:零窗口零平台):
+    /// role/名称/bounds/焦点/动作面逐项断言
+    #[test]
+    fn a11y_roles_names_bounds_golden() {
+        use accesskit::{Action, Role, Toggled};
+        let doc = Doc::new();
+        let (_, _scope) = create_root(|| {
+            let t = doc.create_text("标题");
+            doc.append(doc.root(), t);
+            let b = doc.create_button("确定");
+            doc.append(doc.root(), b);
+            doc.set_on_click(b, || {});
+            let c = doc.create_checkbox();
+            doc.set_text(c, "同意");
+            doc.set_checked(c, true);
+            doc.append(doc.root(), c);
+            let i = doc.create_text_input();
+            doc.set_placeholder(i, "请输入");
+            doc.append(doc.root(), i);
+            doc.set_accessible_label(i, "用户名");
+            doc.focus(b);
+        });
+        let placed = layout_tree(&doc, 480.0, 400.0);
+        let update = build_tree_update(&doc, &placed, 2.0);
+
+        let ids: Vec<sv_ui::ViewId> = doc.read(|inner| inner.nodes[inner.root].children.clone());
+        let node_of = |vid: sv_ui::ViewId| {
+            let nid = accesskit::NodeId(sv_ui::view_id_ffi(vid));
+            update
+                .nodes
+                .iter()
+                .find(|(id, _)| *id == nid)
+                .map(|(_, n)| n.clone())
+                .expect("语义树应含该节点")
+        };
+
+        let text = node_of(ids[0]);
+        assert_eq!(text.role(), Role::Label);
+        assert_eq!(text.label(), Some("标题"));
+
+        let btn = node_of(ids[1]);
+        assert_eq!(btn.role(), Role::Button);
+        assert_eq!(btn.label(), Some("确定"));
+        assert!(btn.supports_action(Action::Click), "按钮应可点");
+        assert!(btn.supports_action(Action::Focus), "按钮应可聚焦");
+
+        let cb = node_of(ids[2]);
+        assert_eq!(cb.role(), Role::CheckBox);
+        assert_eq!(cb.toggled(), Some(Toggled::True), "勾选态应直通");
+
+        let input = node_of(ids[3]);
+        assert_eq!(input.role(), Role::TextInput);
+        assert_eq!(input.label(), Some("用户名"), "aria-label 应覆盖占位符");
+
+        // bounds:逻辑 rect × scale(与命中测试同源)
+        let p = placed.iter().find(|p| p.id == ids[1]).unwrap();
+        let b = btn.bounds().expect("按钮应有 bounds");
+        assert_eq!(b.x0, (p.rect.x * 2.0) as f64);
+        assert_eq!(b.y1, ((p.rect.y + p.rect.h) * 2.0) as f64);
+
+        // focus 必填:当前焦点在按钮
+        assert_eq!(update.focus, accesskit::NodeId(sv_ui::view_id_ffi(ids[1])));
+        // 根与树信息
+        assert!(update.tree.is_some());
+    }
+
+    /// AccessKit 动作回派(P5 纯逻辑面):Click/Focus/Blur → 场景树
+    #[test]
+    fn a11y_action_dispatch_roundtrip() {
+        use accesskit::Action;
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        let doc = Doc::new();
+        let clicks: Rc<RefCell<u32>> = Default::default();
+        let c = clicks.clone();
+        let btn = doc.create_button("加");
+        doc.append(doc.root(), btn);
+        doc.set_on_click(btn, move || *c.borrow_mut() += 1);
+
+        let nid = accesskit::NodeId(sv_ui::view_id_ffi(btn));
+        assert!(dispatch_action(&doc, Action::Click, nid));
+        assert_eq!(*clicks.borrow(), 1, "Click 动作应走点击回调");
+        assert!(dispatch_action(&doc, Action::Focus, nid));
+        assert_eq!(doc.focused(), Some(btn), "Focus 动作应走焦点链");
+        assert!(dispatch_action(&doc, Action::Blur, nid));
+        assert_eq!(doc.focused(), None);
+        // 已删节点的动作静默失败(世代键防复用)
+        doc.remove(btn);
+        assert!(!dispatch_action(&doc, Action::Click, nid));
     }
 
     #[test]

@@ -343,6 +343,8 @@ pub struct ViewNode {
     /// 虚拟内容尺寸覆盖(virtual_scroll 用:滚动范围/滚动条比例按它算,
     /// 不按实际子树尺寸)
     pub content_override: Option<(f32, f32)>,
+    /// 无障碍名称覆盖(`aria-label`;None 时语义树取 text;调研 24 §4.1)
+    pub accessible_label: Option<String>,
 }
 
 pub struct DocumentInner {
@@ -389,6 +391,7 @@ impl Doc {
             scroll_y: 0.0,
             on_scroll: None,
             content_override: None,
+            accessible_label: None,
         });
         Doc(Rc::new(RefCell::new(DocumentInner {
             nodes,
@@ -414,6 +417,22 @@ impl Doc {
 
     pub fn version(&self) -> u64 {
         self.0.borrow().version
+    }
+
+    /// 无障碍名称覆盖(`aria-label` 编译目标;空串清除)
+    pub fn set_accessible_label(&self, id: ViewId, label: &str) {
+        {
+            let mut inner = self.0.borrow_mut();
+            let Some(n) = inner.nodes.get_mut(id) else {
+                return;
+            };
+            let new = (!label.is_empty()).then(|| label.to_string());
+            if n.accessible_label == new {
+                return;
+            }
+            n.accessible_label = new;
+        }
+        self.bump();
     }
 
     /// 本树的身份标识(布局/绘制缓存键;同一棵树的所有 Doc 克隆同值)
@@ -463,6 +482,7 @@ impl Doc {
             scroll_y: 0.0,
             on_scroll: None,
             content_override: None,
+            accessible_label: None,
         });
         self.bump();
         id
@@ -1088,6 +1108,18 @@ impl Doc {
         walk(&inner, inner.root, 0, &mut out);
         out
     }
+}
+
+/// ViewId → u64(含世代号;AccessKit NodeId 稳定映射,节点删除后不复用)
+pub fn view_id_ffi(id: ViewId) -> u64 {
+    use slotmap::Key;
+    id.data().as_ffi()
+}
+
+/// u64 → ViewId(AccessKit 动作回派的反查;世代不符时后续 get 自然落空)
+pub fn view_id_from_ffi(raw: u64) -> ViewId {
+    use slotmap::KeyData;
+    KeyData::from_ffi(raw).into()
 }
 
 /// 把字节偏移吸附到 ≤ 它的最近 char 边界(并钳制进字符串长度)

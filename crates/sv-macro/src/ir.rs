@@ -71,6 +71,8 @@ pub enum AttrKind {
     OnSubmit,
     /// `on_scroll(闭包)` → `set_on_scroll`(签名 Fn(f32, f32))
     OnScroll,
+    /// `aria_label(表达式)` → 响应式 `set_accessible_label`(无障碍名称)
+    AriaLabel,
     /// `bind_scroll_y(signal)` → `::sv_ui::bind_scroll_y`(纵向滚动双向桥)
     BindScrollY,
 }
