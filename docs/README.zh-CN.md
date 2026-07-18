@@ -24,7 +24,7 @@
 
 ## 调研报告
 
-18 份联网核实的调研报告(2026-07),ADR 的依据:
+19 份联网核实的调研报告(2026-07),ADR 的依据:
 
 | # | 报告 |
 |---|---|
@@ -46,6 +46,7 @@
 | 16 | [分场景内存基准测试](research/16-memory-benchmarks.md) |
 | 17 | [分后端×分场景内存构成与帧率](research/17-backend-memory-fps.md) |
 | 18 | [百万控件@144fps:swash 迁移 + 视口虚拟化](research/18-million-controls-144fps.md) |
+| 19 | [距离可商用还有多远:四路审计与分档判决](research/19-commercialization-gap.md) |
 
 ## 约定
 

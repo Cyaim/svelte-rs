@@ -25,7 +25,7 @@ research reports — is currently Chinese-only and linked as-is.
 
 ## Research
 
-Eighteen internet-verified research reports (Chinese) that back the ADRs, 2026-07:
+Nineteen internet-verified research reports (Chinese) that back the ADRs, 2026-07:
 
 | # | Report |
 |---|---|
@@ -47,6 +47,7 @@ Eighteen internet-verified research reports (Chinese) that back the ADRs, 2026-0
 | 16 | [Per-scenario memory benchmarks](research/16-memory-benchmarks.md) |
 | 17 | [Per-backend × per-scenario memory & fps](research/17-backend-memory-fps.md) |
 | 18 | [Million controls @ 144fps: swash + virtualization](research/18-million-controls-144fps.md) |
+| 19 | [Commercialization gap: four-way audit & staged verdict](research/19-commercialization-gap.md) |
 
 ## Conventions
 
