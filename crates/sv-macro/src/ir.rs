@@ -54,6 +54,11 @@ pub enum AttrKind {
     Style,
     /// `on_click(闭包)` → `__doc.set_on_click(el, 闭包)`
     OnClick,
+    /// `on_key_down(闭包)` → `set_focusable(el, true) + set_on_key(el, 闭包)`
+    OnKeyDown,
+    /// `on_focus(闭包)` / `on_blur(闭包)` → 合成进单一 `set_on_focus_change`
+    OnFocus,
+    OnBlur,
 }
 
 /// 文本段:字符串字面量或 `{表达式}` 插值

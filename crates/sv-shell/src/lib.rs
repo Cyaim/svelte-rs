@@ -29,6 +29,7 @@ use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
+use winit::keyboard::{Key as WinitKey, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
 use sv_reactive::{RootHandle, create_root};
@@ -107,6 +108,8 @@ struct App {
     cursor: (f64, f64),
     hovered: Option<ViewId>,
     pressed: Option<ViewId>,
+    /// 当前修饰键状态(winit 单独派发 ModifiersChanged,应用自存)
+    mods: ModifiersState,
     epoch: std::time::Instant,
     /// 上一帧的 (版本, 宽, 高, scale位):静止帧跳过重绘制
     last_frame_key: Option<(u64, u32, u32, u32)>,
@@ -255,6 +258,69 @@ impl App {
     }
 }
 
+/// winit 键盘事件 → sv-ui 自有 [`sv_ui::KeyEvent`](ADR-4:事件类型归 sv-ui,
+/// 鸿蒙 XComponent 端喂同一类型)。v0 裁剪面 ~20 具名键 + `Char` 兜底,
+/// 漏配键返回 None 静默丢弃
+fn map_key(
+    logical: &WinitKey,
+    text: Option<&str>,
+    repeat: bool,
+    mods: ModifiersState,
+) -> Option<sv_ui::KeyEvent> {
+    use sv_ui::Key;
+    let key = match logical {
+        WinitKey::Named(n) => match n {
+            NamedKey::Enter => Key::Enter,
+            NamedKey::Tab => Key::Tab,
+            NamedKey::Escape => Key::Escape,
+            NamedKey::Backspace => Key::Backspace,
+            NamedKey::Delete => Key::Delete,
+            NamedKey::Space => Key::Space,
+            NamedKey::ArrowUp => Key::ArrowUp,
+            NamedKey::ArrowDown => Key::ArrowDown,
+            NamedKey::ArrowLeft => Key::ArrowLeft,
+            NamedKey::ArrowRight => Key::ArrowRight,
+            NamedKey::Home => Key::Home,
+            NamedKey::End => Key::End,
+            NamedKey::PageUp => Key::PageUp,
+            NamedKey::PageDown => Key::PageDown,
+            NamedKey::F1 => Key::F(1),
+            NamedKey::F2 => Key::F(2),
+            NamedKey::F3 => Key::F(3),
+            NamedKey::F4 => Key::F(4),
+            NamedKey::F5 => Key::F(5),
+            NamedKey::F6 => Key::F(6),
+            NamedKey::F7 => Key::F(7),
+            NamedKey::F8 => Key::F(8),
+            NamedKey::F9 => Key::F(9),
+            NamedKey::F10 => Key::F(10),
+            NamedKey::F11 => Key::F(11),
+            NamedKey::F12 => Key::F(12),
+            _ => return None,
+        },
+        WinitKey::Character(s) => {
+            let mut chars = s.chars();
+            let c = chars.next()?;
+            if chars.next().is_some() {
+                return None; // 多字符 IME 序列走 Ime 事件(R1 第 2 步)
+            }
+            Key::Char(c)
+        }
+        _ => return None,
+    };
+    let mods = sv_ui::Mods {
+        ctrl: mods.control_key(),
+        shift: mods.shift_key(),
+        alt: mods.alt_key(),
+        meta: mods.super_key(),
+    };
+    let mut e = sv_ui::KeyEvent::new(key, mods).with_repeat(repeat);
+    if let Some(t) = text {
+        e = e.with_text(t);
+    }
+    Some(e)
+}
+
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.win.is_some() {
@@ -321,6 +387,27 @@ impl ApplicationHandler for App {
                 self.cursor = (position.x, position.y);
                 self.update_hover();
             }
+            WindowEvent::ModifiersChanged(m) => self.mods = m.state(),
+            WindowEvent::KeyboardInput {
+                event,
+                is_synthetic,
+                ..
+            } => {
+                // is_synthetic:X11 窗口获焦时合成的按下事件,不过滤会误触发;
+                // v0 只派发 keydown(keyup 留给拖拽/游戏后议)
+                if is_synthetic || event.state != ElementState::Pressed {
+                    return;
+                }
+                if let Some(e) = map_key(
+                    &event.logical_key,
+                    event.text.as_deref(),
+                    event.repeat,
+                    self.mods,
+                ) {
+                    // 四段路由(冒泡/导航/激活/快捷键)在 sv-ui,离屏可测
+                    sv_ui::dispatch_key(&self.doc, &e);
+                }
+            }
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
@@ -345,6 +432,17 @@ impl ApplicationHandler for App {
                     && let Some(h) = self.doc.pointer_down_handler(id)
                 {
                     h();
+                }
+                // 点击设焦(Slint focus-on-click 同款);
+                // 空白区点击不清焦点(桌面惯例)
+                if let Some(id) = self
+                    .placed
+                    .iter()
+                    .rev()
+                    .find(|p| p.rect.contains(lx, ly) && self.doc.focusable(p.id))
+                    .map(|p| p.id)
+                {
+                    self.doc.focus(id);
                 }
                 self.click();
             }
@@ -382,6 +480,7 @@ pub fn run_app(
         cursor: (0.0, 0.0),
         hovered: None,
         pressed: None,
+        mods: ModifiersState::empty(),
         epoch: std::time::Instant::now(),
         last_frame_key: None,
         show_fps: std::env::var("SV_SHOW_FPS").is_ok_and(|v| v == "1"),
@@ -565,6 +664,101 @@ mod tests {
             (0.5..=2.0).contains(&ratio),
             "两后端非白像素数应同数量级:gpu={gpu_count} cpu={cpu_count} ratio={ratio:.3}"
         );
+    }
+
+    /// 离屏键盘整链路:Tab 移焦 → Enter 激活按钮 → signal 更新 → 树精准变更
+    /// (复用 offscreen_click_roundtrip 模式,不开窗)
+    #[test]
+    fn offscreen_tab_enter_activates_button() {
+        use sv_ui::{Key, KeyEvent, Mods, dispatch_key};
+        let doc = Doc::new();
+        let count = state(0);
+        let (_, _scope) = create_root(|| {
+            let label = doc.create_text("");
+            doc.append(doc.root(), label);
+            bind_text(&doc, label, move || format!("Count: {}", count.get()));
+            let btn = doc.create_button("+1");
+            doc.append(doc.root(), btn);
+            doc.set_on_click(btn, move || count.update(|c| *c += 1));
+        });
+
+        // 合成键序:Tab(焦点落到按钮)→ Enter(激活)→ Shift+Tab(环绕仍是它)→ Space
+        assert!(dispatch_key(&doc, &KeyEvent::new(Key::Tab, Mods::NONE)));
+        assert!(doc.focused().is_some(), "Tab 应把焦点带到按钮");
+        dispatch_key(&doc, &KeyEvent::new(Key::Enter, Mods::NONE));
+        assert!(doc.dump().contains("Count: 1"), "\n{}", doc.dump());
+        dispatch_key(&doc, &KeyEvent::new(Key::Tab, Mods::SHIFT));
+        dispatch_key(&doc, &KeyEvent::new(Key::Space, Mods::NONE));
+        assert!(doc.dump().contains("Count: 2"), "\n{}", doc.dump());
+    }
+
+    /// winit → sv-ui 键映射:具名键、字符、修饰键、synthetic 丢弃面
+    #[test]
+    fn map_key_covers_v0_surface() {
+        use winit::keyboard::{Key as WKey, NamedKey, SmolStr};
+        let none = ModifiersState::empty();
+        let e = map_key(&WKey::Named(NamedKey::Tab), None, false, none).unwrap();
+        assert_eq!(e.key, sv_ui::Key::Tab);
+        let e = map_key(&WKey::Named(NamedKey::F5), None, false, none).unwrap();
+        assert_eq!(e.key, sv_ui::Key::F(5));
+        let e = map_key(
+            &WKey::Character(SmolStr::new("s")),
+            Some("s"),
+            false,
+            ModifiersState::CONTROL,
+        )
+        .unwrap();
+        assert_eq!(e.key, sv_ui::Key::Char('s'));
+        assert!(e.mods.ctrl && !e.mods.shift);
+        assert_eq!(e.text.as_deref(), Some("s"));
+        // 漏配键静默丢弃
+        assert!(map_key(&WKey::Named(NamedKey::CapsLock), None, false, none).is_none());
+    }
+
+    /// 焦点环金样:获焦节点绘制后应多出一条外扩 2px 的 StrokeRect,
+    /// 失焦后命令流回到原样
+    #[test]
+    fn recording_painter_focus_ring_golden() {
+        let doc = Doc::new();
+        let (_, _scope) = create_root(|| {
+            let btn = doc.create_button("确定");
+            doc.append(doc.root(), btn);
+            doc.update_style(btn, |s| {
+                s.padding = 8.0.into();
+                s.bg = Some(sv_ui::Color::rgb(60, 120, 255));
+            });
+        });
+        let placed = layout_tree(&doc, 200.0, 100.0);
+        let mut plain = RecordingPainter::default();
+        paint_tree(&doc, &placed, &mut plain, 1.0);
+
+        doc.focus_next(); // 焦点落到按钮
+        let mut focused = RecordingPainter::default();
+        paint_tree(&doc, &placed, &mut focused, 1.0);
+        assert_eq!(
+            focused.cmds.len(),
+            plain.cmds.len() + 1,
+            "获焦应只多一条焦点环命令"
+        );
+        let ring = focused.cmds.last().unwrap();
+        let btn_place = placed.iter().find(|p| doc.focusable(p.id)).unwrap();
+        match ring {
+            PaintCmd::StrokeRect {
+                x, y, w, h, width, ..
+            } => {
+                assert_eq!(*width, 2, "焦点环宽 2px");
+                assert_eq!(*x, (btn_place.rect.x - 2.0) as i32, "外扩 2px");
+                assert_eq!(*y, (btn_place.rect.y - 2.0) as i32);
+                assert_eq!(*w, (btn_place.rect.w + 4.0) as i32);
+                assert_eq!(*h, (btn_place.rect.h + 4.0) as i32);
+            }
+            other => panic!("最后一条应是焦点环 StrokeRect:{other:?}"),
+        }
+
+        doc.blur();
+        let mut blurred = RecordingPainter::default();
+        paint_tree(&doc, &placed, &mut blurred, 1.0);
+        assert_eq!(blurred.cmds, plain.cmds, "失焦后命令流应回到无环原样");
     }
 
     #[test]

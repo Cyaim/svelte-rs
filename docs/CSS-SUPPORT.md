@@ -57,7 +57,7 @@
 |---|---|---|
 | 类选择器 `.a`、多类叠加 | ✅ | 类=编译期样式表索引;`class="a b"` 声明序合成 |
 | `:hover` | ✅ | 编译期生成悬停状态+指针接线,与用户回调合成 |
-| `:active` / `:focus` / `:focus-visible` / `:disabled` / `:checked` | 📅 C1/C2 | 按压位随 shell;focus 系随焦点链(M1) |
+| `:active` / `:focus` / `:focus-visible` / `:disabled` / `:checked` | 📅 C1/C2 | 按压位随 shell;焦点链已落地(R1,调研 20),`:focus` 伪类接线排 C2(per-element `__fc` signal,复用 `:hover` 模式) |
 | 元素类型选择器(`text { }`) | 📅 C1 | 组件内静态匹配 |
 | 后代/子组合子 `.card .title`、`.a > .b` | ✏️ P2 | **编译期**对模板树匹配,不跨组件;匹配不到=警告 |
 | `:first-child` / `:last-child` / `odd/even` | ✏️ P2 | 静态位置编译期判;each 行由 keyed reconcile 维护标志位;任意 `An+B` 砍 |

@@ -71,7 +71,7 @@ v0 已知限制:字段/索引赋值(`pos.x = 1`)不改写——请用 `pos.updat
 <text onpointerenter={|| hovers += 1}>悬停区</text>
 ```
 
-静态与插值混排的文本编译成单个 `bind_text` 绑定;全静态文本零绑定。属性值形态是 `name="静态字符串"` 或 `name={rust_表达式}`。当前事件集只有 `onclick`/`on:click`、`onpointerenter`、`onpointerleave`——其它事件(键盘、输入)等焦点链基建,写了会编译报错而不是静默失效。内联 `style="k:v; ..."` 与样式简写属性(`fg=`、`font-size=` 等)属于样式迷你语言,见 [./styling.md](./styling.md)。
+静态与插值混排的文本编译成单个 `bind_text` 绑定;全静态文本零绑定。属性值形态是 `name="静态字符串"` 或 `name={rust_表达式}`。当前事件集:`onclick`/`on:click`、`onpointerenter`、`onpointerleave`,以及键盘/焦点(R1):`onkeydown={|e| ...}`(自动把元素设为可获焦;`e.stop_propagation()` 截断冒泡、`e.prevent_default()` 取消 Tab/Enter 默认层)、`onfocus`/`onblur`、布尔属性 `autofocus`。按钮无需任何标注即可用 Tab 聚焦、Enter/Space 激活。其余事件(如 oninput)等文本输入控件,写了会编译报错而不是静默失效。内联 `style="k:v; ..."` 与样式简写属性(`fg=`、`font-size=` 等)属于样式迷你语言,见 [./styling.md](./styling.md)。
 
 ### `{#if}` / `{#each}` / `{#key}`
 

@@ -466,6 +466,45 @@ let size = $state(10.0f32);
     }
 
     #[test]
+    fn onkeydown_compiles() {
+        let src = r#"<script>
+let n = $state(0i32);
+</script>
+<view onkeydown={|e| n += 1} autofocus>
+  <button onfocus={|| n += 10} onblur={|| n += 100}>钮</button>
+</view>
+"#;
+        let code = compile_sv(src, "c").expect("应编译成功");
+        assert!(
+            code.contains("set_on_key"),
+            "onkeydown 应编译成 set_on_key:\n{code}"
+        );
+        assert!(
+            code.contains("set_focusable"),
+            "onkeydown 应自动 set_focusable:\n{code}"
+        );
+        assert!(
+            code.contains("set_on_focus_change"),
+            "onfocus/onblur 应合成进 set_on_focus_change:\n{code}"
+        );
+        assert!(
+            code.contains(".focus("),
+            "autofocus 应编译成 __doc.focus:\n{code}"
+        );
+        syn::parse_file(&code).unwrap();
+    }
+
+    #[test]
+    fn on_keydown_legacy_form_rejected_with_hint() {
+        let src = "<view on:keydown={|e| ()}>x</view>";
+        let err = compile_sv(src, "c").unwrap_err();
+        assert!(
+            err.message.contains("onkeydown"),
+            "on:keydown 报错应指路属性形态:{err}"
+        );
+    }
+
+    #[test]
     fn onclick_svelte5_attr() {
         let src = r#"<script>
 let n = $state(0i32);

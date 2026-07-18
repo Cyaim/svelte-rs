@@ -17,10 +17,18 @@ use slotmap::{SlotMap, new_key_type};
 use sv_reactive::{RootHandle, create_root, derived, effect, on_cleanup, untrack};
 
 pub mod anim;
+pub mod focus;
+pub mod shortcuts;
 pub mod tasks;
+
+pub use focus::{Key, KeyEvent, Mods, dispatch_key};
+pub use shortcuts::{Shortcut, register_shortcut};
 
 /// 组件 children / 具名 snippet 的类型:接收 (doc, 挂载点) 的可复用构建闭包
 pub type Snippet = Rc<dyn Fn(&Doc, ViewId)>;
+
+/// 键盘回调([`Doc::set_on_key`] / [`Doc::key_handler`])
+pub type KeyHandler = Rc<dyn Fn(&KeyEvent)>;
 
 new_key_type! {
     pub struct ViewId;
@@ -192,6 +200,12 @@ pub struct ViewNode {
     pub text: String,
     /// Checkbox 的勾选状态(其它元素恒为 false)
     pub checked: bool,
+    /// 可获焦位(Tab 遍历只走 focusable 节点;Button/Checkbox 默认 true)。
+    /// opt-in 布尔位、无数值 tabindex——egui/floem/Masonry/Slint 四家交集
+    pub focusable: bool,
+    /// 获焦即开 IME 会话(Masonry `accepts_text_input` 同款)。
+    /// 本切片恒 false,R1 第 2 步 TextInput 用它触发 `set_ime_allowed`
+    pub accepts_text: bool,
     pub style: Style,
     pub parent: Option<ViewId>,
     pub children: Vec<ViewId>,
@@ -200,11 +214,17 @@ pub struct ViewNode {
     pub on_pointer_down: Option<Rc<dyn Fn()>>,
     pub on_pointer_up: Option<Rc<dyn Fn()>>,
     pub on_pointer_leave: Option<Rc<dyn Fn()>>,
+    pub on_key: Option<KeyHandler>,
+    /// 焦点变化回调(true=获焦,false=失焦;`:focus` 伪类接线用)
+    pub on_focus_change: Option<Rc<dyn Fn(bool)>>,
 }
 
 pub struct DocumentInner {
     pub nodes: SlotMap<ViewId, ViewNode>,
     pub root: ViewId,
+    /// 单一焦点点(egui/iced/floem/Masonry/Slint 五家共识;不做成 signal——
+    /// 它是树状态,经版本号驱动重绘,全局 signal 会破坏细粒度订阅)
+    pub focused: Option<ViewId>,
     version: u64,
     on_mutate: Option<Box<dyn Fn()>>,
 }
@@ -226,6 +246,8 @@ impl Doc {
             kind: ElementKind::View,
             text: String::new(),
             checked: false,
+            focusable: false,
+            accepts_text: false,
             style: Style::default(),
             parent: None,
             children: Vec::new(),
@@ -234,10 +256,13 @@ impl Doc {
             on_pointer_down: None,
             on_pointer_up: None,
             on_pointer_leave: None,
+            on_key: None,
+            on_focus_change: None,
         });
         Doc(Rc::new(RefCell::new(DocumentInner {
             nodes,
             root,
+            focused: None,
             version: 0,
             on_mutate: None,
         })))
@@ -284,6 +309,10 @@ impl Doc {
             kind,
             text: text.to_string(),
             checked: false,
+            // 交互叶子默认可获焦(floem 教训:不自动设位是新手第一坑);
+            // View/Text 用 set_focusable 手动开
+            focusable: matches!(kind, ElementKind::Button | ElementKind::Checkbox),
+            accepts_text: false,
             style: Style::default(),
             parent: None,
             children: Vec::new(),
@@ -292,6 +321,8 @@ impl Doc {
             on_pointer_down: None,
             on_pointer_up: None,
             on_pointer_leave: None,
+            on_key: None,
+            on_focus_change: None,
         });
         self.bump();
         id
@@ -329,8 +360,25 @@ impl Doc {
 
     /// 摘除并递归销毁整棵子树
     pub fn remove(&self, id: ViewId) {
-        {
+        let blur_cb = {
             let mut inner = self.0.borrow_mut();
+            // 被删子树含焦点节点:清焦点并留住失焦回调(否则 if_block 重建
+            // 会留下悬空焦点)。回调在借用释放后再调
+            let mut blur_cb = None;
+            if let Some(f) = inner.focused {
+                let mut cur = Some(f);
+                let contained = loop {
+                    match cur {
+                        Some(c) if c == id => break true,
+                        Some(c) => cur = inner.nodes.get(c).and_then(|n| n.parent),
+                        None => break false,
+                    }
+                };
+                if contained {
+                    blur_cb = inner.nodes.get(f).and_then(|n| n.on_focus_change.clone());
+                    inner.focused = None;
+                }
+            }
             if let Some(p) = inner.nodes.get(id).and_then(|n| n.parent) {
                 inner.nodes[p].children.retain(|c| *c != id);
             }
@@ -342,6 +390,10 @@ impl Doc {
                 }
             }
             drop_subtree(&mut inner, id);
+            blur_cb
+        };
+        if let Some(cb) = blur_cb {
+            cb(false);
         }
         self.bump();
     }
@@ -510,6 +562,180 @@ impl Doc {
             .nodes
             .get(id)
             .and_then(|n| n.on_pointer_up.clone())
+    }
+
+    // -----------------------------------------------------------------------
+    // 焦点系统(调研 20;单一焦点点 + opt-in focusable 位 + 树序 Tab 遍历)
+    // -----------------------------------------------------------------------
+
+    /// 父节点(键盘冒泡沿它上行)
+    pub fn parent(&self, id: ViewId) -> Option<ViewId> {
+        self.0.borrow().nodes.get(id).and_then(|n| n.parent)
+    }
+
+    /// 设置可获焦位(编译器 onkeydown 自动开;View/Text 手动开)
+    pub fn set_focusable(&self, id: ViewId, focusable: bool) {
+        {
+            let mut inner = self.0.borrow_mut();
+            let Some(n) = inner.nodes.get_mut(id) else {
+                return;
+            };
+            if n.focusable == focusable {
+                return;
+            }
+            n.focusable = focusable;
+        }
+        self.bump();
+    }
+
+    pub fn focusable(&self, id: ViewId) -> bool {
+        self.0.borrow().nodes.get(id).is_some_and(|n| n.focusable)
+    }
+
+    /// 获焦即开 IME 会话的位(R1 第 2 步 TextInput 用;本切片只预留)
+    pub fn set_accepts_text(&self, id: ViewId, accepts: bool) {
+        {
+            let mut inner = self.0.borrow_mut();
+            let Some(n) = inner.nodes.get_mut(id) else {
+                return;
+            };
+            if n.accepts_text == accepts {
+                return;
+            }
+            n.accepts_text = accepts;
+        }
+        self.bump();
+    }
+
+    pub fn set_on_key(&self, id: ViewId, f: impl Fn(&KeyEvent) + 'static) {
+        {
+            let mut inner = self.0.borrow_mut();
+            let Some(n) = inner.nodes.get_mut(id) else {
+                return;
+            };
+            n.on_key = Some(Rc::new(f));
+        }
+        self.bump();
+    }
+
+    /// 取出键盘回调(同 [`Doc::click_handler`]:clone 出来调用,不持树借用)
+    pub fn key_handler(&self, id: ViewId) -> Option<KeyHandler> {
+        self.0.borrow().nodes.get(id).and_then(|n| n.on_key.clone())
+    }
+
+    pub fn set_on_focus_change(&self, id: ViewId, f: impl Fn(bool) + 'static) {
+        {
+            let mut inner = self.0.borrow_mut();
+            let Some(n) = inner.nodes.get_mut(id) else {
+                return;
+            };
+            n.on_focus_change = Some(Rc::new(f));
+        }
+        self.bump();
+    }
+
+    pub fn focus_change_handler(&self, id: ViewId) -> Option<Rc<dyn Fn(bool)>> {
+        self.0
+            .borrow()
+            .nodes
+            .get(id)
+            .and_then(|n| n.on_focus_change.clone())
+    }
+
+    /// 当前焦点节点(单一焦点点,per-Doc 天然 per-window)
+    pub fn focused(&self) -> Option<ViewId> {
+        self.0.borrow().focused
+    }
+
+    /// 移焦到指定节点:先旧节点失焦回调、再新节点获焦回调、bump 一次
+    /// (相等剪枝;节点不存在则不动)
+    pub fn focus(&self, id: ViewId) {
+        let (old_cb, new_cb) = {
+            let mut inner = self.0.borrow_mut();
+            if inner.focused == Some(id) || inner.nodes.get(id).is_none() {
+                return;
+            }
+            let old = inner.focused.replace(id);
+            let old_cb = old
+                .and_then(|o| inner.nodes.get(o))
+                .and_then(|n| n.on_focus_change.clone());
+            let new_cb = inner.nodes.get(id).and_then(|n| n.on_focus_change.clone());
+            (old_cb, new_cb)
+        };
+        if let Some(cb) = old_cb {
+            cb(false);
+        }
+        if let Some(cb) = new_cb {
+            cb(true);
+        }
+        self.bump();
+    }
+
+    /// 清焦点(Esc 的默认行为)
+    pub fn blur(&self) {
+        let old_cb = {
+            let mut inner = self.0.borrow_mut();
+            let Some(old) = inner.focused.take() else {
+                return;
+            };
+            inner.nodes.get(old).and_then(|n| n.on_focus_change.clone())
+        };
+        if let Some(cb) = old_cb {
+            cb(false);
+        }
+        self.bump();
+    }
+
+    /// 树 DFS 序收集所有 focusable 节点(与 `Placed` 绘制序同构 → Tab 序
+    /// 即视觉序;隐藏分支被 if_block 物理移除,天然不在结果里)
+    fn focusables(&self) -> Vec<ViewId> {
+        fn walk(inner: &DocumentInner, id: ViewId, out: &mut Vec<ViewId>) {
+            let Some(n) = inner.nodes.get(id) else {
+                return;
+            };
+            if n.focusable {
+                out.push(id);
+            }
+            for c in &n.children {
+                walk(inner, *c, out);
+            }
+        }
+        let inner = self.0.borrow();
+        let mut out = Vec::new();
+        walk(&inner, inner.root, &mut out);
+        out
+    }
+
+    /// Tab:焦点移到树序下一个 focusable(环绕;无焦点时落到第一个)
+    pub fn focus_next(&self) {
+        let list = self.focusables();
+        if list.is_empty() {
+            return;
+        }
+        let next = match self
+            .focused()
+            .and_then(|f| list.iter().position(|&x| x == f))
+        {
+            Some(i) => list[(i + 1) % list.len()],
+            None => list[0],
+        };
+        self.focus(next);
+    }
+
+    /// Shift+Tab:焦点移到树序上一个 focusable(环绕;无焦点时落到最后一个)
+    pub fn focus_prev(&self) {
+        let list = self.focusables();
+        if list.is_empty() {
+            return;
+        }
+        let prev = match self
+            .focused()
+            .and_then(|f| list.iter().position(|&x| x == f))
+        {
+            Some(i) => list[(i + list.len() - 1) % list.len()],
+            None => *list.last().unwrap(),
+        };
+        self.focus(prev);
     }
 
     /// 调试:把树 dump 成缩进文本
