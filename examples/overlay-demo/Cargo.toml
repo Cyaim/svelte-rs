@@ -1,0 +1,14 @@
+[package]
+name = "overlay-demo"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+sv-reactive = { workspace = true }
+sv-ui = { workspace = true }
+sv-shell = { workspace = true }
+
+[build-dependencies]
+sv-compiler = { workspace = true }

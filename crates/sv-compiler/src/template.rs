@@ -15,6 +15,9 @@ pub enum Tag {
     Checkbox,
     /// 单行文本输入叶子(bind:value 双向绑定的宿主)
     Input,
+    /// 弹层(调研 25:children 编译成 overlay_block 的 build 闭包;
+    /// 锚定到**父容器元素**)
+    Overlay,
     /// 大写开头的标签 = 组件调用,如 `<TodoItem />`
     Component(String),
 }
@@ -294,6 +297,7 @@ impl<'a> Parser<'a> {
             "button" => Tag::Button,
             "checkbox" => Tag::Checkbox,
             "input" => Tag::Input,
+            "overlay" => Tag::Overlay,
             "" => return Err(self.err(off, "`<` 后应为标签名")),
             other if other.chars().next().unwrap().is_ascii_uppercase() => {
                 Tag::Component(other.to_string())
@@ -332,7 +336,7 @@ impl<'a> Parser<'a> {
             return Err(self.err(off, format!("`<{name}>` 缺少闭合标签 `{close}`")));
         }
         match tag {
-            Tag::View => Ok(Node::Element {
+            Tag::View | Tag::Overlay => Ok(Node::Element {
                 tag,
                 attrs,
                 children,

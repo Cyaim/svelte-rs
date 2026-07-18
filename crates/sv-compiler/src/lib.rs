@@ -599,6 +599,55 @@ let y = $state(0.0f32);
     }
 
     #[test]
+    fn sv_overlay_codegen() {
+        let src = r#"<script>
+let show = $state(false);
+</script>
+<view>
+  <button onclick={|| show = true}>菜单</button>
+  <overlay open={show} anchor="below" gap="6" close="outside"
+           ondismiss={|| show = false} style="padding:8; bg:#ffffff">
+    <text>项目一</text>
+  </overlay>
+</view>
+"#;
+        let code = compile_sv(src, "c").expect("应编译成功");
+        for needle in [
+            "overlay_block",
+            "Anchor::Node",
+            "Side::Below",
+            "CloseBehavior::OnClickOutside",
+            "OverlayLayer::Popup",
+        ] {
+            assert!(code.contains(needle), "缺 {needle}:\n{code}");
+        }
+        syn::parse_file(&code).unwrap();
+        // modal 缺省 close=none;center 锚定
+        let src2 = r#"<script>
+let show = $state(true);
+</script>
+<view>
+  <overlay open={show} anchor="center" modal>
+    <text>对话框</text>
+  </overlay>
+</view>
+"#;
+        let code2 = compile_sv(src2, "c").unwrap();
+        assert!(code2.contains("Anchor::WindowCenter"));
+        assert!(
+            code2.contains("CloseBehavior::None"),
+            "modal 缺省只能程序关:\n{code2}"
+        );
+        // open 必填
+        let err = compile_sv(
+            "<view><overlay anchor=\"below\"><text>x</text></overlay></view>",
+            "c",
+        )
+        .unwrap_err();
+        assert!(err.message.contains("open"), "{err}");
+    }
+
+    #[test]
     fn aria_label_compiles() {
         let src = r#"<script>
 let n = $state(0i32);

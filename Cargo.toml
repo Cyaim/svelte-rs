@@ -13,6 +13,7 @@ members = [
     "examples/membench",
     "examples/input-demo",
     "examples/settings-sfc",
+    "examples/overlay-demo",
 ]
 
 [workspace.package]
