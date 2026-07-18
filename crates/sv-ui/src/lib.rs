@@ -19,6 +19,7 @@ use sv_reactive::{RootHandle, create_root, derived, effect, on_cleanup, untrack}
 pub mod anim;
 pub mod focus;
 pub mod input;
+pub mod overlay;
 pub mod shortcuts;
 pub mod tasks;
 
@@ -26,6 +27,9 @@ pub use focus::{Key, KeyEvent, Mods, dispatch_key};
 pub use input::{
     Caret, Clipboard, EditOp, ImeEvent, InputState, apply_edit, clipboard_get, clipboard_set,
     handle_ime, set_clipboard,
+};
+pub use overlay::{
+    Anchor, CloseBehavior, OverlayEntry, OverlayLayer, OverlayOpts, Side, overlay_block, tooltip,
 };
 pub use shortcuts::{Shortcut, register_shortcut};
 
@@ -350,6 +354,9 @@ pub struct ViewNode {
 pub struct DocumentInner {
     pub nodes: SlotMap<ViewId, ViewNode>,
     pub root: ViewId,
+    /// 弹层注册表(调研 25:游离子树根;注册序即层内叠序,渲染壳把它们的
+    /// Placed 追加在基础层之后)
+    pub overlays: Vec<overlay::OverlayEntry>,
     /// 单一焦点点(egui/iced/floem/Masonry/Slint 五家共识;不做成 signal——
     /// 它是树状态,经版本号驱动重绘,全局 signal 会破坏细粒度订阅)
     pub focused: Option<ViewId>,
@@ -396,6 +403,7 @@ impl Doc {
         Doc(Rc::new(RefCell::new(DocumentInner {
             nodes,
             root,
+            overlays: Vec::new(),
             focused: None,
             version: 0,
             on_mutate: None,
@@ -873,7 +881,18 @@ impl Doc {
         }
         let inner = self.0.borrow();
         let mut out = Vec::new();
+        // 焦点陷阱(调研 25 O3):有 modal 弹层时,Tab 环限定在最上层
+        // modal 子树内;否则基础层 + 各弹层按注册序
+        if let Some(top_modal) = inner.overlays.iter().rev().find(|e| e.modal) {
+            walk(&inner, top_modal.root, &mut out);
+            return out;
+        }
         walk(&inner, inner.root, &mut out);
+        for e in &inner.overlays {
+            if e.layer == overlay::OverlayLayer::Popup {
+                walk(&inner, e.root, &mut out);
+            }
+        }
         out
     }
 
@@ -1106,6 +1125,15 @@ impl Doc {
         let inner = self.0.borrow();
         let mut out = String::new();
         walk(&inner, inner.root, 0, &mut out);
+        for e in &inner.overlays {
+            out.push_str(&format!(
+                "== overlay {:?}{} ==
+",
+                e.layer,
+                if e.modal { " (modal)" } else { "" }
+            ));
+            walk(&inner, e.root, 1, &mut out);
+        }
         out
     }
 }

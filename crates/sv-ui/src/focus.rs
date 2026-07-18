@@ -171,9 +171,15 @@ pub fn dispatch_key(doc: &Doc, e: &KeyEvent) -> bool {
             doc.focus_prev();
             return true;
         }
-        Key::Escape if e.mods == Mods::NONE && doc.focused().is_some() => {
-            doc.blur();
-            return true;
+        Key::Escape if e.mods == Mods::NONE => {
+            // 弹层优先(调研 25 O2:LIFO,嵌套弹层逐层关);其次失焦
+            if doc.dismiss_topmost_overlay() {
+                return true;
+            }
+            if doc.focused().is_some() {
+                doc.blur();
+                return true;
+            }
         }
         _ => {}
     }

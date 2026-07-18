@@ -23,9 +23,9 @@ pub use paint::{
     GlyphKey, GlyphPos, PaintCmd, Painter, PainterCaps, RecordingPainter, TinySkiaPainter,
 };
 pub use render::{
-    Layout, Placed, Rect, ScrollArea, caret_index_at, caret_x, hit_click_target, ime_caret_rect,
-    input_caret_at, layout_full_cached, layout_tree, layout_tree_full, paint_scrollbars,
-    paint_tree, render_frame, route_wheel, scrollbar_thumb,
+    Layout, OverlayRegion, Placed, Rect, ScrollArea, caret_index_at, caret_x, hit_click_target,
+    ime_caret_rect, input_caret_at, layout_full_cached, layout_tree, layout_tree_full,
+    overlay_click_gate, paint_scrollbars, paint_tree, render_frame, route_wheel, scrollbar_thumb,
 };
 #[cfg(feature = "backend-vello")]
 pub use vello_backend::{VelloPainter, VelloWin, render_frame_vello};
@@ -126,7 +126,7 @@ struct App {
     _scope: Option<RootHandle>,
     backend: Backend,
     win: Option<WinState>,
-    placed: Vec<Placed>,
+    layout: Layout,
     cursor: (f64, f64),
     hovered: Option<ViewId>,
     pressed: Option<ViewId>,
@@ -166,8 +166,12 @@ impl App {
         self.last_frame_key = Some(frame_key);
         match &mut ws.presenter {
             Presenter::Cpu { surface, .. } => {
-                let (pixmap, placed) = render_frame(&self.doc, size.width, size.height, scale);
-                self.placed = placed;
+                let (pixmap, _) = render_frame(&self.doc, size.width, size.height, scale);
+                self.layout = layout_full_cached(
+                    &self.doc,
+                    size.width as f32 / scale,
+                    size.height as f32 / scale,
+                );
 
                 let (Some(w), Some(h)) =
                     (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
@@ -186,8 +190,12 @@ impl App {
             Presenter::Vello(vw) => {
                 vw.resize(size.width, size.height);
                 // 静止帧(FPS 模式下仍在跑):跳过场景重编码,只重呈现
-                let (placed, presented) = vw.render_cached(&self.doc, scale, unchanged);
-                self.placed = placed;
+                let (_, presented) = vw.render_cached(&self.doc, scale, unchanged);
+                self.layout = layout_full_cached(
+                    &self.doc,
+                    size.width as f32 / scale,
+                    size.height as f32 / scale,
+                );
                 if !presented {
                     // surface 过期/被遮挡等:下一帧重试(与 vello 官方示例一致)
                     ws.window.request_redraw();
@@ -197,7 +205,7 @@ impl App {
         // IME 候选窗跟随光标(调研 21:cursor_area 上报是候选窗定位的全部机制;
         // 光标一动 bump → 重绘 → 重报,与版本键控布局缓存天然一致)
         if self.ime_allowed
-            && let Some((cx, cy, cw, ch)) = ime_caret_rect(&self.doc, &self.placed, scale)
+            && let Some((cx, cy, cw, ch)) = ime_caret_rect(&self.doc, &self.layout.placed, scale)
         {
             ws.window.set_ime_cursor_area(
                 winit::dpi::PhysicalPosition::new(cx as f64, cy as f64),
@@ -227,7 +235,7 @@ impl App {
         let Some(ws) = &mut self.win else { return };
         let scale = ws.window.scale_factor() as f32;
         let doc = self.doc.clone();
-        let placed = &self.placed;
+        let placed = &self.layout.placed;
         ws.access
             .update_if_active(|| a11y::build_tree_update(&doc, placed, scale));
     }
@@ -241,15 +249,18 @@ impl App {
             (self.cursor.1 / scale) as f32,
         );
         let target = self
+            .layout
             .placed
             .iter()
+            .enumerate()
             .rev()
-            .find(|p| {
-                p.hit(lx, ly)
+            .find(|(i, p)| {
+                self.layout.hit_allowed(*i)
+                    && p.hit(lx, ly)
                     && (self.doc.pointer_enter_handler(p.id).is_some()
                         || self.doc.pointer_leave_handler(p.id).is_some())
             })
-            .map(|p| p.id);
+            .map(|(_, p)| p.id);
         if target != self.hovered {
             if let Some(old) = self.hovered
                 && let Some(h) = self.doc.pointer_leave_handler(old)
@@ -265,11 +276,13 @@ impl App {
         }
         // cursor 属性:最上层设了 cursor 的节点决定光标
         let icon = self
+            .layout
             .placed
             .iter()
+            .enumerate()
             .rev()
-            .find_map(|p| {
-                if !p.hit(lx, ly) {
+            .find_map(|(i, p)| {
+                if !self.layout.hit_allowed(i) || !p.hit(lx, ly) {
                     return None;
                 }
                 self.doc
@@ -309,7 +322,7 @@ impl App {
             (self.cursor.0 / scale) as f32,
             (self.cursor.1 / scale) as f32,
         );
-        if let Some(id) = hit_click_target(&self.doc, &self.placed, lx, ly)
+        if let Some(id) = self.layout.hit_click(&self.doc, lx, ly)
             && let Some(handler) = self.doc.click_handler(id)
         {
             // 回调里写 signal → effect 改树 → on_mutate → request_redraw
@@ -606,12 +619,24 @@ impl ApplicationHandler<UserEvent> for App {
                     (self.cursor.0 / scale) as f32,
                     (self.cursor.1 / scale) as f32,
                 );
+                // 弹层关闭手势(调研 25 O2):点最上层自动关闭弹层之外 →
+                // dismiss;OnClickOutside 吞掉该次点击
+                if overlay_click_gate(&self.doc, &self.layout, lx, ly) {
+                    self.sync_ime();
+                    return;
+                }
                 self.pressed = self
+                    .layout
                     .placed
                     .iter()
+                    .enumerate()
                     .rev()
-                    .find(|p| p.hit(lx, ly) && self.doc.pointer_down_handler(p.id).is_some())
-                    .map(|p| p.id);
+                    .find(|(i, p)| {
+                        self.layout.hit_allowed(*i)
+                            && p.hit(lx, ly)
+                            && self.doc.pointer_down_handler(p.id).is_some()
+                    })
+                    .map(|(_, p)| p.id);
                 if let Some(id) = self.pressed
                     && let Some(h) = self.doc.pointer_down_handler(id)
                 {
@@ -620,11 +645,15 @@ impl ApplicationHandler<UserEvent> for App {
                 // 点击设焦(Slint focus-on-click 同款);
                 // 空白区点击不清焦点(桌面惯例)
                 if let Some(p) = self
+                    .layout
                     .placed
                     .iter()
+                    .enumerate()
                     .rev()
-                    .find(|p| p.hit(lx, ly) && self.doc.focusable(p.id))
-                    .copied()
+                    .find(|(i, p)| {
+                        self.layout.hit_allowed(*i) && p.hit(lx, ly) && self.doc.focusable(p.id)
+                    })
+                    .map(|(_, p)| *p)
                 {
                     self.doc.focus(p.id);
                     // 输入框:点击处换算字节偏移定光标
@@ -673,7 +702,7 @@ pub fn run_app(
         _scope: None,
         backend: select_backend(),
         win: None,
-        placed: Vec::new(),
+        layout: Layout::default(),
         cursor: (0.0, 0.0),
         hovered: None,
         pressed: None,
@@ -1697,6 +1726,281 @@ mod tests {
         // 已删节点的动作静默失败(世代键防复用)
         doc.remove(btn);
         assert!(!dispatch_action(&doc, Action::Click, nid));
+    }
+
+    // -----------------------------------------------------------------------
+    // 调研 25:弹层体系验收(O1 锚定 / O2 关闭 / O3 模态 / O5 tooltip)
+    // -----------------------------------------------------------------------
+
+    use sv_reactive::state as ov_state;
+    use sv_ui::{Anchor, CloseBehavior, OverlayLayer, OverlayOpts, Side, overlay_block};
+
+    /// O1:弹层 Placed 追加在基础层之后(后画即在上)、dump 可见、命中优先弹层
+    #[test]
+    fn overlay_paints_after_base_and_hit_prefers_it() {
+        let doc = Doc::new();
+        let open = ov_state(true);
+        let pop_clicks = std::rc::Rc::new(std::cell::RefCell::new(0));
+        let pc = pop_clicks.clone();
+        let (_, _scope) = create_root(|| {
+            let btn = doc.create_button("底部按钮");
+            doc.append(doc.root(), btn);
+            doc.update_style(btn, |s| {
+                s.width = Some(200.0);
+                s.height = Some(60.0);
+            });
+            doc.set_on_click(btn, || {});
+            overlay_block(
+                &doc,
+                move || open.get(),
+                move || Anchor::Point(10.0, 10.0),
+                OverlayOpts::default(),
+                move |d, root| {
+                    d.update_style(root, |s| {
+                        s.width = Some(150.0);
+                        s.height = Some(80.0);
+                    });
+                    let ob = d.create_button("弹层按钮");
+                    d.append(root, ob);
+                    let pc = pc.clone();
+                    d.set_on_click(ob, move || *pc.borrow_mut() += 1);
+                },
+            );
+        });
+        assert!(
+            doc.dump().contains("== overlay"),
+            "dump 应含弹层段:{}",
+            doc.dump()
+        );
+        let layout = layout_tree_full(&doc, 480.0, 400.0);
+        let r = *layout.overlay_regions.first().expect("应有弹层区间");
+        assert!(
+            r.start > 0 && r.end == layout.placed.len(),
+            "弹层应追加在末尾"
+        );
+        // 弹层按钮盖在底部按钮上方 → 重叠处优先命中弹层
+        let hit = layout.hit_click(&doc, 30.0, 30.0).expect("应命中");
+        assert!(
+            layout.placed[r.start..r.end].iter().any(|p| p.id == hit),
+            "重叠处应优先命中弹层"
+        );
+        // 关闭后区间消失、底部按钮恢复命中
+        open.set(false);
+        let layout = layout_tree_full(&doc, 480.0, 400.0);
+        assert!(layout.overlay_regions.is_empty());
+        assert!(layout.hit_click(&doc, 30.0, 30.0).is_some());
+    }
+
+    /// O1:Below 锚定放不下时翻转 Above,最终 clamp 进窗口
+    #[test]
+    fn anchor_below_flips_when_clipped() {
+        let doc = Doc::new();
+        let open = ov_state(true);
+        let anchor_btn = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let ab = anchor_btn.clone();
+        let (_, _scope) = create_root(|| {
+            let spacer = doc.create_view();
+            doc.update_style(spacer, |s| s.height = Some(350.0));
+            doc.append(doc.root(), spacer);
+            let btn = doc.create_button("锚点");
+            doc.append(doc.root(), btn);
+            *ab.borrow_mut() = Some(btn);
+            overlay_block(
+                &doc,
+                move || open.get(),
+                move || Anchor::Node {
+                    id: btn,
+                    side: Side::Below,
+                    gap: 4.0,
+                },
+                OverlayOpts::default(),
+                |d, root| {
+                    d.update_style(root, |s| {
+                        s.width = Some(100.0);
+                        s.height = Some(120.0);
+                    });
+                },
+            );
+        });
+        // 窗口 400 高,锚点 y≈350,下方剩 ~30 放不下 120 → 应翻到上方
+        let layout = layout_tree_full(&doc, 480.0, 400.0);
+        let r = layout.overlay_regions[0];
+        let overlay_rect = layout.placed[r.start].rect;
+        let anchor_rect = layout
+            .placed
+            .iter()
+            .find(|p| p.id == anchor_btn.borrow().unwrap())
+            .unwrap()
+            .rect;
+        assert!(
+            overlay_rect.y + overlay_rect.h <= anchor_rect.y + 0.5,
+            "放不下应翻转到锚点上方:overlay={overlay_rect:?} anchor={anchor_rect:?}"
+        );
+        assert!(overlay_rect.y >= 0.0, "翻转后仍应在窗口内");
+    }
+
+    /// O2:点弹层外 dismiss(OnClickOutside 吞点击);Esc LIFO 逐层关
+    #[test]
+    fn click_outside_and_esc_dismiss_lifo() {
+        use sv_ui::{Key, KeyEvent, Mods, dispatch_key};
+        let doc = Doc::new();
+        let open1 = ov_state(true);
+        let open2 = ov_state(true);
+        let (_, _scope) = create_root(|| {
+            overlay_block(
+                &doc,
+                move || open1.get(),
+                move || Anchor::Point(10.0, 10.0),
+                OverlayOpts {
+                    close: CloseBehavior::OnClickOutside,
+                    on_dismiss: Some(std::rc::Rc::new(move || open1.set(false))),
+                    ..Default::default()
+                },
+                |d, root| {
+                    d.update_style(root, |s| {
+                        s.width = Some(100.0);
+                        s.height = Some(100.0);
+                    });
+                },
+            );
+            overlay_block(
+                &doc,
+                move || open2.get(),
+                move || Anchor::Point(200.0, 10.0),
+                OverlayOpts {
+                    close: CloseBehavior::OnClickOutside,
+                    on_dismiss: Some(std::rc::Rc::new(move || open2.set(false))),
+                    ..Default::default()
+                },
+                |d, root| {
+                    d.update_style(root, |s| {
+                        s.width = Some(100.0);
+                        s.height = Some(100.0);
+                    });
+                },
+            );
+        });
+        let layout = layout_tree_full(&doc, 480.0, 400.0);
+        assert_eq!(layout.overlay_regions.len(), 2);
+        // 点在最上层(弹层 2)之内:不 dismiss、不吞
+        assert!(!overlay_click_gate(&doc, &layout, 250.0, 50.0));
+        assert!(open2.get());
+        // 点在其外:最上层先关,点击被吞
+        assert!(overlay_click_gate(&doc, &layout, 400.0, 300.0));
+        assert!(!open2.get(), "最上层应先关");
+        assert!(open1.get(), "下层不受影响");
+        // Esc:LIFO 关剩下的弹层 1
+        dispatch_key(&doc, &KeyEvent::new(Key::Escape, Mods::NONE));
+        assert!(!open1.get(), "Esc 应关最上层剩余弹层");
+    }
+
+    /// O3:modal 阻断底层命中;Tab 环限定弹层内;关闭恢复原焦点
+    #[test]
+    fn modal_blocks_base_and_traps_focus() {
+        use sv_ui::{Key, KeyEvent, Mods, dispatch_key};
+        let doc = Doc::new();
+        let open = ov_state(false);
+        let base_btn = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let bb = base_btn.clone();
+        let (_, _scope) = create_root(|| {
+            let btn = doc.create_button("底部");
+            doc.append(doc.root(), btn);
+            doc.set_on_click(btn, || {});
+            *bb.borrow_mut() = Some(btn);
+            overlay_block(
+                &doc,
+                move || open.get(),
+                move || Anchor::WindowCenter,
+                OverlayOpts {
+                    modal: true,
+                    close: CloseBehavior::None,
+                    ..Default::default()
+                },
+                |d, root| {
+                    d.update_style(root, |s| {
+                        s.width = Some(200.0);
+                        s.height = Some(100.0);
+                    });
+                    let ok = d.create_button("确定");
+                    d.append(root, ok);
+                    let cancel = d.create_button("取消");
+                    d.append(root, cancel);
+                },
+            );
+        });
+        let base = base_btn.borrow().unwrap();
+        doc.focus(base);
+        // 打开 modal:焦点应移入弹层
+        open.set(true);
+        let focused = doc.focused().expect("modal 打开应带焦点");
+        assert_ne!(focused, base, "焦点应离开底层");
+        // Tab 环限定在弹层内(两个按钮来回)
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..4 {
+            seen.insert(doc.focused().unwrap());
+            dispatch_key(&doc, &KeyEvent::new(Key::Tab, Mods::NONE));
+        }
+        assert_eq!(seen.len(), 2, "Tab 环应只在弹层两按钮间循环");
+        assert!(!seen.contains(&base), "底层按钮不应进入 Tab 环");
+        // 命中阻断:底层按钮不可点
+        let layout = layout_tree_full(&doc, 480.0, 400.0);
+        let base_rect = layout.placed.iter().find(|p| p.id == base).unwrap().rect;
+        assert!(
+            layout
+                .hit_click(&doc, base_rect.x + 1.0, base_rect.y + 1.0)
+                .is_none(),
+            "modal 之下整体不可命中"
+        );
+        // 关闭恢复原焦点
+        open.set(false);
+        assert_eq!(doc.focused(), Some(base), "关闭应恢复原焦点");
+    }
+
+    /// O5:tooltip 悬停延时(代数计数防错位)+ Tooltip 层不可命中
+    #[test]
+    fn tooltip_delay_and_never_hit() {
+        let doc = Doc::new();
+        let target = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let t = target.clone();
+        let (_, _scope) = create_root(|| {
+            let btn = doc.create_button("悬停我");
+            doc.append(doc.root(), btn);
+            *t.borrow_mut() = Some(btn);
+            sv_ui::tooltip(&doc, btn, 10, |d, root| {
+                let txt = d.create_text("提示内容");
+                d.append(root, txt);
+            });
+        });
+        let btn = target.borrow().unwrap();
+        // 悬停 → 延时后出现
+        doc.pointer_enter_handler(btn).unwrap()();
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        sv_ui::tasks::pump();
+        assert!(
+            doc.dump().contains("提示内容"),
+            "延时后应出现:{}",
+            doc.dump()
+        );
+        let layout = layout_tree_full(&doc, 480.0, 400.0);
+        let r = layout
+            .overlay_regions
+            .iter()
+            .find(|r| r.layer == OverlayLayer::Tooltip)
+            .expect("应有 Tooltip 区间");
+        for i in r.start..r.end {
+            assert!(!layout.hit_allowed(i), "Tooltip 恒不可命中");
+        }
+        // 离开即隐;延时期间离开(代数变化)不应再打开
+        doc.pointer_leave_handler(btn).unwrap()();
+        assert!(!doc.dump().contains("提示内容"));
+        doc.pointer_enter_handler(btn).unwrap()();
+        doc.pointer_leave_handler(btn).unwrap()();
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        sv_ui::tasks::pump();
+        assert!(
+            !doc.dump().contains("提示内容"),
+            "代数已变,过期延时不应再打开"
+        );
     }
 
     #[test]

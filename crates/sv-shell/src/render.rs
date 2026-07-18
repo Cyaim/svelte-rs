@@ -64,11 +64,53 @@ pub struct ScrollArea {
     pub max: (f32, f32),
 }
 
+/// 弹层在 `Layout.placed` 中占据的区间(命中阻断与关闭手势的依据;
+/// 调研 25:区间法比"遮罩节点吞事件"可靠——遮罩没 handler 会穿透)
+#[derive(Clone, Copy, Debug)]
+pub struct OverlayRegion {
+    pub root: ViewId,
+    pub start: usize,
+    pub end: usize,
+    pub layer: sv_ui::OverlayLayer,
+    pub modal: bool,
+    pub close: sv_ui::CloseBehavior,
+}
+
 /// 一次布局的完整产物
 #[derive(Clone, Debug, Default)]
 pub struct Layout {
     pub placed: Vec<Placed>,
     pub scroll_areas: Vec<ScrollArea>,
+    pub overlay_regions: Vec<OverlayRegion>,
+}
+
+impl Layout {
+    /// 命中许可:Tooltip 区间恒不可命中;存在 modal 时其 start 之下整体跳过
+    pub fn hit_allowed(&self, idx: usize) -> bool {
+        for r in &self.overlay_regions {
+            if r.layer == sv_ui::OverlayLayer::Tooltip && idx >= r.start && idx < r.end {
+                return false;
+            }
+        }
+        let floor = self
+            .overlay_regions
+            .iter()
+            .filter(|r| r.modal)
+            .map(|r| r.start)
+            .max()
+            .unwrap_or(0);
+        idx >= floor
+    }
+
+    /// 区间感知的最上层可点击命中(渲染壳用;裸 `hit_click_target` 留测试兼容)
+    pub fn hit_click(&self, doc: &Doc, x: f32, y: f32) -> Option<ViewId> {
+        self.placed
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(i, p)| self.hit_allowed(*i) && p.hit(x, y) && doc.click_handler(p.id).is_some())
+            .map(|(_, p)| p.id)
+    }
 }
 
 const ROOT_FONT_SIZE: f32 = 16.0;
@@ -474,8 +516,119 @@ pub fn layout_tree_full(doc: &Doc, logical_w: f32, logical_h: f32) -> Layout {
 
         let mut out = Layout::default();
         walk_taffy(inner, &tree, &map, root, (0.0, 0.0), None, 0, &mut out);
+
+        // 弹层(调研 25):基础层后追加;Popup 注册序,Tooltip 恒最后。
+        // 每弹层一棵独立 taffy 树(游离子树,尺寸=内容,上限=窗口)
+        for pass_tooltip in [false, true] {
+            for e in &inner.overlays {
+                if (e.layer == sv_ui::OverlayLayer::Tooltip) != pass_tooltip {
+                    continue;
+                }
+                let mut otree: taffy::TaffyTree<MeasureCtx> = taffy::TaffyTree::new();
+                otree.disable_rounding();
+                let mut omap: HashMap<u64, ViewId> = HashMap::new();
+                let oroot = build_taffy(inner, &mut otree, &mut omap, e.root, ROOT_FONT_SIZE);
+                otree
+                    .compute_layout_with_measure(
+                        oroot,
+                        taffy::Size {
+                            width: taffy::AvailableSpace::Definite(logical_w),
+                            height: taffy::AvailableSpace::Definite(logical_h),
+                        },
+                        |known, available, _id, ctx, _style| {
+                            measure_leaf(&font, known, available, ctx)
+                        },
+                    )
+                    .expect("sv-shell: 弹层布局失败");
+                let ol = otree.layout(oroot).expect("sv-shell: 弹层根缺布局");
+                let Some(origin) = resolve_anchor(
+                    e.anchor,
+                    ol.size.width,
+                    ol.size.height,
+                    logical_w,
+                    logical_h,
+                    &out.placed,
+                ) else {
+                    continue; // 锚点节点不存在/被裁:本帧不显示
+                };
+                let start = out.placed.len();
+                walk_taffy(inner, &otree, &omap, oroot, origin, None, 0, &mut out);
+                out.overlay_regions.push(OverlayRegion {
+                    root: e.root,
+                    start,
+                    end: out.placed.len(),
+                    layer: e.layer,
+                    modal: e.modal,
+                    close: e.close,
+                });
+            }
+        }
         out
     })
+}
+
+/// 锚点解析(调研 25 §2.4):Node 锚 → 侧向 + 越界翻转;最后 clamp 进窗口
+fn resolve_anchor(
+    anchor: sv_ui::Anchor,
+    ow: f32,
+    oh: f32,
+    lw: f32,
+    lh: f32,
+    placed: &[Placed],
+) -> Option<(f32, f32)> {
+    use sv_ui::{Anchor, Side};
+    let (x, y) = match anchor {
+        Anchor::WindowCenter => (((lw - ow) / 2.0), ((lh - oh) / 2.0)),
+        Anchor::Point(x, y) => (x, y),
+        Anchor::Node { id, side, gap } => {
+            let r = placed.iter().find(|p| p.id == id)?.rect;
+            let (mut x, mut y) = match side {
+                Side::Below => (r.x, r.y + r.h + gap),
+                Side::Above => (r.x, r.y - gap - oh),
+                Side::Right => (r.x + r.w + gap, r.y),
+                Side::Left => (r.x - gap - ow, r.y),
+            };
+            // 主轴放不下且对侧放得下 → 翻转
+            match side {
+                Side::Below if y + oh > lh && r.y - gap - oh >= 0.0 => y = r.y - gap - oh,
+                Side::Above if y < 0.0 && r.y + r.h + gap + oh <= lh => y = r.y + r.h + gap,
+                Side::Right if x + ow > lw && r.x - gap - ow >= 0.0 => x = r.x - gap - ow,
+                Side::Left if x < 0.0 && r.x + r.w + gap + ow <= lw => x = r.x + r.w + gap,
+                _ => {}
+            }
+            (x, y)
+        }
+    };
+    Some((
+        x.clamp(0.0, (lw - ow).max(0.0)),
+        y.clamp(0.0, (lh - oh).max(0.0)),
+    ))
+}
+
+/// 点击前的弹层关闭手势判定(纯函数,离屏可测)。返回是否吞掉该次点击:
+/// OnClickOutside 点外 → dismiss + 吞;OnAnyClick → dismiss + 不吞(点选项照常)
+pub fn overlay_click_gate(doc: &Doc, layout: &Layout, x: f32, y: f32) -> bool {
+    use sv_ui::{CloseBehavior, OverlayLayer};
+    let Some(r) = layout
+        .overlay_regions
+        .iter()
+        .rev()
+        .find(|r| r.layer == OverlayLayer::Popup && r.close != CloseBehavior::None)
+    else {
+        return false;
+    };
+    let inside = layout.placed[r.start..r.end].iter().any(|p| p.hit(x, y));
+    match r.close {
+        CloseBehavior::OnClickOutside if !inside => {
+            doc.dismiss_overlay(r.root);
+            true
+        }
+        CloseBehavior::OnAnyClick => {
+            doc.dismiss_overlay(r.root);
+            false
+        }
+        _ => false,
+    }
 }
 
 /// 兼容入口:只要 Placed 列表
