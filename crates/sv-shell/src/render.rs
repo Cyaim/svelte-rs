@@ -262,12 +262,35 @@ fn map_align(a: sv_ui::AlignItems) -> taffy::AlignItems {
 
 /// build 期递归建 TaffyTree(View → with_children,叶子 → leaf+context;
 /// 继承字号在此解析,taffy 不知道继承)
+/// 建树递归深度上限。**超了就把该子树当叶子处理,而不是继续递归爆栈**。
+///
+/// 实测(membench `--scene deep`,Windows 主线程 1MB 栈):约 400 层时
+/// `build_taffy`/`walk_taffy` 的递归会**栈溢出**,而同样深度加 `--no-render`
+/// 安然无恙 —— 爆的确实是这两个递归,不是建树也不是析构。
+///
+/// 为什么不改成显式栈的迭代版:那是正解,但两个递归都要改、都要重测,
+/// 而真实 UI 不会有 256 层嵌套(有的话是生成器写崩了)。这里先用一道
+/// **可诊断的截断**换掉"不可恢复的崩溃":栈溢出既不能 catch 也没有栈回溯,
+/// 是所有失败模式里最难查的一种(R4 去 panic 同一纪律:宁可降级,不要崩)。
+const MAX_TREE_DEPTH: usize = 256;
+
 fn build_taffy(
     inner: &DocumentInner,
     tree: &mut taffy::TaffyTree<MeasureCtx>,
     map: &mut HashMap<u64, ViewId>,
     id: ViewId,
     inherited_font: f32,
+) -> taffy::NodeId {
+    build_taffy_at(inner, tree, map, id, inherited_font, 0)
+}
+
+fn build_taffy_at(
+    inner: &DocumentInner,
+    tree: &mut taffy::TaffyTree<MeasureCtx>,
+    map: &mut HashMap<u64, ViewId>,
+    id: ViewId,
+    inherited_font: f32,
+    depth: usize,
 ) -> taffy::NodeId {
     let n = &inner.nodes[id];
     let fs = if n.style.font_size.is_nan() {
@@ -276,11 +299,17 @@ fn build_taffy(
         n.style.font_size
     };
     let tstyle = to_taffy(&n.style);
-    let node = if n.kind == ElementKind::View {
+    // 到顶就不再往下:该子树整体当叶子(零尺寸),界面会缺一块,
+    // 但进程还活着、日志里写清了是谁太深
+    let too_deep = depth >= MAX_TREE_DEPTH;
+    if too_deep {
+        report_too_deep(id);
+    }
+    let node = if n.kind == ElementKind::View && !too_deep {
         let children: Vec<taffy::NodeId> = n
             .children
             .iter()
-            .map(|c| build_taffy(inner, tree, map, *c, fs))
+            .map(|c| build_taffy_at(inner, tree, map, *c, fs, depth + 1))
             .collect();
         tree.new_with_children(tstyle, &children)
             .expect("sv-shell: taffy 建节点失败")
@@ -354,7 +383,10 @@ fn measure_leaf(
             width: 200.0,
             height: crate::text::line_height(ctx.px) * f32::from(ctx.rows.max(1)),
         },
-        ElementKind::View => unreachable!("View 不是叶子"),
+        // View 通常不是叶子——**除了被 MAX_TREE_DEPTH 截断的那一个**:
+        // 它带着 View 的 kind 进了 new_leaf_with_context。给零尺寸,
+        // 于是超深子树表现为"这里缺一块",而不是 unreachable! 崩掉
+        ElementKind::View => taffy::Size::ZERO,
     }
 }
 
@@ -650,6 +682,25 @@ fn effective_opacity(inner: &DocumentInner, id: ViewId) -> f32 {
 /// 其余不动 —— 与浏览器 textarea 同款"最小移动"
 fn input_scroll_y(caret_y: f32, caret_h: f32, content_h: f32) -> f32 {
     (caret_y + caret_h - content_h).max(0.0)
+}
+
+/// 超深子树的限流告警:前三次逐条报,之后每 600 次报一次。
+/// 不限流的话一棵病树能刷屏刷到看不见别的东西
+fn report_too_deep(id: ViewId) {
+    use std::cell::Cell;
+    thread_local! {
+        static HITS: Cell<u32> = const { Cell::new(0) };
+    }
+    let n = HITS.with(|h| {
+        h.set(h.get() + 1);
+        h.get()
+    });
+    if n <= 3 || n % 600 == 0 {
+        eprintln!(
+            "sv-shell: 子树嵌套超过 {MAX_TREE_DEPTH} 层(节点 {id:?}),\
+             该子树按叶子处理以避免栈溢出;累计 {n} 次"
+        );
+    }
 }
 
 /// 单行输入的横向滚移(逻辑 px):光标顶到右内边时把文本整体推左。

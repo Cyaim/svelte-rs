@@ -216,6 +216,13 @@ jobs:
       - name: clippy (blocking)
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # **cfg 掉的代码 clippy 同样看不见** —— 与那次 vello 编译回归同一个病根。
+      # 补这一道时当场逮到一条只在 vello 特性下出现的 `large_enum_variant`
+      # (Presenter::Vello 挂着整个 wgpu device/queue/surface),默认特性道
+      # 一辈子照不到。只跑 sv-shell:特性只影响它
+      - name: clippy(backend-vello)
+        run: cargo clippy -p sv-shell --all-targets --features backend-vello -- -D warnings
+
   msrv:
     name: MSRV (${{ env.MSRV }})
     runs-on: ubuntu-latest

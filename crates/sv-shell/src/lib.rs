@@ -126,8 +126,12 @@ enum Presenter {
         surface: softbuffer::Surface<Arc<Window>, Arc<Window>>,
         _context: softbuffer::Context<Arc<Window>>,
     },
+    /// **装箱**:`VelloWin` 里挂着 wgpu 的 device/queue/surface/renderer,
+    /// 比 CPU 那支大一个数量级,不装箱会让每个 `Presenter` 都按 GPU 的尺寸
+    /// 占位(clippy `large_enum_variant`)。每窗口只有一个 Presenter,
+    /// 这次分配一辈子就一次
     #[cfg(feature = "backend-vello")]
-    Vello(vello_backend::VelloWin),
+    Vello(Box<vello_backend::VelloWin>),
 }
 
 fn cpu_presenter(window: &Arc<Window>) -> Result<Presenter, ShellError> {
@@ -591,7 +595,7 @@ impl ApplicationHandler<UserEvent> for App {
             Backend::Vello => {
                 let size = window.inner_size();
                 match vello_backend::VelloWin::new(window.clone(), size.width, size.height) {
-                    Ok(vw) => Ok(Presenter::Vello(vw)),
+                    Ok(vw) => Ok(Presenter::Vello(Box::new(vw))),
                     Err(e) => {
                         eprintln!("sv-shell: vello 初始化失败({e}),回退 CPU 渲染后端");
                         self.backend = Backend::Cpu;
@@ -2508,6 +2512,39 @@ cd",
                 "30k 逐行唯一文本布局 {distinct_ms:.2}ms 出现灾难性回归"
             );
         }
+    }
+
+    /// 超深嵌套**截断而不是爆栈**。栈溢出既 catch 不了也没有栈回溯,
+    /// 是所有失败模式里最难查的一种;宁可界面缺一块并在日志里说清楚。
+    /// 实测天花板约 400 层(Windows 主线程 1MB),上限设 256 留一倍余量
+    #[test]
+    fn deeply_nested_tree_truncates_instead_of_overflowing() {
+        let doc = Doc::new();
+        let (_, _scope) = create_root(|| {
+            // 600 层:旧版在这里直接栈溢出(membench --scene deep --depth 600 复现过)
+            let mut parent = doc.root();
+            for _ in 0..600 {
+                let v = doc.create_view();
+                doc.append(parent, v);
+                parent = v;
+            }
+            // 最深处塞一个文本:被截断之后它不该出现在布局里
+            let t = doc.create_text("最深处");
+            doc.append(parent, t);
+        });
+
+        let layout = layout_tree_full(&doc, 480.0, 400.0);
+        // 没崩就是主要结论;其次是"确实截断了":布局节点数远少于 601
+        assert!(
+            layout.placed.len() < 601,
+            "超过上限的子树应被截断,实际 {} 个节点",
+            layout.placed.len()
+        );
+        assert!(
+            layout.placed.len() > 200,
+            "上限以内的部分要照常布局,实际 {} 个",
+            layout.placed.len()
+        );
     }
 
     /// AccessKit 语义树金样(调研 24 P4:零窗口零平台):

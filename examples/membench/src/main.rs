@@ -399,11 +399,13 @@ fn build_rows_into(doc: &Doc, parent: ViewId, rows: usize) -> Vec<Signal<i32>> {
 /// fg/font_size 两条继承路径也在被压。
 ///
 /// **探针密度按节点数算,不是"每层一个"**:每层一个会让 Text 总数 = depth,
-/// 于是 200↔4 的对照里除了深度还多变了一个变量。实测(i5-12400/release/CPU)
-/// 每层一个 Text 时比值 13.6:9.9 = **1.38**,把 Text 数改成与深度无关后
-/// 12.3:10.3 = **1.20** —— 差出来的那一半根本不是深度,是多出来的 196 个
-/// Text 的 shape 成本。同理也核过 opacity:去掉那几层半透明后比值不动
-/// (1.38 → 1.38),说明 alpha 混合不是这里的变量,不用为它做等量化。
+/// 于是 200↔4 的对照里除了深度还多变了一个变量 —— 深档白多 196 个 Text,
+/// 那 196 次 shape 是纯加成、跟深度毫无关系。实测(i5-12400/release/CPU,
+/// 两档交错跑取均值):每层一个 Text 时 13.6:9.9 = **1.38**,改成按节点数
+/// 定密度(两档都是 ~180 个 Text)后 13.1:10.8 = **1.21**,虚报的 0.17 全是
+/// 文本成本。同理也核过 opacity(深档有 3 层 0.92、浅档一层没有,会不会是
+/// alpha 混合更慢?):去掉那几层后比值 1.38 → 1.38 纹丝不动,所以不必
+/// 为它做等量化。
 fn build_deep(doc: &Doc, controls: usize, depth: usize) -> Vec<Signal<i32>> {
     /// 每多少个子节点插一个 Text 探针(节点总数固定 → 两档探针数也固定)
     const TEXT_EVERY: usize = 16;
@@ -465,8 +467,9 @@ fn build_deep(doc: &Doc, controls: usize, depth: usize) -> Vec<Signal<i32>> {
 ///
 /// 压的是 Parley measure 缓存的两条路:
 /// - `--text-pool 0`(默认):每帧生成从没见过的串 = 全 miss,真跑 parley 布局;
-/// - `--text-pool N`:在 N 个串里循环 = 全 hit(N 远小于缓存容量 4096),量出
-///   "改文本"本身的地板价(绑定重跑 + set_text + 版本 bump + 重绘)。
+/// - `--text-pool N`:在 N 个串里循环 = 全 hit(N 远小于缓存容量下限 4096 ——
+///   容量已改成自适应的 [4096, 65536],见 `sv_shell` text.rs 的 `next_cap`),
+///   量出"改文本"本身的地板价(绑定重跑 + set_text + 版本 bump + 重绘)。
 ///
 /// 两者相减 = 测量阶段 parley 布局的单价。注意绘制端的 `text::shape` **没有缓存**,
 /// 两边都得付,所以这个差值是 measure 的下界而不是文本栈的全部成本。
@@ -552,12 +555,12 @@ fn build_scroll(doc: &Doc, rows: usize) -> (ViewId, f32) {
 /// **左旋 1 是 key 查找的最好情况,不是最坏情况**:`each_block_keyed` 用
 /// `old.iter().position(...)` 线性查 old 表,左旋后每次命中都落在剩余 old 表的
 /// 第 1 位,单次 O(1)。所以本场景压不到那条 O(n²) 查找——想压它得让顺序**逆序**
-/// 或大步长旋转。实测 600→1200→2400 行是 22→44→89ms 的**线性**,两条 O(n²)
-/// 项(查找、retain)在这个规模上都还没抬头。
+/// 或大步长旋转。实测 600→1200→2400 行是 21.2→42.1→83.6ms 的**线性**,两条
+/// O(n²) 项(查找、retain)在这个规模上都还没抬头。
 ///
 /// 实测结论(见 README):600–2400 行档两者同价,但原因不是"两边都 O(n²)",
 /// 而是**两边的 reconcile 都只占帧成本一小块**:同规模 `rows --mutate` 基线
-/// 19.5ms,keyed 22.1 / unkeyed 21.2 —— 重排 2.6ms、重建 1.7ms,90% 的帧时间是
+/// 19.7ms,keyed 21.8 / unkeyed 21.4 —— 重排 2.0ms、重建 1.7ms,90% 的帧时间是
 /// 两档共有的布局+绘制。keyed each 的价值是**状态保留**,不是帧成本。
 fn build_churn(doc: &Doc, rows: usize, keyed: bool) -> Signal<Vec<u32>> {
     let items = state((0..rows as u32).collect::<Vec<u32>>());
