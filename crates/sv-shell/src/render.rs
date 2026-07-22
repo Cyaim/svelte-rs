@@ -976,7 +976,7 @@ pub fn render_frame(doc: &Doc, phys_w: u32, phys_h: u32, scale: f32) -> (Pixmap,
 }
 
 /// 点击命中 TextInput 时:窗口逻辑坐标 → 值内字节偏移(含 padding/border 内缩)。
-/// 溢出滚移与绘制层同源([`input_scroll_x`] / [`input_scroll_y`]),长文本尾部
+/// 溢出滚移与绘制层同源(`input_scroll_x` / `input_scroll_y`,私有),长文本尾部
 /// 点击不再偏到左边;多行时 `ly` 决定落在第几行
 pub fn input_caret_at(doc: &Doc, p: &Placed, lx: f32, ly: f32) -> usize {
     doc.read(|inner| {

@@ -35,7 +35,7 @@ struct RegisteredFont {
 }
 
 /// 字体身份句柄(调研 24 P0"载体扩宽"):glyph run 带字体身份,
-/// 光栅缓存/GPU FontData 都按 `key` 索引。键由 [`register`] 按 fontique
+/// 光栅缓存/GPU FontData 都按 `key` 索引。键由私有的 `register` 按 fontique
 /// Blob id 生成,同帧多字体 fallback 混排即多个 key
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct FontHandle {

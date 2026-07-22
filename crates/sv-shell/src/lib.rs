@@ -26,7 +26,10 @@ pub use render::{
     overlay_click_gate, paint_scrollbars, paint_tree, render_frame, route_wheel, route_wheel_with,
     scrollbar_drag_offset, scrollbar_grab, scrollbar_thumb,
 };
-pub use text::{FontHandle, caret_index_at, caret_x, selection_rects};
+pub use text::{
+    FontHandle, caret_index_at, caret_index_at_point, caret_rect, caret_x, line_height,
+    selection_rects, selection_rects_wrapped,
+};
 // ShellError 定义在下方(与窗口/呈现代码同处),此处不重复导出
 #[cfg(feature = "backend-vello")]
 pub use vello_backend::{VelloPainter, VelloWin, render_frame_vello};
