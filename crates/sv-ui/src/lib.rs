@@ -322,6 +322,104 @@ pub enum ElementKind {
     Checkbox,
     /// 单行文本输入(value 复用 text 字段,编辑态在 [`ViewNode::input`])
     TextInput,
+    /// 动画叶子(PAG / Lottie / 离线转出的序列帧),载荷在 [`ViewNode::anim`]。
+    ///
+    /// **只有这一个 kind,不叫 `Pag` 也不叫 `Lottie`**(裁决见
+    /// `docs/plans/pag-2-integration.md` §0):格式差异全部收在 [`AnimSource`] 里,
+    /// 以后加 SVG-animate、APNG 都不必再动 `ElementKind` —— 而动 `ElementKind`
+    /// 是要在全仓六十多处 match 上留疤的事。
+    /// 前端标签同理叫 `<animation>` 不叫 `<pag>`:**标签描述用途,不绑格式**
+    /// (`textarea` 是同款先例:前端有 `Tag::TextArea`,运行时只有一个 kind)。
+    Animation,
+}
+
+/// 动画叶子的载荷。
+///
+/// # 为什么这里没有任何像素或矢量数据
+///
+/// sv-ui 是双前端的编译目标,依赖面必须干净(与 `Painter` 边界同一条纪律)——
+/// 它**不能**认识 `velato::Composition`,也不能认识一张解码后的位图。
+/// 所以内容只留一个**不透明句柄**,由渲染壳侧的注册表解析
+/// (`sv_shell::text` 的 `FontHandle` 是同款先例)。
+///
+/// 这里留下的只有布局与时间轴真正需要的东西:固有尺寸、帧率、帧数、当前帧。
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct AnimData {
+    pub source: AnimSource,
+    /// 固有尺寸(逻辑 px)。**进布局** —— 改它是 `Measure` 级变更
+    pub intrinsic: (f32, f32),
+    /// 素材帧率。**注意它与屏幕刷新率无关**:24fps 的素材在 144Hz 屏上
+    /// 每 6 个 vsync 才该换一帧,这正是省电的来处(见 ADR-6 那段警告)
+    pub frame_rate: f32,
+    pub frame_count: u32,
+    /// 当前帧号。**由帧循环写入,动画自己不持有时钟**
+    /// (裁决见 pag-2 §0:PAG 不拥有时钟)
+    pub frame: u32,
+    pub looped: bool,
+    pub playing: bool,
+}
+
+/// 动画内容的来源。**加新格式加变体,不加 `ElementKind`**
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AnimSource {
+    /// 位图序列帧:PAG 的位图序列档,或任何离线转出的帧序列。
+    /// 渲染 = 每帧一次 `draw_image`,成本与素材复杂度无关(恒定)
+    Frames { handle: u64 },
+    /// 矢量:Lottie(经 `sv-lottie`)。渲染成本随素材复杂度走
+    Vector { handle: u64 },
+}
+
+impl AnimData {
+    /// 还没接上内容的占位动画:零尺寸、单帧、不播。
+    ///
+    /// 模板数据面([`tmpl`])建不出真的动画 —— 内容句柄是运行期才有的东西。
+    /// 所以数据面先建这个占位,再由 `Bind::Wire` 把真内容接上
+    pub fn placeholder() -> Self {
+        Self {
+            source: AnimSource::Frames { handle: 0 },
+            intrinsic: (0.0, 0.0),
+            frame_rate: 0.0,
+            frame_count: 0,
+            frame: 0,
+            looped: false,
+            playing: false,
+        }
+    }
+
+    /// 时长(毫秒)。帧率为 0 时返回 0 而不是除零
+    pub fn duration_ms(&self) -> f32 {
+        if self.frame_rate <= 0.0 || self.frame_count == 0 {
+            return 0.0;
+        }
+        self.frame_count as f32 * 1000.0 / self.frame_rate
+    }
+
+    /// 播放 `elapsed_ms` 之后该显示第几帧。
+    ///
+    /// 循环用 `rem_euclid` 而不是 `%`:负的 elapsed(时钟回拨、或调用方
+    /// 传了个更早的时间戳)在 `%` 下是负余数;Rust 的 float→int `as` 会
+    /// **饱和**到 0(实测),于是后果是画面突然跳回第 0 帧 —— 不崩,但看得见
+    pub fn frame_at(&self, elapsed_ms: f32) -> u32 {
+        if self.frame_count == 0 || self.frame_rate <= 0.0 {
+            return 0;
+        }
+        let raw = elapsed_ms * self.frame_rate / 1000.0;
+        if !raw.is_finite() {
+            return 0;
+        }
+        let last = self.frame_count - 1;
+        if self.looped {
+            let n = self.frame_count as f32;
+            (raw.rem_euclid(n) as u32).min(last)
+        } else {
+            // 不循环:钳在最后一帧(不是回到 0,那会闪一下)
+            if raw <= 0.0 {
+                0
+            } else {
+                (raw as u32).min(last)
+            }
+        }
+    }
 }
 
 pub struct ViewNode {
@@ -351,6 +449,9 @@ pub struct ViewNode {
     pub on_focus_change: Option<Rc<dyn Fn(bool)>>,
     /// TextInput 的编辑态(其它元素恒 None;Box 控制节点大小预算)
     pub input: Option<Box<input::InputState>>,
+    /// Animation 的载荷(其它元素恒 None;Box 同款,不让 60 字节的动画载荷
+    /// 把每个 Text 节点都撑大)
+    pub anim: Option<Box<AnimData>>,
     /// 滚动偏移(overflow: Scroll 的 View;真源在树上,与 checked 同款)
     pub scroll_x: f32,
     pub scroll_y: f32,
@@ -393,6 +494,7 @@ impl Doc {
     pub fn new() -> Self {
         let mut nodes = SlotMap::with_key();
         let root = nodes.insert(ViewNode {
+            anim: None,
             kind: ElementKind::View,
             text: String::new(),
             checked: false,
@@ -536,6 +638,8 @@ impl Doc {
             on_key_capture: None,
             on_focus_change: None,
             input: (kind == ElementKind::TextInput).then(Default::default),
+            // 与 input 同款:只有对应 kind 才分配
+            anim: (kind == ElementKind::Animation).then(|| Box::new(AnimData::placeholder())),
             scroll_x: 0.0,
             scroll_y: 0.0,
             on_scroll: None,
@@ -570,6 +674,70 @@ impl Doc {
     /// 编辑操作走 [`input::apply_edit`],IME 走 [`input::handle_ime`])
     pub fn create_text_input(&self) -> ViewId {
         self.create(ElementKind::TextInput, "")
+    }
+
+    /// 建一个动画叶子。内容句柄由渲染壳侧的注册表给出 —— sv-ui 不认识它
+    pub fn create_animation(&self, data: AnimData) -> ViewId {
+        let id = self.create(ElementKind::Animation, "");
+        self.with_inner_mut(|inner| {
+            if let Some(n) = inner.nodes.get_mut(id) {
+                n.anim = Some(Box::new(data));
+            }
+        });
+        // create 已经 bump 过一次(Paint,游离节点);这里再记一条 Measure,
+        // 因为固有尺寸刚刚从 0×0 变成了真实尺寸
+        self.bump(dirty::DirtyItem::Measure { id });
+        id
+    }
+
+    pub fn anim_of(&self, id: ViewId) -> Option<AnimData> {
+        self.read(|inner| inner.nodes.get(id).and_then(|n| n.anim.as_deref().copied()))
+    }
+
+    /// 换当前帧。**这是纯绘制** —— 动画的盒子大小由 `intrinsic` 定,与帧号无关。
+    /// 这条是动画能便宜的全部原因:一秒 60 次帧号变更,一次布局都不触发
+    pub fn set_anim_frame(&self, id: ViewId, frame: u32) {
+        {
+            let mut inner = self.0.borrow_mut();
+            let Some(a) = inner.nodes.get_mut(id).and_then(|n| n.anim.as_deref_mut()) else {
+                return;
+            };
+            if a.frame == frame {
+                return;
+            }
+            a.frame = frame;
+        }
+        self.bump(dirty::DirtyItem::Paint);
+    }
+
+    /// 播放 / 暂停。不改任何几何,纯绘制(暂停帧照样要画出来)
+    pub fn set_anim_playing(&self, id: ViewId, playing: bool) {
+        {
+            let mut inner = self.0.borrow_mut();
+            let Some(a) = inner.nodes.get_mut(id).and_then(|n| n.anim.as_deref_mut()) else {
+                return;
+            };
+            if a.playing == playing {
+                return;
+            }
+            a.playing = playing;
+        }
+        self.bump(dirty::DirtyItem::Paint);
+    }
+
+    /// 换内容(占位 → 真素材,或切一个新素材)。**固有尺寸可能变 → Measure**
+    pub fn set_anim_data(&self, id: ViewId, data: AnimData) {
+        {
+            let mut inner = self.0.borrow_mut();
+            let Some(a) = inner.nodes.get_mut(id).and_then(|n| n.anim.as_deref_mut()) else {
+                return;
+            };
+            if *a == data {
+                return;
+            }
+            *a = data;
+        }
+        self.bump(dirty::DirtyItem::Measure { id });
     }
 
     /// 可变访问树(crate 内部:编辑内核用;借用期间不得调用户回调)
@@ -1281,6 +1449,23 @@ impl Doc {
                     n.text
                 )),
                 ElementKind::TextInput => out.push_str(&format!("{pad}[input \"{}\"]\n", n.text)),
+                // dump 是结构快照,**刻意不印内容句柄** —— 句柄是运行期分配的,
+                // 印出来会让快照随注册顺序变化,金样测试就废了
+                ElementKind::Animation => {
+                    let a = n
+                        .anim
+                        .as_deref()
+                        .copied()
+                        .unwrap_or(AnimData::placeholder());
+                    out.push_str(&format!(
+                        "{pad}[anim {}x{} {}/{} {}]\n",
+                        a.intrinsic.0,
+                        a.intrinsic.1,
+                        a.frame,
+                        a.frame_count,
+                        if a.playing { "播放" } else { "暂停" }
+                    ));
+                }
             }
             for c in &n.children {
                 walk(inner, *c, depth + 1, out);

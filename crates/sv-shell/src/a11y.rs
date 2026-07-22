@@ -115,6 +115,11 @@ fn collect(doc: &Doc, placed: &[Placed], scale: f32) -> (Vec<(NodeId, Node)>, No
                         Role::TextInput
                     }
                 }
+                // 动画对读屏来说就是一张图:没有可读结构,只有一个名字。
+                // 名字由 `set_accessible_label` 给 —— **没给就是无障碍缺陷**
+                // (与 <img> 缺 alt 同性质),但这里不该编一个,
+                // 编出来的名字("动画")比没有更糟:读屏会以为它有意义
+                ElementKind::Animation => Role::Image,
             };
             let mut node = Node::new(role);
             // 名称:aria-label 覆盖优先,否则取节点文本

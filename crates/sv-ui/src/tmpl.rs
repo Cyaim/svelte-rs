@@ -529,6 +529,10 @@ fn stamp_node(doc: &Doc, parent: ViewId, node: &TNode, binders: &[Binder]) {
                 ElementKind::Button => doc.create_button(label),
                 ElementKind::Checkbox => doc.create_checkbox(),
                 ElementKind::TextInput => doc.create_text_input(),
+                // 数据面建不出真的动画:内容句柄是运行期才有的东西(注册表在
+                // 渲染壳侧)。所以先建占位,再由 `Bind::Wire` 把真素材接上 ——
+                // 这正是模块头裁决 2 里"逃生舱"的用途
+                ElementKind::Animation => doc.create_animation(crate::AnimData::placeholder()),
             };
             doc.append(parent, el);
             // 静态样式一次性应用:一次 update_style = 一次 bump,

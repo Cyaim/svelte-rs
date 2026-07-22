@@ -165,6 +165,9 @@ struct MeasureCtx {
     wrap: bool,
     /// TextInput 的可见行数:1 = 单行 `<input>`,>1 = 多行 `<textarea>`
     rows: u16,
+    /// Animation 的固有尺寸(逻辑 px)。**与帧号无关** —— 动画换帧不改盒子,
+    /// 这正是 `set_anim_frame` 能定级为纯绘制的依据
+    intrinsic: (f32, f32),
 }
 
 // ---------------------------------------------------------------------------
@@ -358,6 +361,7 @@ fn build_taffy_at(
                     .as_deref()
                     .filter(|i| i.multiline)
                     .map_or(1, |i| i.rows),
+                intrinsic: n.anim.as_deref().map_or((0.0, 0.0), |a| a.intrinsic),
             },
         )
         .expect("sv-shell: taffy 建叶子失败")
@@ -414,6 +418,13 @@ fn measure_leaf(
         ElementKind::TextInput => taffy::Size {
             width: 200.0,
             height: crate::text::line_height(ctx.px) * f32::from(ctx.rows.max(1)),
+        },
+        // 动画的固有尺寸就是素材尺寸,不随帧号变。
+        // 素材还没接上(占位)时是 0×0 —— 于是"忘了接素材"表现为界面上缺一块,
+        // 而不是撑出一个莫名其妙的大洞
+        ElementKind::Animation => taffy::Size {
+            width: ctx.intrinsic.0,
+            height: ctx.intrinsic.1,
         },
         // View 通常不是叶子——**除了被 MAX_TREE_DEPTH 截断的那一个**:
         // 它带着 View 的 kind 进了 new_leaf_with_context。给零尺寸,
@@ -954,6 +965,12 @@ pub fn paint_tree(doc: &Doc, placed: &[Placed], painter: &mut dyn Painter, scale
             }
 
             match n.kind {
+                // 【接线未完成】动画的像素要走 `Painter::draw_image`,那个动词
+                // 正在并行落地中。**这里刻意什么都不画**——不画占位方块,
+                // 因为占位方块会让"素材没接上"看起来像"接上了但内容是灰的",
+                // 而前者是配置错误、后者是渲染错误,查的方向完全不同。
+                // 现在的表现是:布局占位在(固有尺寸生效),但那块是背景色。
+                ElementKind::Animation => {}
                 ElementKind::Text => {
                     let fg = with_opacity(resolve_fg(inner, p.id), op);
                     // 断行在逻辑坐标做,与布局(taffy measure)同源;
