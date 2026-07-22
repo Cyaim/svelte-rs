@@ -766,6 +766,27 @@ pub fn create_root<R>(f: impl FnOnce() -> R) -> (R, RootHandle) {
     })
 }
 
+/// 在 `root` 作用域**之下**执行 `f`:期间创建的节点挂到它名下,而不是当前 owner。
+///
+/// 为什么需要它:`create_root` 挂在**当前** owner 下,所以在 effect 内部建的
+/// 作用域会成为该 effect 的子节点 —— effect 重跑先销毁子树,那个作用域连同
+/// 里面的 signal/effect 一起没了。keyed each 的行必须活过列表 effect 的重跑,
+/// 又要保住 context 沿 owner 链的可达性(`detached` 会把链整个断掉),
+/// 于是:预先在调用方作用域里建一个宿主 root,行统统挂它名下。
+pub fn with_owner<R>(root: &RootHandle, f: impl FnOnce() -> R) -> R {
+    RT.with(|rtc| {
+        let prev = rtc.borrow_mut().owner.replace(root.id);
+        struct G<'a>(&'a RefCell<Runtime>, Option<NodeId>);
+        impl Drop for G<'_> {
+            fn drop(&mut self) {
+                self.0.borrow_mut().owner = self.1;
+            }
+        }
+        let _g = G(rtc, prev);
+        f()
+    })
+}
+
 /// 当前线程 runtime 里的节点总数(测试/调试用)
 #[doc(hidden)]
 pub fn debug_node_count() -> usize {

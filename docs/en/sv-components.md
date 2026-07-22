@@ -101,6 +101,18 @@ Mixed static/interpolated text compiles to a single `bind_text` binding; fully s
 
 `{#each expr}` without `as` renders the block N times. Keyed `{#each}` cannot yet combine with an index or `{:else}` (compile error). Branch/row destruction disposes state and bindings created inside the block.
 
+**The binding of a keyed row is reactive** (ADR-7): inside the row, `it` is that row's
+`Signal<T>`, so a row whose key stayed the same but whose content changed **updates in
+place** — no rebuild, no lost row state — and when the order is unchanged the tree isn't
+touched at all. The cost: the binding must be a **single identifier** (destructure with
+`{@const}` inside the row instead), and the item type needs `Clone + PartialEq`.
+Non-keyed `{#each}` is unchanged: still a whole-block rebuild with a plain-value binding.
+
+⚠️ **Component props are snapshots**: `<TaskRow label={it.1} />` reads the value once,
+when the row is built. Markup written directly in the row (`<text>{it.1}</text>`) follows
+content updates; a prop passed into a child component does not — pass a signal for that
+(see `$bindable`).
+
 ### `{#await}` / `{:then}` / `{:catch}`
 
 ```svelte

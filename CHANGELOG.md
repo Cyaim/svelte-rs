@@ -35,6 +35,14 @@ sv-shell),按依赖序推送;`examples/` 不发布。
 
 ### 变更
 
+- **keyed `{#each}` 行内容原地更新(ADR-7)**:行改持 `Signal<T>`,同 key 换内容
+  不再显示旧数据(顺带修掉"列表一变就把所有行作用域悄悄销毁"的 bug);顺序未变
+  时零树改动。迁移:项类型需 `Clone + PartialEq`;keyed 绑定名须为单个标识符
+  (解构改用 `{@const}`);`sv_ui::each_block_keyed` 的 row 回调签名改为
+  `Fn(&Doc, ViewId, Signal<T>)`。
+- 新增 `sv_reactive::with_owner`:在指定作用域下建节点(effect 内建"活过重跑"的
+  子作用域,同时保住 context 沿 owner 链可达)。
+
 - **双前端共享 codegen 内核(ADR-2 无悔三步 ①)**:新增 `sv_compiler::emit`
   作为两个前端对 sv-ui 的唯一发射口;`sv-macro` 现依赖 `sv-compiler`。
   对用户无行为变化(两条路线生成的代码形状不变)。

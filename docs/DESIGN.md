@@ -203,9 +203,24 @@ N 次重绘请求,现在是一帧一轮。
 **未做**:与 vsync 的深度对齐(mailbox 呈现模式,见 ADR-9 后续阶梯)、
 鸿蒙 `OH_NativeVSync` 接线(R5)。
 
-### ADR-7 each 块:保留 Svelte 的 keyed reconcile 设计(未实现)
-现状是整块重建(`sv_ui::each_block`)。目标形态:每项持有 `Signal<Item>`,内容变化走
-原地 set,reconcile 只处理 key 的增删移;seen-set 启发式 vs LIS 待场景树搬移成本基准后定。
+### ADR-7(2026-07-22 落地)each 块:keyed 行持有 `Signal<Item>`,reconcile 只管 key
+> 原文记为"未实现,现状整块重建"。实际 keyed 复用早已存在,但**行只在构建时
+> 读一次 `T`** ——同 key 换内容的行会永远显示旧数据。更隐蔽的是:行作用域用
+> `create_root` 建在 effect 内部,而 effect 重跑先销毁子树,于是**每次列表变化
+> 都把所有行的 signal/effect 悄悄销毁**(视图节点还在,所以看不出来)。
+
+**现在的形态**:每行持有 `Signal<T>`,复用时 `old != new` 才 `set`(等值不写 =
+行内绑定不重跑);reconcile 只管 key 的增删移;顺序没变则**一次 append 都不发**
+(过去逐行 append 会 bump 版本触发重绘,而"内容变、顺序没变"是列表最常见的
+更新形态)。行作用域改挂到一个**预建的宿主 root**(`sv_reactive::with_owner`)
+——不在 effect 名下所以活得过重跑,又仍在调用方 owner 链上所以 context 可达
+(`detached` 会把链整个断掉)。
+
+**代价与边界**:项类型需 `Clone + PartialEq`;`.sv` 里 keyed 绑定名必须是**单个
+标识符**(行内它是 signal,解构请用 `{@const}`),编译期硬错误;非 keyed
+`{#each}` 语义不变(整块重建、绑定名是普通值)。**组件 prop 仍是快照**——
+`<Row label={it.1} />` 在行构建时取一次值,要联动得传信号;这是组件模型的既有
+边界,不在本 ADR 范围。搬移策略仍是"按新序 append"的朴素法,LIS 待基准后再说。
 
 ### ADR-8(2026-07-17)CSS 无缝支持策略:真语法封闭子集 + 编译期样式表,永不引入运行时选择器引擎
 > 问题:Svelte 开发者在浏览器写真 CSS(级联/继承/选择器/伪类/单位),桌面端如何

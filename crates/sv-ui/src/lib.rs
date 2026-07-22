@@ -1265,52 +1265,90 @@ pub fn each_block_keyed<T, K>(
     parent: ViewId,
     items: impl Fn() -> Vec<T> + 'static,
     key_of: impl Fn(&T) -> K + 'static,
-    row: impl Fn(&Doc, ViewId, &T) + 'static,
+    row: impl Fn(&Doc, ViewId, sv_reactive::Signal<T>) + 'static,
 ) where
-    T: Clone + 'static,
+    T: Clone + PartialEq + 'static,
     K: PartialEq + Clone + 'static,
 {
     let container = doc.create_view();
     doc.append(parent, container);
     let doc = doc.clone();
-    // 行注册表活在 effect 之外:重跑时复用而不是销毁
-    type Rows<K> = Rc<RefCell<Vec<(K, ViewId, RootHandle)>>>;
-    let rows: Rows<K> = Rc::new(RefCell::new(Vec::new()));
+    // 行的宿主作用域:建在**调用方**的 owner 链上(context 可达),且不在
+    // 下面那个 effect 名下 —— 否则列表一变,effect 重跑会先销毁子树,
+    // 把所有行的 signal/effect 一起带走(表现为"复用的行从此不再更新")
+    let (_, host) = create_root(|| ());
+    // 行注册表活在 effect 之外:重跑时复用而不是销毁。
+    // 每行带一个 `Signal<T>`(ADR-7 目标形态):**内容变化走原地 set**,
+    // reconcile 只管 key 的增删移 —— 否则同 key 换内容的行会一直显示旧数据
+    type Rows<K, T> = Rc<RefCell<Vec<(K, ViewId, RootHandle, sv_reactive::Signal<T>)>>>;
+    let rows: Rows<K, T> = Rc::new(RefCell::new(Vec::new()));
     let rows_cleanup = rows.clone();
     let doc_cleanup = doc.clone();
 
     effect(move || {
         let new_items = items(); // 追踪列表本身
-        let mut old: Vec<(K, ViewId, RootHandle)> = rows.borrow_mut().drain(..).collect();
+        let mut old: Vec<(K, ViewId, RootHandle, sv_reactive::Signal<T>)> =
+            rows.borrow_mut().drain(..).collect();
         let mut new_rows = Vec::with_capacity(new_items.len());
         for item in &new_items {
             let k = untrack(|| key_of(item));
-            if let Some(pos) = old.iter().position(|(ok, _, _)| *ok == k) {
-                // 复用:append 即"移动到末尾",按新序逐个 append 完成重排
+            if let Some(pos) = old.iter().position(|(ok, _, _, _)| *ok == k) {
+                // 复用:先不动位置,顺序统一在末尾对齐(见下)
                 let entry = old.remove(pos);
-                doc.append(container, entry.1);
+                // 内容变了才 set:等值不写 = 行内绑定不重跑(纯重排零开销)。
+                // 读写都 untrack —— 行信号绝不能成为本 effect 的依赖,
+                // 否则改一行会重跑整个列表 reconcile
+                let changed = untrack(|| entry.3.with(|old_item| old_item != item));
+                if changed {
+                    let v = item.clone();
+                    untrack(|| entry.3.set(v));
+                }
                 new_rows.push(entry);
             } else {
                 let cont = doc.create_view();
                 doc.append(container, cont);
                 let d = doc.clone();
                 let item = item.clone();
-                // 行作用域独立于本 effect(不随列表变化销毁);
+                // 行作用域独立于本 effect(不随列表变化销毁);行信号建在该
+                // 作用域内 —— 行销毁时一并释放。
                 // untrack:行构建期的散读不应订阅到本 effect 上
-                let (_, scope) = create_root(|| untrack(|| row(&d, cont, &item)));
-                new_rows.push((k, cont, scope));
+                // 闭包不能 move:`row` 是被外层 effect 捕获的 `Fn`,借用即可
+                let (sig, scope) = sv_reactive::with_owner(&host, || {
+                    create_root(|| {
+                        let sig = sv_reactive::state(item.clone());
+                        untrack(|| row(&d, cont, sig));
+                        sig
+                    })
+                });
+                new_rows.push((k, cont, scope, sig));
             }
         }
-        for (_, cont, scope) in old {
+        for (_, cont, scope, _) in old {
             scope.dispose();
             doc.remove(cont);
+        }
+        // 顺序对齐:**只在真的乱序时**才动树。逐行 append 虽然结果正确,
+        // 但每次都会 bump 版本号触发重绘 —— 而"内容变、顺序没变"是列表最
+        // 常见的更新形态,不该为它重排一遍
+        let desired: Vec<ViewId> = new_rows.iter().map(|(_, id, _, _)| *id).collect();
+        let in_order = doc.read(|inner| {
+            inner
+                .nodes
+                .get(container)
+                .is_some_and(|c| c.children == desired)
+        });
+        if !in_order {
+            // append 即"移到末尾":按新序逐个 append 完成重排
+            for id in &desired {
+                doc.append(container, *id);
+            }
         }
         *rows.borrow_mut() = new_rows;
     });
 
     // 整块卸载时销毁所有行作用域
     on_cleanup(move || {
-        for (_, cont, scope) in rows_cleanup.borrow_mut().drain(..) {
+        for (_, cont, scope, _) in rows_cleanup.borrow_mut().drain(..) {
             scope.dispose();
             doc_cleanup.remove(cont);
         }
@@ -1650,8 +1688,8 @@ mod tests {
                     let my_build = *b.borrow();
                     let t = doc.create_text("");
                     doc.append(parent, t);
-                    let name = it.1;
-                    bind_text(doc, t, move || format!("{name}#{my_build}"));
+                    // 读行信号 → 内容变化原地更新(ADR-7)
+                    bind_text(doc, t, move || format!("{}#{my_build}", it.get().1));
                 },
             );
         });
@@ -1671,6 +1709,18 @@ mod tests {
         assert_eq!(*builds.borrow(), 4, "只应新建 key=4 一行");
         let dump = doc.dump();
         assert!(!dump.contains("乙") && dump.contains("丁#4"), "\n{dump}");
+
+        // 同 key 换内容:**原地更新且不重建**(ADR-7 目标形态)。
+        // 改前行只在构建时读一次 T,同 key 换内容会永远显示旧数据
+        items.set(vec![(3, "丙丙"), (1, "甲"), (4, "丁")]);
+        assert_eq!(*builds.borrow(), 4, "内容变化不该重建行");
+        let dump = doc.dump();
+        assert!(dump.contains("丙丙#3"), "同 key 换内容应原地更新:\n{dump}");
+
+        // 等值再设:不写行信号 → 行内绑定不重跑(纯重排/无变化零树改动)
+        let v = doc.version();
+        items.set(vec![(3, "丙丙"), (1, "甲"), (4, "丁")]);
+        assert_eq!(doc.version(), v, "内容没变不该产生任何树改动");
     }
 
     #[test]
@@ -1844,7 +1894,7 @@ mod tests {
                 |it| *it,
                 |doc, parent, it| {
                     let theme = use_context::<Theme>().map_or("取不到", |t| t.0);
-                    let t = doc.create_text(&format!("{it}:{theme}"));
+                    let t = doc.create_text(&format!("{}:{theme}", it.get()));
                     doc.append(parent, t);
                 },
             );

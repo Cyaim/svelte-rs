@@ -1614,17 +1614,34 @@ impl Cg<'_> {
                 false,
             )
             .map_err(|msg| CompileError::at_offset(self.source, key_src.offset, msg))?;
-            let children_ts = self.emit_nodes(children, &inner_scope)?;
+            // keyed 行拿的是 `Signal<T>`(ADR-7):内容变化原地更新而不是重建。
+            // 于是绑定名在**行内**是反应式的 —— 与 {@const} 同一套改写
+            // (`item.field` → `item.get().field`),故必须是单个标识符
+            let syn::Pat::Ident(pat_ident) = &pat else {
+                return Err(CompileError::at_offset(
+                    self.source,
+                    pat_offset,
+                    "keyed {#each} 的绑定必须是单个标识符(行内它是 Signal,                     解构请在行内用 {@const})",
+                ));
+            };
+            let bind_id = pat_ident.ident.clone();
+            let mut row_scope = inner_scope.clone();
+            let name = bind_id.to_string();
+            row_scope.shadowed.remove(&name);
+            row_scope.plain.remove(&name);
+            row_scope.locals.insert(name);
+            let children_ts = self.emit_nodes(children, &row_scope)?;
             let outer_pre = preclones(&children_ts, scope);
             Ok(quote! {
                 ::sv_ui::each_block_keyed(
                     &__doc, __parent,
                     move || #list_expr,
+                    // key 闭包拿的仍是 &T(裸值),绑定名在这里不是反应式
                     |__item| { let #pat = ::std::clone::Clone::clone(__item); #key_expr },
                     move |__doc, __parent, __item| {
                         let __doc: ::sv_ui::Doc = __doc.clone();
                         #outer_pre
-                        let #pat = ::std::clone::Clone::clone(__item);
+                        let #bind_id = __item;
                         #children_ts
                     },
                 );

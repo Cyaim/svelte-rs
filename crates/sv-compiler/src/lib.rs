@@ -991,7 +991,30 @@ let items = $state(vec![(1i32, String::from("甲"))]);
             "(key) 应走 keyed 版本:\n{code}"
         );
         assert!(code.contains("it.0"), "key 表达式应保留:\n{code}");
+        // ADR-7:行拿的是 Signal<T> —— 行内引用改写成 `.get()`(内容变化原地
+        // 更新),而 key 闭包拿的仍是裸 `&T`(不能是 `.get()`,那里没有 signal)
+        assert!(
+            code.contains("it.get().1"),
+            "行内绑定名应是反应式(Signal):\n{code}"
+        );
+        let key_line = code
+            .lines()
+            .find(|l| l.contains("Clone::clone(__item)"))
+            .expect("key 闭包应克隆裸值");
+        assert!(
+            !key_line.contains(".get()"),
+            "key 闭包里的绑定名不该被改写成 .get():\n{key_line}"
+        );
         syn::parse_file(&code).unwrap();
+
+        // keyed 行的绑定是 Signal,解构模式没法表达 → 明确报错而不是生成坏代码
+        let err = compile_sv(
+            "<script>\nlet xs = $state(vec![(1i32, 2i32)]);\n</script>\n\
+             <view>{#each xs as (a, b) (a)}<text>{a}</text>{/each}</view>",
+            "c",
+        )
+        .expect_err("keyed + 解构应报错");
+        assert!(err.message.contains("单个标识符"), "{}", err.message);
 
         // keyed + 索引应报错
         let err = compile_sv(
