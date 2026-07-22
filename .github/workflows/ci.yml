@@ -10,10 +10,17 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# 最小权限:这条流水线只读代码——结果走 step summary,不写仓库、不发包、
+# 不推产物。仓库级默认令牌在老仓库里可能是读写的,显式收窄,免得哪个
+# 第三方 action 顺手借用
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # 默认特性道:CPU 后端,三平台。日常开发循环跑的就是这套
   test:
     name: test (${{ matrix.os }})
     strategy:
@@ -25,6 +32,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          # 只在 main 上写缓存。GitHub 每仓库只给 10 GB,而本仓库一轮 CI 有
+          # 十来个 job(3 OS × 2 特性道 + lint/docs/msrv/bench/publish),wgpu +
+          # vello 那棵树单个 target/ 就上 GB:若每个 PR 推送都各存一份,新条目
+          # 会按 LRU 把 main 的基线挤掉,结果是**谁都命不中**、每次全量重编。
+          # 固定只让 main 维护基线,PR 单向读取(Actions 允许从默认分支恢复)
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # 渲染测试要真实字体:Linux 装 Noto CJK 供 fontique 发现(sv-shell/src/text.rs);
       # mesa-vulkan-drivers 提供 lavapipe 软件 Vulkan,让 vello 测试在无 GPU 跑道上也能跑
@@ -38,16 +52,133 @@ jobs:
       - name: Test (CPU backend)
         run: cargo test --workspace
 
+  # 特性组合道——**独立成 job 是有代价换来的**:2026-07 有过一次真实回归,
+  # `cpu_presenter` 改成返回 Result 时漏改了 vello 回退分支,默认特性编得过、
+  # `--features backend-vello` 编不过。当时这条 vello 命令埋在 test job 的第
+  # 四步里,红叉长得跟"某个单测挂了"一模一样,本地默认循环又照不到,拖了
+  # 好几个提交才定位(修复见 6df6df4)。拆出来之后,"某个特性组合编不过"
+  # 在 checks 列表里是自己的一行,矩阵名直接写着是哪个组合。
+  #
+  # 为什么没有 `--no-default-features` 道:全仓只有 sv-shell 声明了 `[features]`
+  # (`default = []` 是空的),membench/showcase 只有一个转发用的 backend-vello,
+  # 其余 crate 连 `[features]` 表都没有 —— 关掉默认特性等于什么都没关,加一条
+  # 纯属烧 CI 分钟数。**哪天有 crate 真给了非空 default,再把它加进下面的
+  # matrix.features**(这一段注释就是给那时候的人看的)。
+  features:
+    name: 特性组合 ${{ matrix.features }} (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        features: [backend-vello]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # rust-cache 的自动 key 只含 job id + rustc 版本/host,**不含 matrix 取值**。
+          # 不显式加这一段的话,将来 matrix.features 一多,同一 OS 的几条道会抢同
+          # 一个 key、轮流把对方的产物清掉。同理它也天然与 test job 分开存:
+          # 开着 vello 的 target/ 和默认特性的 target/ 内容不同,混用反而更慢
+          key: ${{ matrix.features }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Install fonts & software Vulkan (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y fonts-noto-cjk mesa-vulkan-drivers
+
+      # --all-targets 是重点:回归当时挂的是 lib,但测试/bench/示例里同样有
+      # cfg 分支,只 build lib 照不到。这一步同时把 membench、showcase 的
+      # backend-vello 转发特性一起编了(原来是单独一步只编 membench)
+      - name: 构建(所有目标)
+        run: cargo build --workspace --all-targets --features ${{ matrix.features }}
+
       # vello/wgpu 路径:软件适配器默认被拒(Windows WARP 会在管线执行中访问违例),
       # Linux 显式启用 lavapipe(mesa-vulkan-drivers)保留真渲染覆盖;
-      # 无可用 adapter 时 GPU 测试自动跳过(探测回退逻辑本身也被覆盖)
-      - name: Test (vello backend)
-        run: cargo test -p sv-shell --features backend-vello
+      # 无可用 adapter 时 GPU 测试自动跳过(探测回退逻辑本身也被覆盖)。
+      # 只测 sv-shell:特性只影响它,`--workspace` 会把其余 crate 的单测原样再跑一遍
+      - name: 测试(sv-shell)
+        run: cargo test -p sv-shell --features ${{ matrix.features }}
         env:
           SV_ALLOW_SOFTWARE_GPU: ${{ runner.os == 'Linux' && '1' || '0' }}
 
-      - name: Build benchmark harness (vello)
-        run: cargo build -p membench --features backend-vello
+  # 文档构建门禁。本仓库的 doc 注释大量用 [`Type`] 互链(架构说明写在类型上,
+  # 不是写在 md 里),链接写错是高频问题,而**普通 cargo build 完全不看 doc 注释**
+  # —— 不专门跑一趟 rustdoc,链接烂掉没有任何人会知道
+  docs:
+    name: 文档构建(rustdoc 链接门禁)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # --all-features:vello 那半边的 doc 注释平时被 cfg 掉,rustdoc 根本不解析,
+      # 链接烂了也照样绿 —— 这正是本轮要根治的那类"cfg 之外的代码在腐烂"
+      - name: cargo doc --workspace --no-deps --all-features
+        run: |
+          set -euo pipefail
+          cargo doc --workspace --no-deps --all-features 2>&1 | tee "$RUNNER_TEMP/doc.log"
+        env:
+          # **逐条 deny,不用 `-D warnings`**:全仓现存 4 条
+          # `rustdoc::private_intra_doc_links`(公开文档链到私有项,都在
+          # crates/sv-shell 的 text.rs / render.rs),要清掉得改 Rust 源码
+          # ——把目标项转 pub、或把 [`x`] 退化成 `x`。这轮只动 CI,不拿 CI
+          # 去逼一个不相干的源码改动,所以那条 lint **暂不阻塞**,由下一步
+          # 计数盯着不许再涨。
+          #
+          # 也别写成 `-D warnings -A rustdoc::private_intra_doc_links`:那样确实
+          # 能绿,但 4 条告警会被**一起吞掉**,日志里干干净净,等于假装没欠债。
+          # 顺带一提 `-D warnings -W rustdoc::private_intra_doc_links` 是无效的
+          # ——实测 rustdoc 里 `warnings` 组压过后面的单条 -W,照样红(所以
+          # 才走逐条 deny 这条路)。
+          #
+          # 下面这几条覆盖 rustdoc 全部 warn-by-default 的"写错了"类 lint,
+          # 已实测在当前 stable 上无 unknown-lint。
+          RUSTDOCFLAGS: >-
+            -D rustdoc::broken_intra_doc_links
+            -D rustdoc::invalid_codeblock_attributes
+            -D rustdoc::invalid_html_tags
+            -D rustdoc::invalid_rust_codeblocks
+            -D rustdoc::bare_urls
+            -D rustdoc::redundant_explicit_links
+
+      # 棘轮:允许存量,不允许新增。基线降到 0 时把这一步连同上面的 lint 清单
+      # 一起简化成 `-D warnings` 即可
+      - name: 剩余 rustdoc 告警(可见,只防新增)
+        if: always()
+        env:
+          # **基线已降到 0**(2026-07-22 当天清完,rustc 1.88.0 实测)。
+          # 原来的 4 条 private_intra_doc_links 分两类修:三条指的是真·私有实现
+          # 细节(`input_scroll_x/y`、`register`),退化成反引号——不该为了让文档
+          # 链接合法就把内部函数转 pub;一条是 `caret_rect` 本就该 re-export 却在
+          # R3-P3 时漏了,补上顺带把多行几何的公开面补齐(commit 2845cea)。
+          # membench 那条冗余显式链接一并清掉。
+          # 到 0 之后这一步等价于 `-D warnings`,留着是因为它的失败信息
+          # (剩几条 + 逐条列出)比 rustdoc 自己的输出好读
+          DOC_WARN_BASELINE: 0
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/doc.log"
+          [ -f "$log" ] || { echo "上一步没产出日志(多半是 cargo doc 直接崩了),跳过计数"; exit 0; }
+          # 只数**带源码位置**的诊断:紧跟在 `warning:` 后面的 `--> 文件:行:列`。
+          # 这样既跳过 cargo 自己的汇总行(`... generated N warnings`,会把一条
+          # 数成两条),也跳过与源码无关的环境噪音(比如开发机上那句
+          # "`~/.cargo/config` is deprecated" —— 跑道上没有,但别让计数依赖这一点)
+          n=$(awk 'p ~ /^warning: / && /^[[:space:]]*-->/ { c++ } { p = $0 } END { print c+0 }' "$log")
+          {
+            echo "### rustdoc 告警"
+            echo
+            echo "剩余 **${n}** 条(基线 ${DOC_WARN_BASELINE},只防新增)"
+          } >> "$GITHUB_STEP_SUMMARY"
+          awk '/^[[:space:]]*-->/ && p ~ /^warning: / { print p; print "  " $0 } { p = $0 }' "$log"
+          if [ "$n" -gt "$DOC_WARN_BASELINE" ]; then
+            echo "::error::rustdoc 告警 ${n} 条 > 基线 ${DOC_WARN_BASELINE} —— 新增的请就地修掉,别抬基线"
+            exit 1
+          fi
 
   lint:
     name: fmt & clippy
@@ -58,12 +189,18 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: rustfmt
         run: cargo fmt --check
 
       # R4 门禁(调研 25 §3.2):告警清零后转阻塞。生成代码在 codegen 里
-      # 自带 allow,不会把 .sv 用户拖下水
+      # 自带 allow,不会把 .sv 用户拖下水。
+      # 注:这里**没有**跑 `--features backend-vello` 的 clippy —— cfg 掉的
+      # 代码 clippy 同样看不见,理论上该补。没补是因为它需要先确认那半边
+      # 当前是零告警,而这条门禁一旦 -D warnings 转红就得改 crates/ 才能救;
+      # 编译本身已由上面的 features job 覆盖(回归就是编译错误)。
       - name: clippy (blocking)
         run: cargo clippy --workspace --all-targets -- -D warnings
 
@@ -79,16 +216,26 @@ jobs:
         with:
           toolchain: ${{ env.MSRV }}
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install fonts
         run: sudo apt-get update && sudo apt-get install -y fonts-noto-cjk
+      # 带上 --all-features:MSRV 是对**用户**的承诺,用户开 backend-vello 时
+      # 同样得能在 1.88 上编。wgpu/vello 那棵树抬 MSRV 比我们勤,漏掉这条
+      # 就会出现"文档写 1.88、开个特性就编不过"。
+      # 现状核过:--all-features 依赖图里声明的最高 rust-version 恰好就是 1.88
+      # (parley/fontique/vello 一档),没有富余 —— 上游一抬,这条道会先红,
+      # 那正是我们要的早期信号
       - name: Build on MSRV
-        run: cargo build --workspace
+        run: cargo build --workspace --all-features
 
   audit:
     name: 依赖审计(advisories + 许可证)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # 不挂 rust-cache:cargo-deny-action 自带二进制缓存,而它只读 Cargo.lock,
+      # 存一份 target/ 纯属占那 10 GB 配额
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check advisories bans licenses sources
@@ -102,6 +249,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install fonts
         run: sudo apt-get update && sudo apt-get install -y fonts-noto-cjk
 
@@ -117,6 +266,12 @@ jobs:
             name="$1"; budget="$2"; shift 2
             line=$(./target/release/membench "$@" --frames 30 --hold-secs 0 | grep '^READY')
             p99=$(echo "$line" | sed -n 's/.*p99_ms=\([0-9.]*\).*/\1/p')
+            # 没抓到数字就直接红:awk 里空串跟数字比是**字符串比较**("" < "120"
+            # 恒真),READY 行格式一改护栏就会静默常绿,比没有护栏更糟
+            if [ -z "$p99" ]; then
+              echo "::error::$name 没能从 READY 行解析出 p99_ms —— 输出格式变了?原始行:$line"
+              exit 1
+            fi
             echo "| $name | ${p99} ms | < ${budget} ms |" >> "$GITHUB_STEP_SUMMARY"
             echo "$name: p99=${p99}ms (预算 ${budget}ms)"
             awk -v p="$p99" -v b="$budget" 'BEGIN { exit !(p < b) }' || {
@@ -136,6 +291,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # 首发前的体检。注意:**依赖序打包在首发前跑不通**——sv-ui 打包时
       # cargo 会去 registry 找 sv-reactive,而它还没发布(先有鸡先有蛋)。
@@ -155,3 +312,42 @@ jobs:
             | "\($p.name): 缺 \(join(", "))"')
           if [ -n "$missing" ]; then echo "$missing"; exit 1; fi
           echo "全部待发布 crate 元数据齐全"
+
+  # 汇总闸门。分支保护的"必需检查"是按 job 名字符串配的,而矩阵 job 的名字
+  # 里带着 matrix 取值(`特性组合 backend-vello (ubuntu-latest)`)—— 每加一个
+  # 特性或一个 OS,名字就变一批,保护规则会**悄悄漏掉新的那条**。挂这一个
+  # 固定名字的汇总 job 就没这问题。
+  # 配置提示:branch protection 里只需要勾 `ci-ok` 这一项。
+  ci-ok:
+    name: ci-ok(分支保护挂这一个)
+    if: always()
+    needs:
+      - test
+      - features
+      - docs
+      - lint
+      - msrv
+      - audit
+      - bench
+      - publish-readiness
+    runs-on: ubuntu-latest
+    steps:
+      - name: 汇总各道结果
+        run: |
+          set -euo pipefail
+          # skipped 要放行:bench 在 PR 上按设计是不跑的(见其 if 条件)。
+          # 但 cancelled / failure 必须红 —— 不然 `if: always()` 会把这个 job
+          # 变成一个永远绿的橡皮图章
+          results="${{ join(needs.*.result, ' ') }}"
+          echo "各道结果:$results"
+          bad=0
+          for r in $results; do
+            case "$r" in
+              success|skipped) ;;
+              *) bad=1 ;;
+            esac
+          done
+          if [ "$bad" = 1 ]; then
+            echo "::error::有 job 未通过(见上面的结果列表)"
+            exit 1
+          fi
