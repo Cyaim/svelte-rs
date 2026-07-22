@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 
 use accesskit::{Action, Node, NodeId, Role, Toggled, Tree, TreeId, TreeUpdate};
-use sv_ui::{Doc, ElementKind, view_id_ffi};
+use sv_ui::{Doc, ElementKind, Overflow, OverlayLayer, view_id_ffi};
 
 use crate::render::{Placed, Rect};
 
@@ -94,12 +94,27 @@ fn collect(doc: &Doc, placed: &[Placed], scale: f32) -> (Vec<(NodeId, Node)>, No
             let Some(n) = inner.nodes.get(id) else {
                 return;
             };
+            // 角色:**只用树里确实存在的信息**,不猜。
+            // 容器的语义有两个真实来源 —— 它是不是弹层根(层 + modal),
+            // 以及它可不可滚;两者都不满足才退回 GenericContainer
+            let scrollable =
+                n.style.overflow == Overflow::Scroll || n.style.overflow_x == Overflow::Scroll;
             let role = match n.kind {
-                ElementKind::View => Role::GenericContainer,
+                ElementKind::View => match overlay_role(inner, id) {
+                    Some(r) => r,
+                    None if scrollable => Role::ScrollView,
+                    None => Role::GenericContainer,
+                },
                 ElementKind::Text => Role::Label,
                 ElementKind::Button => Role::Button,
                 ElementKind::Checkbox => Role::CheckBox,
-                ElementKind::TextInput => Role::TextInput,
+                ElementKind::TextInput => {
+                    if n.input.as_deref().is_some_and(|i| i.multiline) {
+                        Role::MultilineTextInput
+                    } else {
+                        Role::TextInput
+                    }
+                }
             };
             let mut node = Node::new(role);
             // 名称:aria-label 覆盖优先,否则取节点文本
@@ -139,6 +154,20 @@ fn collect(doc: &Doc, placed: &[Placed], scale: f32) -> (Vec<(NodeId, Node)>, No
             if n.focusable {
                 node.add_action(Action::Focus);
             }
+            // 可滚容器:报当前偏移与范围,并接受屏幕阅读器的滚动请求
+            // (AT 把焦点移到视口外的元素时会主动要求滚动)
+            if scrollable {
+                node.set_scroll_y(f64::from(n.scroll_y));
+                node.set_scroll_y_min(0.0);
+                node.set_scroll_x(f64::from(n.scroll_x));
+                node.set_scroll_x_min(0.0);
+                node.add_action(Action::ScrollUp);
+                node.add_action(Action::ScrollDown);
+                node.add_action(Action::SetScrollOffset);
+            }
+            if n.style.overflow != Overflow::Visible || n.style.overflow_x != Overflow::Visible {
+                node.set_clips_children();
+            }
             if let Some(r) = rects.get(&id) {
                 node.set_bounds(accesskit::Rect {
                     x0: (r.x * scale) as f64,
@@ -147,10 +176,29 @@ fn collect(doc: &Doc, placed: &[Placed], scale: f32) -> (Vec<(NodeId, Node)>, No
                     y1: ((r.y + r.h) * scale) as f64,
                 });
             }
-            node.set_children(n.children.iter().map(|c| node_id(*c)).collect::<Vec<_>>());
+            // 弹层是**游离子树**(不挂任何父,渲染壳按注册表布局)。
+            // 语义树里必须把它们接到 root 名下,否则对话框/菜单对屏幕阅读器
+            // 整个不存在 —— 可达性以 children 为准
+            let mut kids: Vec<NodeId> = n.children.iter().map(|c| node_id(*c)).collect();
+            if id == inner.root {
+                kids.extend(inner.overlays.iter().map(|e| node_id(e.root)));
+            }
+            node.set_children(kids);
+            if let Some(e) = inner.overlays.iter().find(|e| e.root == id)
+                && e.modal
+            {
+                // 模态:AT 应把注意力限制在这棵子树内(与命中层的区间阻断同源)
+                node.set_modal();
+            }
             out.push((node_id(id), node));
             for c in &n.children {
                 walk(inner, *c, rects, scale, out);
+            }
+            if id == inner.root {
+                let roots: Vec<sv_ui::ViewId> = inner.overlays.iter().map(|e| e.root).collect();
+                for r in roots {
+                    walk(inner, r, rects, scale, out);
+                }
             }
         }
         walk(inner, inner.root, &rects, scale, &mut nodes);
@@ -163,8 +211,22 @@ fn collect(doc: &Doc, placed: &[Placed], scale: f32) -> (Vec<(NodeId, Node)>, No
     })
 }
 
+/// 弹层根的角色:层与 modal 位是树里**确实存在**的信息,不是猜的
+/// (调研 25:离散层 Base→Popup→Tooltip)
+fn overlay_role(inner: &sv_ui::DocumentInner, id: sv_ui::ViewId) -> Option<Role> {
+    let e = inner.overlays.iter().find(|e| e.root == id)?;
+    Some(match e.layer {
+        OverlayLayer::Tooltip => Role::Tooltip,
+        OverlayLayer::Popup if e.modal => Role::Dialog,
+        OverlayLayer::Popup => Role::Menu,
+    })
+}
+
+/// 一次 AT 滚动请求走多少(逻辑 px)。与滚轮的行滚一致,手感统一
+const A11Y_SCROLL_STEP: f32 = 40.0;
+
 /// AccessKit 动作回派(纯逻辑,离屏可测):Click → 点击回调,
-/// Focus/Blur → 焦点链。未知动作返回 false
+/// Focus/Blur → 焦点链,Scroll* → 滚动偏移。未知动作返回 false
 pub fn dispatch_action(doc: &Doc, action: Action, target: NodeId) -> bool {
     let id = sv_ui::view_id_from_ffi(target.0);
     match action {
@@ -191,6 +253,18 @@ pub fn dispatch_action(doc: &Doc, action: Action, target: NodeId) -> bool {
             } else {
                 false
             }
+        }
+        // AT 主动滚动(把视口外的元素带进来)。上界钳制由布局侧负责,
+        // 这里只按步长推 —— 与滚轮同一条写入口
+        Action::ScrollUp | Action::ScrollDown => {
+            let (x, y) = doc.scroll_of(id);
+            let dy = if action == Action::ScrollDown {
+                A11Y_SCROLL_STEP
+            } else {
+                -A11Y_SCROLL_STEP
+            };
+            doc.set_scroll(id, x, (y + dy).max(0.0));
+            true
         }
         _ => false,
     }

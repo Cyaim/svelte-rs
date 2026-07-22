@@ -20,6 +20,10 @@ sv-shell),按依赖序推送;`examples/` 不发布。
 
 ### 新增
 
+- **无障碍滚动与弹层语义**:可滚容器报 `ScrollView` + 偏移与 `ScrollUp/Down/
+  SetScrollOffset` 动作;裁剪容器报 `clips_children`;多行输入报
+  `MultilineTextInput`;弹层根按层与 modal 位报 `Dialog`/`Menu`/`Tooltip`。
+
 - **`overflow-x` / `overflow-y` 按轴拆分**(R2 档 B):`overflow` 简写写两轴;
   分轴支持"横向裁掉、纵向滚"。
 
@@ -50,6 +54,11 @@ sv-shell),按依赖序推送;`examples/` 不发布。
 - **性能基准 CI 化**:membench 两场景(3k 全量 / 100k 虚拟化)p99 帧预算护栏。
 - **发布工程**:`ShellError` 类型化错误、cargo-deny 依赖审计、MSRV 1.88 构建道、
   clippy `-D warnings` 阻塞门禁、发布演练(依赖序 `cargo package`)。
+
+### 修复
+
+- **弹层不进语义树**:弹层是游离子树(不挂任何父),此前对屏幕阅读器**整个
+  不存在** —— 对话框/菜单读不出来。现在接到 root 的 children 名下。
 
 ### 变更
 

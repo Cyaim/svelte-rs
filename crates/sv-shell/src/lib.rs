@@ -1340,6 +1340,132 @@ mod tests {
         );
     }
 
+    /// a11y 档 B:滚动与弹层语义。**只用树里确实存在的信息**——
+    /// 可不可滚看 overflow,弹层角色看层与 modal 位,都不猜
+    #[test]
+    fn a11y_scroll_and_overlay_semantics() {
+        use accesskit::{Action, Role};
+        let (doc, container, _rows) = scroll_doc();
+        let layout = layout_tree_full(&doc, 480.0, 400.0);
+        let update = build_tree_update(&doc, &layout.placed, 1.0);
+        let nid = |v: sv_ui::ViewId| accesskit::NodeId(sv_ui::view_id_ffi(v));
+        let node = |v: sv_ui::ViewId| {
+            update
+                .nodes
+                .iter()
+                .find(|(id, _)| *id == nid(v))
+                .map(|(_, n)| n.clone())
+                .expect("语义树应含该节点")
+        };
+
+        let c = node(container);
+        assert_eq!(c.role(), Role::ScrollView, "可滚容器应报 ScrollView");
+        assert_eq!(c.scroll_y(), Some(0.0));
+        assert!(c.supports_action(Action::ScrollDown), "AT 应能要求滚动");
+        assert!(c.clips_children(), "裁剪容器应报 clips_children");
+
+        // AT 请求滚动 → 走与滚轮同一条写入口
+        assert!(dispatch_action(&doc, Action::ScrollDown, nid(container)));
+        assert!(doc.scroll_of(container).1 > 0.0, "ScrollDown 应推动偏移");
+        let before = doc.scroll_of(container).1;
+        dispatch_action(&doc, Action::ScrollUp, nid(container));
+        assert!(doc.scroll_of(container).1 < before, "ScrollUp 应回滚");
+        // 钳到 0,不会变负
+        for _ in 0..10 {
+            dispatch_action(&doc, Action::ScrollUp, nid(container));
+        }
+        assert_eq!(doc.scroll_of(container).1, 0.0);
+
+        // 多行输入报 MultilineTextInput(单行仍是 TextInput)
+        let ta = doc.create_text_input();
+        doc.append(doc.root(), ta);
+        doc.set_multiline(ta, true, 3);
+        let input = doc.create_text_input();
+        doc.append(doc.root(), input);
+        let layout = layout_tree_full(&doc, 480.0, 400.0);
+        let update = build_tree_update(&doc, &layout.placed, 1.0);
+        let role_of = |v: sv_ui::ViewId| {
+            update
+                .nodes
+                .iter()
+                .find(|(id, _)| *id == nid(v))
+                .map(|(_, n)| n.role())
+                .unwrap()
+        };
+        assert_eq!(role_of(ta), Role::MultilineTextInput);
+        assert_eq!(role_of(input), Role::TextInput);
+
+        // 弹层角色出自层与 modal 位(树里就有,不是猜的)
+        use sv_ui::{Anchor, OverlayLayer, OverlayOpts, overlay_block};
+        let doc2 = Doc::new();
+        let (_, _scope) = create_root(|| {
+            let modal = sv_reactive::state(true);
+            overlay_block(
+                &doc2,
+                move || modal.get(),
+                move || Anchor::WindowCenter,
+                OverlayOpts {
+                    modal: true,
+                    ..OverlayOpts::default()
+                },
+                |d, root| {
+                    let t = d.create_text("对话框");
+                    d.append(root, t);
+                },
+            );
+            let menu = sv_reactive::state(true);
+            overlay_block(
+                &doc2,
+                move || menu.get(),
+                move || Anchor::Point(10.0, 10.0),
+                OverlayOpts::default(),
+                |d, root| {
+                    let t = d.create_text("菜单项");
+                    d.append(root, t);
+                },
+            );
+            let tip = sv_reactive::state(true);
+            overlay_block(
+                &doc2,
+                move || tip.get(),
+                move || Anchor::Point(20.0, 20.0),
+                OverlayOpts {
+                    layer: OverlayLayer::Tooltip,
+                    ..OverlayOpts::default()
+                },
+                |d, root| {
+                    let t = d.create_text("提示");
+                    d.append(root, t);
+                },
+            );
+        });
+        let layout2 = layout_tree_full(&doc2, 480.0, 400.0);
+        let update2 = build_tree_update(&doc2, &layout2.placed, 1.0);
+        let roots: Vec<sv_ui::ViewId> =
+            doc2.read(|inner| inner.overlays.iter().map(|e| e.root).collect());
+        let role2 = |v: sv_ui::ViewId| {
+            update2
+                .nodes
+                .iter()
+                .find(|(id, _)| *id == nid(v))
+                .map(|(_, n)| n.role())
+                .expect("弹层根应在语义树里")
+        };
+        let roles: Vec<Role> = roots.iter().map(|r| role2(*r)).collect();
+        assert!(
+            roles.contains(&Role::Dialog),
+            "modal 弹层应报 Dialog:{roles:?}"
+        );
+        assert!(
+            roles.contains(&Role::Menu),
+            "非模态 Popup 应报 Menu:{roles:?}"
+        );
+        assert!(
+            roles.contains(&Role::Tooltip),
+            "Tooltip 层应报 Tooltip:{roles:?}"
+        );
+    }
+
     /// P6 增量语义树(调研 24 §5 验收名 `a11y_update_only_dirty_nodes`):
     /// 首次全量,之后**只推内容真变了的节点**。全量推会让屏幕阅读器把整棵树
     /// 重扫一遍——一次键入本该只动一个节点

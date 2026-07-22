@@ -452,8 +452,15 @@ sv-compiler / sv-macro / sv-build)**空闲**;`runa`、`sylph` 被占。
   仍全量算(纯函数、便宜),省的是屏幕阅读器侧的重扫与 IPC:一次键入本该
   只动一个节点。验收 `a11y_update_only_dirty_nodes`(无变化零节点、改一个
   文本只推一个、只改焦点零节点、删节点推父);**待办**:NVDA/VoiceOver/Orca
-  真机朗读冒烟(bounds 坐标空间平台实测校准,调研 24 风险 5)、列表/滚动
-  语义(档 B 打磨);弹层体系(8–13 人周;裁决:离散层
+  真机朗读冒烟(bounds 坐标空间平台实测校准,调研 24 风险 5);
+  **✅ 2026-07-22 滚动/弹层语义落地**:可滚容器报 `ScrollView` + 偏移与
+  `ScrollUp/Down/SetScrollOffset` 动作(AT 把焦点移到视口外元素时会主动
+  要求滚动,回派走与滚轮同一条写入口)、裁剪容器报 `clips_children`、
+  多行输入报 `MultilineTextInput`、弹层根按**层与 modal 位**报
+  `Dialog`/`Menu`/`Tooltip` 并置 `modal` ——全部出自树里确实存在的信息,
+  不猜。**顺带修掉一个真 bug**:弹层是游离子树(不挂任何父),此前**整个
+  不进语义树** —— 对话框/菜单对屏幕阅读器根本不存在;现在接到 root 的
+  children 名下(可达性以 children 为准);弹层体系(8–13 人周;裁决:离散层
   Base→Popup→Tooltip + `overlay_block` 原语 + `<overlay>` 内建元素,不做通用
   z-index、不发明 {#teleport})
   ——**✅ 2026-07-18 O1/O2/O3/O5 落地**:游离弹层子树 + 注册表(注册序即
