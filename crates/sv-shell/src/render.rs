@@ -621,6 +621,12 @@ pub fn layout_full_cached(doc: &Doc, logical_w: f32, logical_h: f32) -> Rc<Layou
             // 树没留(小界面):落到重建,反正它便宜
         }
 
+        // **先把旧树扔掉再建新的**。留着它直到 `*slot = Some(..)` 才落地,
+        // 意味着重建帧上新旧两棵树同时活着 —— 峰值内存翻倍,分配器局部性变差。
+        // 实测 membench `rows 3k --mutate`(每帧都重建):不扔 20.0–21.0ms,
+        // 扔了 19.0–19.3ms,**白拿 5%**。这条只在"每帧都是 C 类"的负载上看得见,
+        // 而那恰恰是最坏情况
+        *slot = None;
         let (layout, trees) = doc.read(|inner| {
             let trees = build_trees(inner, logical_w, logical_h);
             let layout = walk_trees(inner, &trees, logical_w, logical_h);
