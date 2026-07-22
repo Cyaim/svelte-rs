@@ -698,3 +698,16 @@ sv-compiler / sv-macro / sv-build)**空闲**;`runa`、`sylph` 被占。
   接入时场景树只加**一个** `ElementKind::Animation`(不是 `Pag`),
   格式差异收在 `AnimSource` 枚举里;前端标签叫 `<animation>` 不叫 `<pag>`
   (标签描述用途,不绑格式)。
+  ——**✅ 2026-07-22 场景树座位 + 时间轴通道已落地**:
+  `ElementKind::Animation` + `ViewNode.anim: Option<Box<AnimData>>`
+  (与 `input` 同款)+ `AnimSource::{Frames, Vector}`。
+  **sv-ui 里没有任何像素/矢量数据** —— 内容只留不透明句柄,由渲染壳侧注册表
+  解析(`FontHandle` 同款先例),双前端编译目标的依赖面因此保持干净。
+  `sv_ui::anim` 新增独立的时间轴表(**不塞进既有补间 `Anim`**:补间必然结束、
+  时间轴可以无限循环,合并会让 `from/to/dur_ms` 三个字段全部失去意义),
+  `play`/`stop`/`pump` 把 wall-clock 换算成帧号写进树 —— **PAG 不拥有时钟**。
+  **`set_anim_frame` 定级为 Paint**:动画盒子由 `intrinsic` 定、与帧号无关,
+  于是一秒 60 次帧号变更**零次布局**;相等剪枝让 24fps 素材在 144Hz 屏上
+  那 5 个不换帧的 vsync 完全不 bump(ADR-6 那段省电担忧的一半到此兑现,
+  另一半要脏矩形)。
+  **仍缺**:像素(等 `Painter::draw_image`)、`.pag` 解析、`<animation>` 标签。
