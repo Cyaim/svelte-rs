@@ -2726,6 +2726,67 @@ cd",
         assert!(log.needs_rebuild(), "溢出必须退化成全量,不能被当成'没变'");
     }
 
+    /// 动画帧不该重建布局树。
+    ///
+    /// `docs/plans/pag-2-integration.md` §4.2 把这条点成了接动画格式(PAG/Lottie)
+    /// 前的硬前置:帧循环的静止短路是 `unchanged && !animating`,**`animating`
+    /// 一真就每帧走完整渲染路径**。以前那意味着每帧重建整棵 taffy 树 ——
+    /// 一个淡入动画会让 30k 树连着 20 帧各花 300ms。
+    ///
+    /// 变更分级之后这条自动成立了,但**必须钉住**:淡入改的是 `opacity`
+    /// (纯绘制)、平滑滚动改的是滚动偏移(只挪位置),两者都不进 taffy。
+    /// 哪天有人给 `Style` 加个"看起来只是绘制、其实进布局"的字段并接进动画通道,
+    /// 这条会红。
+    #[test]
+    fn animation_frames_do_not_rebuild_layout() {
+        crate::render::cache_reset();
+        let (doc, _scope, scroller) = big_doc(300);
+        let target = doc.read(|i| i.nodes[scroller].children[3]);
+        let first = crate::render::layout_full_cached(&doc, 800.0, 600.0);
+        assert!(crate::render::cache_has_trees());
+
+        // 淡入:逐帧推进 opacity
+        sv_ui::anim::transition_in_fade(&doc, target, 200);
+        let after_start = crate::render::layout_full_cached(&doc, 800.0, 600.0);
+        assert!(
+            std::rc::Rc::ptr_eq(&first, &after_start),
+            "起手把 opacity 设为 0 是纯绘制,不该动布局"
+        );
+        let mut t = 0.0;
+        let mut fade_frames = 0;
+        while sv_ui::anim::pump(t) {
+            let f = crate::render::layout_full_cached(&doc, 800.0, 600.0);
+            assert!(
+                std::rc::Rc::ptr_eq(&first, &f),
+                "淡入的每一帧都只改 opacity,布局产物必须整份复用"
+            );
+            fade_frames += 1;
+            t += 16.0;
+            assert!(t < 5000.0, "动画没有在合理时间内结束");
+        }
+        // 没有这条,上面那个 while 一次都不进也照样绿 —— 断言循环必须自证跑过
+        assert!(
+            fade_frames > 3,
+            "淡入只推进了 {fade_frames} 帧,这条断言等于没测"
+        );
+
+        // 平滑滚动:每帧改滚动偏移 —— 布局树要复用,但坐标要重算
+        sv_ui::anim::scroll_y_to(&doc, scroller, 120.0);
+        let mut frames = 0;
+        let mut t = 0.0;
+        while sv_ui::anim::pump(t) {
+            let _ = crate::render::layout_full_cached(&doc, 800.0, 600.0);
+            assert!(
+                crate::render::cache_has_trees(),
+                "平滑滚动的每一帧都不该重建布局树"
+            );
+            frames += 1;
+            t += 16.0;
+            assert!(t < 5000.0, "动画没有在合理时间内结束");
+        }
+        assert!(frames > 3, "滚动动画至少要推进几帧,否则这条没测到东西");
+    }
+
     /// 分级漏项的差分 fuzz —— **这是变更分级唯一真正的安全网**。
     ///
     /// 分级机制的失败模式是最难查的那种:**不报错、不 panic、别的测试全绿,
