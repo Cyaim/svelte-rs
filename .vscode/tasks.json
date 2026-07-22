@@ -1,0 +1,74 @@
+{
+  // `sv check`:跑 cargo check,把落在生成 .rs 上的 rustc 诊断按 source map
+  // 搬回 .sv,以 rustc 风格单行输出。下面的 problemMatcher 把那一行变成
+  // Problems 面板条目 + 编辑器波浪线 —— **不需要写任何 VS Code 扩展**。
+  //
+  // 用法:Ctrl+Shift+B(默认 build task),或 Ctrl+Shift+P → Tasks: Run Task。
+  // 映射不到的诊断会原样保留生成文件的位置并附一句 `[sv-check: …]` 说明,
+  // 绝不会被吞掉(所以 Problems 面板里出现 target/**/out/*.rs 的条目是**预期**
+  // 行为,不是 bug —— 它在告诉你"这条错误落在编译器生成的胶水上")。
+  //
+  // 正则的两个坑:
+  // 1. Windows 路径带盘符冒号(`E:\...`),所以文件名捕获必须是**懒**的
+  //    (`(\S.*?)`),让引擎回溯到真正的 `:行:列:` 那一处;
+  // 2. 必须以非空白字符开头(`^\S`),否则会把我们缩进输出的源码摘录、
+  //    note/help 子诊断也当成新的一条诊断。
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "sv check (workspace)",
+      "type": "shell",
+      "command": "cargo",
+      "args": ["run", "-q", "-p", "sv-compiler", "--bin", "sv-check"],
+      "group": { "kind": "build", "isDefault": true },
+      "presentation": { "reveal": "silent", "panel": "dedicated", "clear": true },
+      "problemMatcher": {
+        "owner": "sv",
+        "source": "sv-check",
+        "fileLocation": ["autoDetect", "${workspaceFolder}"],
+        "pattern": {
+          "regexp": "^(\\S.*?):(\\d+):(\\d+):\\s+(error|warning|note|help)(?:\\[([^\\]]+)\\])?:\\s+(.*)$",
+          "file": 1,
+          "line": 2,
+          "column": 3,
+          "severity": 4,
+          "code": 5,
+          "message": 6
+        }
+      }
+    },
+    {
+      // 只查一个包:改单个组件时比全 workspace 快一个数量级
+      "label": "sv check (counter-sfc)",
+      "type": "shell",
+      "command": "cargo",
+      "args": [
+        "run",
+        "-q",
+        "-p",
+        "sv-compiler",
+        "--bin",
+        "sv-check",
+        "--",
+        "-p",
+        "counter-sfc"
+      ],
+      "group": "build",
+      "presentation": { "reveal": "silent", "panel": "dedicated", "clear": true },
+      "problemMatcher": {
+        "owner": "sv",
+        "source": "sv-check",
+        "fileLocation": ["autoDetect", "${workspaceFolder}"],
+        "pattern": {
+          "regexp": "^(\\S.*?):(\\d+):(\\d+):\\s+(error|warning|note|help)(?:\\[([^\\]]+)\\])?:\\s+(.*)$",
+          "file": 1,
+          "line": 2,
+          "column": 3,
+          "severity": 4,
+          "code": 5,
+          "message": 6
+        }
+      }
+    }
+  ]
+}

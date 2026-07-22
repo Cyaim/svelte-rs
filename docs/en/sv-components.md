@@ -71,7 +71,7 @@ Everything below is verified by a compiler test in `crates/sv-compiler/src/lib.r
 <text onpointerenter={|| hovers += 1}>hover area</text>
 ```
 
-Mixed static/interpolated text compiles to a single `bind_text` binding; fully static text gets zero bindings. Attribute values are `name="static string"` or `name={rust_expr}`. The event set today: `onclick`/`on:click`, `onpointerenter`, `onpointerleave`, plus keyboard/focus (R1): `onkeydown={|e| ...}` (automatically makes the element focusable; `e.stop_propagation()` cuts bubbling, `e.prevent_default()` cancels the Tab/Enter default layer), `onfocus`/`onblur`, and the boolean attribute `autofocus`. Buttons are Tab-focusable and Enter/Space-activatable with no annotation. Text entry uses `<input>` (a self-closing leaf): `placeholder="..."`, two-way `bind:value={x}`, `oninput={|v| ...}`/`onsubmit={|v| ...}` (signature `Fn(&str)`); caret/selection/IME preedit/Ctrl+C/X/V work out of the box. Unsupported events are a compile error, not a silent no-op. Inline `style="k:v; ..."` and shorthand style attributes (`fg=`, `font-size=`, …) are the styling mini-language — see [./styling.md](./styling.md).
+Mixed static/interpolated text compiles to a single `bind_text` binding; fully static text gets zero bindings. Attribute values are `name="static string"` or `name={rust_expr}`. The event set today: `onclick`/`on:click`, `onpointerenter`, `onpointerleave`, plus keyboard/focus (R1): `onkeydown={|e| ...}` / `onkeyup={|e| ...}` (automatically makes the element focusable; `e.stop_propagation()` cuts bubbling, `e.prevent_default()` cancels the Tab/Enter default layer; a key release reaches handlers but never the default segments — editing, navigation, activation, shortcuts), `onfocus`/`onblur`, and the boolean attribute `autofocus`. Buttons are Tab-focusable and Enter/Space-activatable with no annotation. Text entry uses `<input>` (a self-closing leaf): `placeholder="..."`, two-way `bind:value={x}`, `oninput={|v| ...}`/`onsubmit={|v| ...}` (signature `Fn(&str)`); caret/selection/IME preedit/Ctrl+C/X/V work out of the box, as do drag-select, double-click-to-select-word, triple-click-to-select-all, word motion (Ctrl/⌥+←/→, Ctrl+Backspace/Delete) and undo/redo (Ctrl+Z / Ctrl+Y). Caret and hit-testing geometry come from the same Parley layout that draws the text, so they stay exact under kerning and CJK/Latin font fallback. Multi-line entry uses `<textarea rows="4" />`: same attributes and editing core as `<input>`, except Enter inserts a newline (submit belongs to a button), paste keeps newlines, text wraps at the content width, and the height is `rows` × line height (longer content scrolls instead of growing). ↑/↓ move by **visual** line. Unsupported events are a compile error, not a silent no-op. Inline `style="k:v; ..."` and shorthand style attributes (`fg=`, `font-size=`, …) are the styling mini-language — see [./styling.md](./styling.md).
 
 ### `{#if}` / `{#each}` / `{#key}`
 
@@ -100,6 +100,18 @@ Mixed static/interpolated text compiles to a single `bind_text` binding; fully s
 ```
 
 `{#each expr}` without `as` renders the block N times. Keyed `{#each}` cannot yet combine with an index or `{:else}` (compile error). Branch/row destruction disposes state and bindings created inside the block.
+
+**The binding of a keyed row is reactive** (ADR-7): inside the row, `it` is that row's
+`Signal<T>`, so a row whose key stayed the same but whose content changed **updates in
+place** — no rebuild, no lost row state — and when the order is unchanged the tree isn't
+touched at all. The cost: the binding must be a **single identifier** (destructure with
+`{@const}` inside the row instead), and the item type needs `Clone + PartialEq`.
+Non-keyed `{#each}` is unchanged: still a whole-block rebuild with a plain-value binding.
+
+⚠️ **Component props are snapshots**: `<TaskRow label={it.1} />` reads the value once,
+when the row is built. Markup written directly in the row (`<text>{it.1}</text>`) follows
+content updates; a prop passed into a child component does not — pass a signal for that
+(see `$bindable`).
 
 ### `{#await}` / `{:then}` / `{:catch}`
 
@@ -151,7 +163,7 @@ Snippets compile to local closures; parameters are typed Rust patterns. Argument
 <Stepper bind:value={count} />       <!-- component binding: raw Signal handle, see $bindable -->
 ```
 
-Element-level `bind:` supports **only `bind:checked` on `<checkbox>`** today. `bind:value` and the other Svelte targets need text-input controls and layout measurement that don't exist yet — using them is a compile error pointing at the support matrix.
+Element-level `bind:` supports `bind:checked` on `<checkbox>`, `bind:value` on `<input>`/`<textarea>`, and `bind:scrolly` on a scroll container. The remaining Svelte targets (`bind:this`, dimension bindings, media bindings) are a compile error pointing at the support matrix.
 
 ### Transitions
 
@@ -240,9 +252,57 @@ fn main() {
 `sv_compiler::build("src")` recursively collects `*.sv`, registers all `$props` signatures, then compiles each file to `$OUT_DIR/<fn_name>.rs`, emitting `cargo::rerun-if-changed` per file; a compile failure panics with `file:line:col: message`. Multi-component apps `include!` every generated file into one scope — e.g. `examples/todo-sfc/src/main.rs` includes both `todo.rs` and `todo_item.rs`.
 
 ```sh
-cargo run -p counter-sfc                    # open a window
-cargo run -p counter-sfc -- --png out.png   # render one frame offscreen, no window needed
+cargo run -p counter-sfc                    # windowed
+cargo run -p counter-sfc -- --png out.png   # render one frame offscreen, no window
 ```
+
+## `sv check`: make rustc errors point back at the `.sv`
+
+A `.sv` compiles to a `.rs` under `$OUT_DIR`, and **rustc has no `#line` directive** —
+so type errors naturally land on the generated file, with generated-file line/columns.
+rust-analyzer *already* indexes the generated files under `OUT_DIR` and reports
+diagnostics at the right place there; what is left is purely **position mapping**.
+
+That is what `sv check` does: it runs `cargo check --message-format=json`, relocates
+diagnostics that land on generated files back to `.sv` line/columns, and prints them
+rustc-style.
+
+```sh
+cargo run -p sv-compiler --bin sv-check            # whole workspace
+cargo run -p sv-compiler --bin sv-check -- -p counter-sfc
+```
+
+```text
+examples/counter-sfc/src/Counter.sv:12:38: error[E0277]: cannot add `&str` to `i32`
+     |
+  12 |   <text font-size="20">Count: {count + "x"} · 双倍 = {double}</text>
+     |                                      ^
+   = 生成文件对应位置: .../out/counter.rs:44:44
+```
+
+Columns are **1-based character columns** (same as rustc), so a CJK / full-width
+prefix does not shift the caret.
+
+`.vscode/tasks.json` ships a task with a matching problemMatcher, so diagnostics land
+straight in the VS Code Problems panel.
+
+**What it maps, and where it stops** (all measured, not claimed):
+
+- Coverage is about **80%** (281 of 349 user-written Rust tokens across 10 `.sv` files
+  get an exact mapping).
+- When it cannot map, it **never drops the diagnostic** — it emits the generated-file
+  position verbatim plus one line saying why the mapping failed (five distinct reasons:
+  no map, corrupt map, stale map, `.sv` missing, anchor table blown). Swallowing a
+  diagnostic is much worse than not relocating it.
+- Diagnostics landing on runes-rewrite output (glue code) cannot be mapped back. That is
+  a design boundary: `count += 1` becomes `let __sv_rhs = 1; count.update(..)`, moving
+  `1` *ahead of* `count` — forcing an alignment there would only produce
+  plausible-but-wrong line numbers.
+- The envelope is **not truly nested**: its granularity is "one line of one parse entry",
+  so no interpolation happens across statements — it degrades to "unmapped" instead.
+
+Style-domain and template-domain errors are reported by the compiler itself and already
+carry `.sv` line/columns; they never go through this path.
 
 ## The `view!` macro route
 

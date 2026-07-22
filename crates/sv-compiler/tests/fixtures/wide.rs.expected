@@ -1,0 +1,571 @@
+// 由 sv-compiler 生成,请勿手改。
+#[allow(unused_variables, unused_mut, unused_braces, unused_parens, clippy::all)]
+pub fn wide(doc: &::sv_ui::Doc, parent: ::sv_ui::ViewId) {
+    let __doc: ::sv_ui::Doc = doc.clone();
+    let __parent = parent;
+    let count = ::sv_reactive::state(0i32);
+    let name = ::sv_reactive::state(String::from("世界"));
+    let double = ::sv_reactive::derived(move || count.get() * 2);
+    let items = ::sv_reactive::state(
+        vec![(1i32, String::from("甲")), (2, String::from("乙"))],
+    );
+    let agree = ::sv_reactive::state(false);
+    let note = ::sv_reactive::state(String::new());
+    let scroll_y = ::sv_reactive::state(0f32);
+    let label = String::from("普通变量,会被预克隆");
+    ::sv_reactive::effect(move || {
+        let _ = count.get();
+    });
+    {
+        let label = ::std::clone::Clone::clone(&label);
+        let __el1 = __doc.create_view();
+        __doc.append(__parent, __el1);
+        __doc
+            .update_style(
+                __el1,
+                |s| {
+                    s.padding = ::sv_ui::Edges {
+                        top: 16f32,
+                        right: 16f32,
+                        bottom: 16f32,
+                        left: 16f32,
+                    };
+                    s.bg = Some(::sv_ui::Color::rgba(255u8, 255u8, 255u8, 255u8));
+                    s.gap = 8f32;
+                },
+            );
+        {
+            let __parent = __el1;
+            let __el2 = __doc.create_text("");
+            ::sv_ui::bind_text(
+                &__doc,
+                __el2,
+                move || {
+                    let mut __s = ::std::string::String::new();
+                    __s.push_str("你好 ");
+                    __s.push_str(&(name.get()).to_string());
+                    __s.push_str(",计数 ");
+                    __s.push_str(&(count.get()).to_string());
+                    __s.push_str(",双倍 ");
+                    __s.push_str(&(double.get()).to_string());
+                    __s
+                },
+            );
+            __doc.append(__parent, __el2);
+            __doc
+                .update_style(
+                    __el2,
+                    |s| {
+                        s.fg = Some(::sv_ui::Color::rgba(34u8, 51u8, 68u8, 255u8));
+                        s.font_size = 26f32;
+                    },
+                );
+            let __el3 = __doc.create_button("加一");
+            __doc.append(__parent, __el3);
+            {
+                let __hv = ::sv_reactive::state(false);
+                let __ac = ::sv_reactive::state(false);
+                let __fc = ::sv_reactive::state(false);
+                ::sv_ui::bind_style(
+                    &__doc,
+                    __el3,
+                    move |s| {
+                        s.padding = ::sv_ui::Edges {
+                            top: 8f32,
+                            right: 8f32,
+                            bottom: 8f32,
+                            left: 8f32,
+                        };
+                        s.corner_radius = 6f32;
+                        s.bg = Some(::sv_ui::Color::rgba(60u8, 120u8, 255u8, 255u8));
+                        s.fg = Some(::sv_ui::Color::rgba(255u8, 255u8, 255u8, 255u8));
+                        if __fc.get() {
+                            s.border = Some(::sv_ui::Border {
+                                width: 2f32,
+                                color: ::sv_ui::Color::rgba(10u8, 47u8, 143u8, 255u8),
+                            });
+                        }
+                        if __hv.get() {
+                            s.bg = Some(::sv_ui::Color::rgba(47u8, 102u8, 230u8, 255u8));
+                        }
+                        if __ac.get() {
+                            s.opacity = 0.8f32;
+                        }
+                    },
+                );
+                let __ue = || {};
+                let __ul = || {};
+                __doc
+                    .set_on_pointer_enter(
+                        __el3,
+                        move || {
+                            __hv.set(true);
+                            __ue();
+                        },
+                    );
+                __doc
+                    .set_on_pointer_leave(
+                        __el3,
+                        move || {
+                            __hv.set(false);
+                            __ul();
+                        },
+                    );
+                __doc.set_on_pointer_down(__el3, move || __ac.set(true));
+                __doc.set_on_pointer_up(__el3, move || __ac.set(false));
+                __doc.set_focusable(__el3, true);
+                {
+                    let __uf = || {};
+                    let __ub = || {};
+                    __doc
+                        .set_on_focus_change(
+                            __el3,
+                            move |__f| {
+                                __fc.set(__f);
+                                if __f {
+                                    __uf();
+                                } else {
+                                    __ub();
+                                }
+                            },
+                        );
+                }
+            }
+            __doc
+                .set_on_click(
+                    __el3,
+                    move || {
+                        let __sv_rhs = 1;
+                        count.update(|__v| *__v += __sv_rhs)
+                    },
+                );
+            let __el4 = __doc.create_button("重置");
+            __doc.append(__parent, __el4);
+            {
+                let __hv = ::sv_reactive::state(false);
+                let __ac = ::sv_reactive::state(false);
+                let __fc = ::sv_reactive::state(false);
+                ::sv_ui::bind_style(
+                    &__doc,
+                    __el4,
+                    move |s| {
+                        s.padding = ::sv_ui::Edges {
+                            top: 8f32,
+                            right: 8f32,
+                            bottom: 8f32,
+                            left: 8f32,
+                        };
+                        s.corner_radius = 6f32;
+                        s.bg = Some(::sv_ui::Color::rgba(60u8, 120u8, 255u8, 255u8));
+                        s.fg = Some(::sv_ui::Color::rgba(255u8, 255u8, 255u8, 255u8));
+                        if __fc.get() {
+                            s.border = Some(::sv_ui::Border {
+                                width: 2f32,
+                                color: ::sv_ui::Color::rgba(10u8, 47u8, 143u8, 255u8),
+                            });
+                        }
+                        if __hv.get() {
+                            s.bg = Some(::sv_ui::Color::rgba(47u8, 102u8, 230u8, 255u8));
+                        }
+                        if __ac.get() {
+                            s.opacity = 0.8f32;
+                        }
+                    },
+                );
+                let __ue = || {};
+                let __ul = || {};
+                __doc
+                    .set_on_pointer_enter(
+                        __el4,
+                        move || {
+                            __hv.set(true);
+                            __ue();
+                        },
+                    );
+                __doc
+                    .set_on_pointer_leave(
+                        __el4,
+                        move || {
+                            __hv.set(false);
+                            __ul();
+                        },
+                    );
+                __doc.set_on_pointer_down(__el4, move || __ac.set(true));
+                __doc.set_on_pointer_up(__el4, move || __ac.set(false));
+                __doc.set_focusable(__el4, true);
+                {
+                    let __uf = || {};
+                    let __ub = || {};
+                    __doc
+                        .set_on_focus_change(
+                            __el4,
+                            move |__f| {
+                                __fc.set(__f);
+                                if __f {
+                                    __uf();
+                                } else {
+                                    __ub();
+                                }
+                            },
+                        );
+                }
+            }
+            __doc.set_on_click(__el4, move || count.set(0));
+            {
+                let __a_doc = __doc.clone();
+                let __a_el = __el4;
+                ::sv_reactive::effect(move || {
+                    __a_doc
+                        .set_accessible_label(
+                            __a_el,
+                            &(format!("重置(当前 {count})")),
+                        );
+                });
+            }
+            __doc.set_focusable(__el4, true);
+            {
+                let __kd = move |e| {
+                    let _ = e;
+                };
+                let __ku = move |e| {
+                    let _ = e;
+                };
+                __doc
+                    .set_on_key(
+                        __el4,
+                        move |__e| {
+                            if __e.is_up() {
+                                __ku(__e);
+                            } else {
+                                __kd(__e);
+                            }
+                        },
+                    );
+            }
+            {
+                let label = ::std::clone::Clone::clone(&label);
+                let __el5 = __doc.create_view();
+                __doc.append(__parent, __el5);
+                __doc
+                    .update_style(
+                        __el5,
+                        |s| {
+                            s.direction = ::sv_ui::Direction::Row;
+                            s.gap = 4f32;
+                        },
+                    );
+                {
+                    let __parent = __el5;
+                    let __el6 = __doc.create_checkbox();
+                    __doc.append(__parent, __el6);
+                    {
+                        let __b_sig = agree;
+                        let __b_doc = __doc.clone();
+                        let __b_el = __el6;
+                        ::sv_reactive::effect(move || {
+                            __b_doc.set_checked(__b_el, __b_sig.get());
+                        });
+                        __doc
+                            .set_on_click(
+                                __el6,
+                                move || __b_sig.update(|__v| *__v = !*__v),
+                            );
+                    }
+                    {
+                        let label = ::std::clone::Clone::clone(&label);
+                        let __el7 = __doc.create_text("");
+                        ::sv_ui::bind_text(
+                            &__doc,
+                            __el7,
+                            move || {
+                                let mut __s = ::std::string::String::new();
+                                __s.push_str(&(label).to_string());
+                                __s
+                            },
+                        );
+                        __doc.append(__parent, __el7);
+                        __doc
+                            .update_style(
+                                __el7,
+                                |s| {
+                                    s.fg = Some(::sv_ui::Color::rgba(34u8, 51u8, 68u8, 255u8));
+                                },
+                            );
+                    }
+                }
+            }
+            let __el8 = __doc.create_text_input();
+            __doc.append(__parent, __el8);
+            __doc.set_placeholder(__el8, "单行");
+            {
+                let __b_sig = name;
+                let __b_doc = __doc.clone();
+                let __b_el = __el8;
+                ::sv_reactive::effect(move || {
+                    __b_doc.set_input_value(__b_el, &__b_sig.get());
+                });
+                __doc.set_on_input(__el8, move |__v| __b_sig.set(__v.to_string()));
+            }
+            __doc
+                .set_on_input(
+                    __el8,
+                    move |v| {
+                        let _ = v;
+                    },
+                );
+            __doc
+                .set_on_submit(
+                    __el8,
+                    move |v| {
+                        let _ = v;
+                    },
+                );
+            let __el9 = __doc.create_text_input();
+            __doc.append(__parent, __el9);
+            __doc.set_placeholder(__el9, "多行");
+            {
+                let __b_sig = note;
+                let __b_doc = __doc.clone();
+                let __b_el = __el9;
+                ::sv_reactive::effect(move || {
+                    __b_doc.set_input_value(__b_el, &__b_sig.get());
+                });
+                __doc.set_on_input(__el9, move |__v| __b_sig.set(__v.to_string()));
+            }
+            __doc.set_multiline(__el9, true, 3u16);
+            ::sv_ui::if_block(
+                &__doc,
+                __parent,
+                move || count.get() > 3,
+                move |__doc, __parent| {
+                    let __doc: ::sv_ui::Doc = __doc.clone();
+                    let __el10 = __doc.create_text("超过 3 了");
+                    __doc.append(__parent, __el10);
+                    __doc
+                        .update_style(
+                            __el10,
+                            |s| {
+                                s.fg = Some(::sv_ui::Color::rgba(34u8, 51u8, 68u8, 255u8));
+                                s.fg = Some(::sv_ui::Color::rgba(255u8, 62u8, 0u8, 255u8));
+                            },
+                        );
+                },
+                move |__doc, __parent| {
+                    let __doc: ::sv_ui::Doc = __doc.clone();
+                    ::sv_ui::if_block(
+                        &__doc,
+                        __parent,
+                        move || count.get() > 1,
+                        move |__doc, __parent| {
+                            let __doc: ::sv_ui::Doc = __doc.clone();
+                            let __el11 = __doc.create_text("刚过 1");
+                            __doc.append(__parent, __el11);
+                            __doc
+                                .update_style(
+                                    __el11,
+                                    |s| {
+                                        s.fg = Some(::sv_ui::Color::rgba(34u8, 51u8, 68u8, 255u8));
+                                    },
+                                );
+                        },
+                        move |__doc, __parent| {
+                            let __doc: ::sv_ui::Doc = __doc.clone();
+                            let __el12 = __doc.create_text("还早");
+                            __doc.append(__parent, __el12);
+                            __doc
+                                .update_style(
+                                    __el12,
+                                    |s| {
+                                        s.fg = Some(::sv_ui::Color::rgba(34u8, 51u8, 68u8, 255u8));
+                                    },
+                                );
+                        },
+                    );
+                },
+            );
+            ::sv_ui::each_block_keyed(
+                &__doc,
+                __parent,
+                move || items.get(),
+                |__item| {
+                    let it = ::std::clone::Clone::clone(__item);
+                    it.0
+                },
+                move |__doc, __parent, __item| {
+                    let __doc: ::sv_ui::Doc = __doc.clone();
+                    let it = __item;
+                    let __el13 = __doc.create_text("");
+                    ::sv_ui::bind_text(
+                        &__doc,
+                        __el13,
+                        move || {
+                            let mut __s = ::std::string::String::new();
+                            __s.push_str(&(it.get().1).to_string());
+                            __s
+                        },
+                    );
+                    __doc.append(__parent, __el13);
+                    __doc
+                        .update_style(
+                            __el13,
+                            |s| {
+                                s.fg = Some(::sv_ui::Color::rgba(34u8, 51u8, 68u8, 255u8));
+                            },
+                        );
+                },
+            );
+            ::sv_ui::each_block_else(
+                &__doc,
+                __parent,
+                move || items.get(),
+                move |__doc, __parent, __item, __index| {
+                    let __doc: ::sv_ui::Doc = __doc.clone();
+                    let pair = ::std::clone::Clone::clone(__item);
+                    let i = __index;
+                    {
+                        let i = ::std::clone::Clone::clone(&i);
+                        let pair = ::std::clone::Clone::clone(&pair);
+                        let __el14 = __doc.create_text("");
+                        ::sv_ui::bind_text(
+                            &__doc,
+                            __el14,
+                            move || {
+                                let mut __s = ::std::string::String::new();
+                                __s.push_str(&(i).to_string());
+                                __s.push_str(": ");
+                                __s.push_str(&(pair.1).to_string());
+                                __s
+                            },
+                        );
+                        __doc.append(__parent, __el14);
+                        __doc
+                            .update_style(
+                                __el14,
+                                |s| {
+                                    s.fg = Some(::sv_ui::Color::rgba(34u8, 51u8, 68u8, 255u8));
+                                },
+                            );
+                    }
+                },
+                move |__doc, __parent| {
+                    let __doc: ::sv_ui::Doc = __doc.clone();
+                    let __el15 = __doc.create_text("空列表");
+                    __doc.append(__parent, __el15);
+                    __doc
+                        .update_style(
+                            __el15,
+                            |s| {
+                                s.fg = Some(::sv_ui::Color::rgba(34u8, 51u8, 68u8, 255u8));
+                            },
+                        );
+                },
+            );
+            ::sv_ui::key_block(
+                &__doc,
+                __parent,
+                move || count.get(),
+                move |__doc, __parent| {
+                    let __doc: ::sv_ui::Doc = __doc.clone();
+                    let __el16 = __doc.create_text("随 count 重建");
+                    __doc.append(__parent, __el16);
+                    __doc
+                        .update_style(
+                            __el16,
+                            |s| {
+                                s.fg = Some(::sv_ui::Color::rgba(34u8, 51u8, 68u8, 255u8));
+                            },
+                        );
+                },
+            );
+            let __el17 = __doc.create_view();
+            __doc.append(__parent, __el17);
+            __doc
+                .update_style(
+                    __el17,
+                    |s| {
+                        s.overflow = ::sv_ui::Overflow::Scroll;
+                        s.overflow_x = ::sv_ui::Overflow::Hidden;
+                        s.height = Some(60f32);
+                    },
+                );
+            __doc
+                .set_on_scroll(
+                    __el17,
+                    move |x, y| {
+                        let _ = (x, y);
+                    },
+                );
+            ::sv_ui::bind_scroll_y(&__doc, __el17, scroll_y);
+            {
+                let __parent = __el17;
+                let __el18 = __doc.create_text("可滚内容");
+                __doc.append(__parent, __el18);
+                __doc
+                    .update_style(
+                        __el18,
+                        |s| {
+                            s.fg = Some(::sv_ui::Color::rgba(34u8, 51u8, 68u8, 255u8));
+                        },
+                    );
+            }
+            ::sv_ui::tasks::await_block(
+                &__doc,
+                __parent,
+                move || async move { 42i32 },
+                move |__doc, __parent| {
+                    let __doc: ::sv_ui::Doc = __doc.clone();
+                    let __el19 = __doc.create_text("算着呢");
+                    __doc.append(__parent, __el19);
+                    __doc
+                        .update_style(
+                            __el19,
+                            |s| {
+                                s.fg = Some(::sv_ui::Color::rgba(34u8, 51u8, 68u8, 255u8));
+                            },
+                        );
+                },
+                move |__doc, __parent, __value| {
+                    let __doc: ::sv_ui::Doc = __doc.clone();
+                    let v = ::std::clone::Clone::clone(__value);
+                    {
+                        let v = ::std::clone::Clone::clone(&v);
+                        let __el20 = __doc.create_text("");
+                        ::sv_ui::bind_text(
+                            &__doc,
+                            __el20,
+                            move || {
+                                let mut __s = ::std::string::String::new();
+                                __s.push_str("算完了 ");
+                                __s.push_str(&(v).to_string());
+                                __s
+                            },
+                        );
+                        __doc.append(__parent, __el20);
+                        __doc
+                            .update_style(
+                                __el20,
+                                |s| {
+                                    s.fg = Some(::sv_ui::Color::rgba(34u8, 51u8, 68u8, 255u8));
+                                },
+                            );
+                    }
+                },
+            );
+            let __el21 = __doc.create_view();
+            __doc.append(__parent, __el21);
+            ::sv_ui::anim::transition_in_fade(&__doc, __el21, 200);
+            {
+                let __parent = __el21;
+                let __el22 = __doc.create_text("淡入");
+                __doc.append(__parent, __el22);
+                __doc
+                    .update_style(
+                        __el22,
+                        |s| {
+                            s.fg = Some(::sv_ui::Color::rgba(34u8, 51u8, 68u8, 255u8));
+                        },
+                    );
+            }
+        }
+    }
+}

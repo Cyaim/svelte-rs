@@ -1,0 +1,100 @@
+# 应用打包(R4-R5,调研 25 §3.3)
+#
+# 库走 crates.io,应用走安装包。这条流水线拿 examples/showcase 当样板,
+# 三平台各出一份**未签名**产物:Windows nsis / macOS dmg / Linux appimage。
+#
+# 为什么不签名:Authenticode 证书与 Apple Developer ID + 公证都是组织级账号
+# 事务,工程侧只能把钩子留好(cargo-packager 支持 signing 配置,填入密钥即可)。
+# 未签名产物在 Windows 会弹 SmartScreen、在 macOS 会被 Gatekeeper 拦——
+# 这是预期行为,不是 bug。
+#
+# 手动触发(不进 PR 门禁:每次跑要装 packager + 三平台构建,太贵)。
+name: Package
+
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  package:
+    name: package (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # rust-cache 默认也缓存 ~/.cargo/bin,所以下面那句 cargo install 只在
+      # 缓存失效那次真编(cargo-packager 自己那棵树要好几分钟)。
+      # 这里**不加** save-if:本工作流只在 workflow_dispatch / release 上跑,
+      # 多半不在 main 的 ref 上,按 main 限存等于永远命不中
+      - uses: Swatinem/rust-cache@v2
+
+      # AppImage 打包需要 fuse;渲染需要真实字体(fontique 发现系统字体)
+      - name: Linux 依赖
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fonts-noto-cjk libfuse2 file desktop-file-utils
+
+      - name: 安装 cargo-packager
+        run: cargo install cargo-packager --locked
+
+      - name: 构建 release
+        run: cargo build -p showcase --release
+
+      - name: 打包(未签名)
+        run: cargo packager -p showcase --release --verbose
+
+      # cargo-packager 的产物落点会随格式和版本变(nsis 走子目录,dmg/appimage
+      # 有时直接落在 target/release 根上),把 glob 写死迟早对不上。而
+      # upload-artifact 匹配不到默认只是 warn —— 那个组合的结果是**绿灯 + 空包**,
+      # 等真要发版才发现,是最难受的一种失败。
+      # 改成:按扩展名捞一遍,捞不到就当场红;捞到的收进 dist/ 再整目录上传,
+      # 上传侧就不用猜路径了。顺带把清单写进 step summary,下次谁想知道
+      # packager 到底往哪儿写,看一眼就有,不用去翻 --verbose 日志。
+      - name: 收集产物
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          {
+            echo "### ${{ matrix.os }} 打包产物"
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+          found=0
+          while IFS= read -r f; do
+            cp "$f" dist/
+            echo "- \`${f}\` ($(du -h "$f" | cut -f1))" >> "$GITHUB_STEP_SUMMARY"
+            found=1
+          done < <(find target/release -maxdepth 3 -type f \
+                     \( -name '*.exe' -o -name '*.msi' -o -name '*.dmg' \
+                        -o -name '*.AppImage' -o -name '*.deb' -o -name '*.rpm' \) \
+                     -not -path 'target/release/build/*' \
+                     -not -path 'target/release/deps/*' \
+                     -not -path 'target/release/incremental/*' \
+                     -not -name 'showcase.exe')
+          # 排除 showcase.exe 是**故意**的:那是 cargo build 出的裸可执行,
+          # 不是安装包。留着它 Windows 这条道即使 packager 整个没产出也能
+          # 凑够一个文件,这道检查就白装了
+          if [ "$found" = 0 ]; then
+            echo "::error::cargo packager 没产出任何安装包 —— 落点变了?看上一步 --verbose 日志里的实际路径,再调这里的 find"
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: showcase-${{ matrix.os }}
+          path: dist
+          # 上一步已经保证 dist/ 非空,这里再红一次说明是上传侧的问题,
+          # 不能像原来那样 warn 了事
+          if-no-files-found: error

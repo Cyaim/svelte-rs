@@ -6,6 +6,9 @@ members = [
     "crates/sv-macro",
     "crates/sv-compiler",
     "crates/sv-shell",
+    "crates/sv-lottie",
+    "crates/sv-pag",
+    "crates/sv-vap",
     "examples/counter",
     "examples/counter-sfc",
     "examples/todo-sfc",
@@ -14,20 +17,34 @@ members = [
     "examples/input-demo",
     "examples/settings-sfc",
     "examples/overlay-demo",
+    "examples/vap-gift",
 ]
 
 [workspace.package]
 version = "0.0.1"
 edition = "2024"
 license = "MIT OR Apache-2.0"
+# MSRV 由 **let-chains**(`if let ... && ...`,全仓大量使用)定在 1.88——
+# 不是 edition 2024 的 1.85:let-chains 虽然只在 edition 2024 可用,
+# 稳定却晚了三个版本。CI 有一条 MSRV 构建道钉死(调研 25 §3.2)
+rust-version = "1.88"
+repository = "https://github.com/Cyaim/svelte-rs"
+homepage = "https://github.com/Cyaim/svelte-rs"
+keywords = ["gui", "ui", "svelte", "reactive", "desktop"]
+categories = ["gui", "rendering"]
+authors = ["svelte-rs contributors"]
 
 [workspace.dependencies]
 slotmap = "1.0"
-sv-reactive = { path = "crates/sv-reactive" }
-sv-ui = { path = "crates/sv-ui" }
-sv-macro = { path = "crates/sv-macro" }
-sv-compiler = { path = "crates/sv-compiler" }
-sv-shell = { path = "crates/sv-shell" }
+# version 必须写:打包时 cargo 会剥掉 path,只留 version 指向 crates.io
+sv-reactive = { path = "crates/sv-reactive", version = "0.0.1" }
+sv-ui = { path = "crates/sv-ui", version = "0.0.1" }
+sv-macro = { path = "crates/sv-macro", version = "0.0.1" }
+sv-compiler = { path = "crates/sv-compiler", version = "0.0.1" }
+sv-shell = { path = "crates/sv-shell", version = "0.0.1" }
+sv-lottie = { path = "crates/sv-lottie", version = "0.0.1" }
+sv-pag = { path = "crates/sv-pag", version = "0.0.1" }
+sv-vap = { path = "crates/sv-vap", version = "0.0.1" }
 
 [profile.dev]
 # UI 原型迭代期:略微提高优化等级让 demo 不至于太卡,同时保持编译速度

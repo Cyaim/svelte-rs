@@ -1,7 +1,7 @@
 //! 样式语言 → Style 字段赋值代码(**C1 批次:真 CSS 语法封闭子集**,ADR-8)。
 //!
 //! - 规则:`.类`(scoped)、元素类型(view/text/button/checkbox)、`:root { --x }` 变量;
-//!   伪类 `:hover`/`:active`(独立规则或 CSS 嵌套 `& :pseudo` 形态)
+//!   伪类 `:hover`/`:active`/`:focus`(独立规则或 CSS 嵌套 `& :pseudo` 形态)
 //! - 声明:标准属性名 + 本地简名;padding/margin 1–4 值简写与 `-left` 系长手;
 //!   `border: 1px solid <color>` 与 `border: none`;`cursor`
 //! - 单位:px / rem(编译期 ×16)/ 裸数;em/%/vw/vh 报错引导(P2/C2)
@@ -24,6 +24,9 @@ pub struct ClassStyle {
     pub base: TokenStream,
     pub hover: Option<TokenStream>,
     pub active: Option<TokenStream>,
+    /// `:focus`(R1 档 B):走焦点链,不是指针状态 —— 键盘用户唯一的
+    /// 位置反馈,缺了它纯键盘操作就是盲飞
+    pub focus: Option<TokenStream>,
 }
 
 /// `<style>` 块编译产物
@@ -35,7 +38,7 @@ pub struct StyleSheet {
     pub elements: HashMap<String, ClassStyle>,
 }
 
-const ELEMENT_NAMES: &[&str] = &["view", "text", "button", "checkbox", "input"];
+const ELEMENT_NAMES: &[&str] = &["view", "text", "button", "checkbox", "input", "textarea"];
 const REM: f32 = 16.0;
 
 struct BlockParser<'a> {
@@ -219,12 +222,11 @@ pub fn parse_style_block(
             pseudo = Some(match ps.as_str() {
                 "hover" => "hover",
                 "active" => "active",
+                "focus" => "focus",
                 other => {
                     return Err(p.err(
                         rel,
-                        format!(
-                            "暂支持 :hover/:active(:focus/:disabled 随焦点链 C2),收到 `:{other}`"
-                        ),
+                        format!("暂支持 :hover/:active/:focus(:disabled 待禁用态),收到 `:{other}`"),
                     ));
                 }
             });
@@ -237,7 +239,7 @@ pub fn parse_style_block(
         let body = p.read_braced()?;
 
         // 解析规则体:声明 + 嵌套 `&:pseudo { }`
-        let (base, mut hover, mut active) =
+        let (base, mut hover, mut active, mut focus) =
             parse_rule_body(source, body, offset + body_rel, &vars)?;
         let entry = if is_class {
             sheet.classes.entry(name.clone()).or_default()
@@ -256,6 +258,10 @@ pub fn parse_style_block(
             Some("active") => {
                 active = Some(base.clone());
                 (None, "active")
+            }
+            Some("focus") => {
+                focus = Some(base.clone());
+                (None, "focus")
             }
             _ => (Some(base), "base"),
         };
@@ -277,21 +283,35 @@ pub fn parse_style_block(
             }
             entry.active = Some(a);
         }
+        if let Some(f) = focus {
+            if entry.focus.is_some() {
+                return Err(p.err(name_rel, format!("`{name}:focus` 重复定义")));
+            }
+            entry.focus = Some(f);
+        }
         let _ = msg;
     }
     Ok(sheet)
 }
 
-/// 规则体:声明序列 + CSS 嵌套 `&:hover { ... }` / `&:active { ... }`
+/// 规则体:声明序列 + CSS 嵌套 `&:hover` / `&:active` / `&:focus`
+type RuleBody = (
+    TokenStream,
+    Option<TokenStream>,
+    Option<TokenStream>,
+    Option<TokenStream>,
+);
+
 fn parse_rule_body(
     source: &str,
     body: &str,
     offset: usize,
     vars: &HashMap<String, String>,
-) -> Result<(TokenStream, Option<TokenStream>, Option<TokenStream>), CompileError> {
+) -> Result<RuleBody, CompileError> {
     let mut decls = String::new();
     let mut hover = None;
     let mut active = None;
+    let mut focus = None;
     let mut p = BlockParser {
         source,
         block: body,
@@ -307,7 +327,7 @@ fn parse_rule_body(
             p.pos += 1;
             p.skip_trivia()?;
             if !body[p.pos..].starts_with(':') {
-                return Err(p.err(p.pos, "嵌套规则 v0 支持 `&:hover` / `&:active`"));
+                return Err(p.err(p.pos, "嵌套规则 v0 支持 `&:hover` / `&:active` / `&:focus`"));
             }
             p.pos += 1;
             let rel = p.pos;
@@ -322,8 +342,12 @@ fn parse_rule_body(
             match ps.as_str() {
                 "hover" => hover = Some(setters),
                 "active" => active = Some(setters),
+                "focus" => focus = Some(setters),
                 other => {
-                    return Err(p.err(rel, format!("嵌套伪类支持 hover/active,收到 `{other}`")));
+                    return Err(p.err(
+                        rel,
+                        format!("嵌套伪类支持 hover/active/focus,收到 `{other}`"),
+                    ));
                 }
             }
         } else {
@@ -346,7 +370,7 @@ fn parse_rule_body(
         }
     }
     let base = parse_style_with_vars(source, &decls, offset, vars)?;
-    Ok((base, hover, active))
+    Ok((base, hover, active, focus))
 }
 
 /// 解析声明串(内联 style="" 与简写属性也走这里;无变量环境)
@@ -418,14 +442,14 @@ fn parse_style_with_vars(
         };
         let key = key.trim();
         let err = |msg: String| CompileError::at_offset(source, decl_offset, msg);
-        let value = substitute_vars(raw_value.trim(), vars).map_err(&err)?;
+        let value = substitute_vars(raw_value.trim(), vars).map_err(err)?;
         let value = value.trim();
 
-        let num = |v: &str| -> Result<f32, CompileError> { parse_length(key, v).map_err(&err) };
+        let num = |v: &str| -> Result<f32, CompileError> { parse_length(key, v).map_err(err) };
         let nums = || -> Result<Vec<f32>, CompileError> {
             value
                 .split_whitespace()
-                .map(|v| parse_length(key, v).map_err(&err))
+                .map(|v| parse_length(key, v).map_err(err))
                 .collect()
         };
 
@@ -470,12 +494,12 @@ fn parse_style_with_vars(
                         Some(i) => (&rest[..i], rest[i..].trim_start()),
                         None => (rest, ""),
                     };
-                    let w = parse_length("border", w_tok).map_err(&err)?;
+                    let w = parse_length("border", w_tok).map_err(err)?;
                     let mut rest = after;
                     if let Some(r) = rest.strip_prefix("solid") {
                         rest = r.trim_start();
                     }
-                    let c = color(if rest.is_empty() { "black" } else { rest }).map_err(&err)?;
+                    let c = color(if rest.is_empty() { "black" } else { rest }).map_err(err)?;
                     quote! { s.border = Some(::sv_ui::Border { width: #w, color: #c }); }
                 }
             }
@@ -607,19 +631,28 @@ fn parse_style_with_vars(
                     )));
                 }
             },
-            "overflow" => match value {
-                "visible" => quote! { s.overflow = ::sv_ui::Overflow::Visible; },
-                "hidden" => quote! { s.overflow = ::sv_ui::Overflow::Hidden; },
-                // v0:auto 按 scroll 处理(调研 22 §2.5)
-                "scroll" | "auto" => quote! { s.overflow = ::sv_ui::Overflow::Scroll; },
-                _ => {
-                    return Err(err(format!(
-                        "overflow 支持 visible/hidden/scroll/auto,收到 `{value}`"
-                    )));
+            // overflow 简写写两轴;overflow-x/-y 各写一轴(CSS 同款)
+            "overflow" | "overflow-x" | "overflow-y" => {
+                let variant = match value {
+                    "visible" => quote! { ::sv_ui::Overflow::Visible },
+                    "hidden" => quote! { ::sv_ui::Overflow::Hidden },
+                    "scroll" | "auto" => quote! { ::sv_ui::Overflow::Scroll },
+                    _ => {
+                        return Err(CompileError::at_offset(
+                            source,
+                            offset,
+                            format!("{key} 支持 visible/hidden/scroll/auto,收到 `{value}`"),
+                        ));
+                    }
+                };
+                match key {
+                    "overflow-x" => quote! { s.overflow_x = #variant; },
+                    "overflow-y" => quote! { s.overflow = #variant; },
+                    _ => quote! { s.overflow = #variant; s.overflow_x = #variant; },
                 }
-            },
+            }
             "bg" | "background" | "background-color" => {
-                let c = color(value).map_err(&err)?;
+                let c = color(value).map_err(err)?;
                 quote! { s.bg = Some(#c); }
             }
             "fg" | "color" => {
@@ -627,7 +660,7 @@ fn parse_style_with_vars(
                     // 继承语义:清除自身值,渲染时沿父链解析
                     quote! { s.fg = None; }
                 } else {
-                    let c = color(value).map_err(&err)?;
+                    let c = color(value).map_err(err)?;
                     quote! { s.fg = Some(#c); }
                 }
             }
@@ -635,7 +668,8 @@ fn parse_style_with_vars(
                 return Err(err(format!(
                     "未知样式键 `{key}`(支持盒模型 padding/margin/border(-radius)、gap、font-size、\
                      opacity、width/height/min-max、flex 系(direction/grow/shrink/wrap/justify-content/\
-                     align-items/align-self)、background(-color)、color、cursor、overflow、\
+                     align-items/align-self)、background(-color)、color、cursor、\
+                     overflow(-x/-y)、\
                      white-space、text-align;其余见 CSS-SUPPORT 矩阵)"
                 )));
             }

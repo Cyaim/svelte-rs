@@ -21,7 +21,7 @@ APIs churn.
 | `$effect.root` | `create_root` (closest equivalent) | ownership scope with manual `dispose` |
 | `$effect.pending()` | `sv_ui::tasks::pending_count` | reactive in-flight task count |
 | `$props.id()` | `unique_id` | `"sv-1"`, `"sv-2"`, … per thread |
-| `tick` | `tick` | kept for API parity; writes already flush synchronously |
+| `tick` | `tick` | flush escape hatch under frame alignment; offscreen writes still flush synchronously |
 | `setContext` / `getContext` | `provide_context` / `use_context` | keyed by Rust type instead of string |
 | `untrack` | `untrack` | |
 
@@ -29,6 +29,29 @@ Deliberately dropped (per ADR-1 in [DESIGN.md](../DESIGN.md) (Chinese)): implici
 assignment reactivity (`count += 1` triggering updates) and deep proxy reactivity. In
 plain Rust you call `set`/`update` explicitly; the `.sv` compiler front-end restores the
 implicit syntax via source transform.
+
+## `#[derive(Store)]`: field-level signals
+
+A `Signal<WholeStruct>` is too coarse — changing one field wakes effects that only read
+other fields. Svelte solves this with a Proxy; here it happens at compile time: **one
+`Signal` per field**.
+
+```rust
+use sv_macro::Store;
+
+#[derive(Store, Clone, PartialEq)]
+struct Settings { theme: String, volume: f32 }
+
+let s = Settings { theme: "dark".into(), volume: 0.8 }.into_store();
+s.volume.set(0.5);                  // wakes only the readers of `volume`
+let snap: Settings = s.snapshot();  // whole value back (subscribes to *every* field)
+s.apply(next);                      // write the whole value, touching only changed fields
+```
+
+The generated `SettingsStore` is `Copy` (its fields are `Signal` handles), so it drops into
+closures freely. Requirements: named fields, no generics, field types `Clone + PartialEq +
+'static`. **No nested stores**: an inner struct stays one signal — derive on the inner type
+too if you want finer granularity, rather than having recursion guess for you.
 
 ## state
 
@@ -122,7 +145,28 @@ batch(|| {
 tick();          // flush pending effects now; inside batch it is a no-op
 ```
 
-`tick` exists mostly for API parity: writes outside a batch already flush synchronously.
+`tick` is an escape hatch in **windowed apps** and mostly API parity offscreen —
+the difference comes from frame scheduling:
+
+### Frame alignment (ADR-6)
+
+Once `sv_shell::run_app` has a window it calls `set_frame_scheduler`, and from
+then on **a write no longer runs effects on the spot**: it enqueues and requests
+a frame, and the shell flushes once at the top of that frame, before layout and
+paint. Writing ten states in one event handler costs one repaint and one effect
+pass. (Svelte achieves the same thing with a microtask flush; on the desktop the
+equivalent boundary is the frame.)
+
+```rust
+count.set(1);
+count.set(2);
+assert_eq!(derived_total.get(), /* still the old value */);  // frame hasn't come
+tick();                                                       // escape hatch
+```
+
+**Only the windowed path enables this.** Offscreen rendering (`render_to_png`)
+and tests keep the old "writes flush synchronously" behaviour, so `tick` stays
+essentially a no-op there. Call `clear_frame_scheduler()` to turn it back off.
 
 ## untrack and is_tracking
 

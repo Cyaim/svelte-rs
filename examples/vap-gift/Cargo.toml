@@ -1,0 +1,13 @@
+[package]
+name = "vap-gift"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+sv-ui.workspace = true
+sv-shell.workspace = true
+sv-vap.workspace = true
+sv-reactive.workspace = true

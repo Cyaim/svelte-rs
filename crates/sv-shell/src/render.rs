@@ -1,23 +1,21 @@
 //! 布局 + 绘制(CPU 自绘原型)
 //!
-//! 布局:行/列堆叠 + CSS 盒模型最小集(四方向 padding/margin、border、
-//! 固定宽高覆盖;缺省即 border-box 语义)。TODO 换 taffy。
+//! 布局:taffy 0.12(封在 [`layout_tree`] 内,`Vec<Placed>` 输出契约不变)。
 //! **继承**:`fg=None` / `font_size=NAN` 沿父链解析(color/font-size 白名单,
 //! ADR-8 C1),根 fallback BLACK/16。measure 自顶向下携带解析值,
 //! paint 对平铺列表做 O(depth) 父链回溯。
-//! 绘制走 tiny-skia + swash;逻辑坐标布局、物理坐标绘制(乘 scale)。
-//! 文本 shaping 为简化线性排版:charmap 逐字映射 + advance 推进(无 kerning/
-//! 连字;能力与原 fontdue 持平,M2 换 Parley/HarfRust)。
+//! 绘制走 tiny-skia;逻辑坐标布局、物理坐标绘制(乘 scale)。
+//! 排版/度量/光标几何**一律经 [`crate::text`] 门面**(Parley)——P3 起本文件
+//! 再无第二套 shaping,旧线性 advance 路径与 `font.rs` 已退役。
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
-use swash::FontRef;
 use tiny_skia::Pixmap;
 
 use sv_ui::{Color, Direction, Doc, DocumentInner, ElementKind, Overflow, ViewId};
 
-use crate::font::ui_font;
-use crate::paint::{GlyphKey, GlyphPos, Painter, TinySkiaPainter};
+use crate::paint::{Painter, TinySkiaPainter};
 
 #[derive(Clone, Copy, Debug)]
 pub struct Rect {
@@ -140,26 +138,6 @@ fn resolve_fg(inner: &DocumentInner, id: ViewId) -> Color {
     Color::BLACK
 }
 
-/// 行度量:(基线距行顶, 行高)。font.metrics 按 px 缩放(ascent/descent/leading)
-fn line_metrics(font: &FontRef, px: f32) -> (f32, f32) {
-    let m = font.metrics(&[]).scale(px);
-    (m.ascent, m.ascent + m.descent + m.leading)
-}
-
-/// 单行线性度量(TextInput 旧路径与测试用;Text/Button 已走 TextEngine,
-/// P3 PlainEditor 落地后本函数随线性路径一并退役)
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn measure_text(font: &FontRef, text: &str, px: f32) -> (f32, f32) {
-    let (_, line_h) = line_metrics(font, px);
-    if text.is_empty() {
-        return (0.0, line_h);
-    }
-    let charmap = font.charmap();
-    let gm = font.glyph_metrics(&[]).scale(px);
-    let w: f32 = text.chars().map(|c| gm.advance_width(charmap.map(c))).sum();
-    (w, line_h)
-}
-
 // ---------------------------------------------------------------------------
 // taffy 布局引擎(调研 23 T1:变更帧重建 TaffyTree,封在 layout_tree 内;
 // Vec<Placed> 输出契约不变,paint/命中/缓存全部不动)
@@ -183,9 +161,45 @@ struct MeasureCtx {
     kind: ElementKind,
     text: String,
     px: f32,
-    /// Text 叶子是否折行(Button/Checkbox/TextInput 恒单行)
+    /// Text 叶子是否折行(Button/Checkbox 恒单行;TextInput 见 rows)
     wrap: bool,
+    /// TextInput 的可见行数:1 = 单行 `<input>`,>1 = 多行 `<textarea>`
+    rows: u16,
+    /// Animation 的固有尺寸(逻辑 px)。**与帧号无关** —— 动画换帧不改盒子,
+    /// 这正是 `set_anim_frame` 能定级为纯绘制的依据
+    intrinsic: (f32, f32),
 }
+
+// ---------------------------------------------------------------------------
+// **不要在这里加"叶内 measure memo"。已经试过了,是负收益。**
+//
+// 动机看着很扎实:taffy 的多趟协议对每个叶子每帧问 **10 次**
+// (实测 180000 次 / 18000 个叶子),而这 10 次只对应约 2.3 个不同的 `wrap_w`,
+// 剩下全是重复询问。它们本该命中 taffy 自己的 9 槽缓存,但那是**直接映射**的:
+// `compute_cache_slot` 让 "definite available space" 与 max-content 共用同一个槽
+// 并无条件覆盖,于是"先问固有宽、再问折行高"这个必然序列每次都自己踩掉自己
+// (所以给上游把槽数调大也没用 —— 是冲突,不是容量)。
+//
+// 于是在 `MeasureCtx` 里加了 4 槽 memo(键 = `wrap_w`),调用次数确实从 18 万
+// 压到 4.2 万。**结果反而慢**,实测(30k 树,release,同机 A/B 各三轮):
+//
+// |            | 共享文本 | 逐行唯一 |
+// |------------|---------|---------|
+// | 有 memo    | 106ms   | 115ms   |
+// | 无 memo    | **82ms**| **89ms**|
+//
+// 原因是 `text.rs` 的全局两代缓存命中一次只要一次哈希 + 一次探测,**本来就便宜**;
+// 而 memo 要线性扫 4 格,还让 `MeasureCtx` 从约 40B 涨到约 112B(30000 个叶子
+// 多摸 2MB)。省下来的比多付出的少。
+//
+// 更值得记的是**中间那次翻车**:memo 刚加上时逐行唯一档从 96ms 劣化到 365ms
+// (3.8 倍)。根因不在 memo 自身,而在当时 `text.rs` 的容量自适应是
+// "装满就降代 + 容量翻倍"的棘轮 —— 它的爬升速度取决于**有多少次查询打到它**。
+// memo 把查询量砍掉四分之三,棘轮就爬不上去,缓存一直在颠簸。
+// 即:**在一层缓存前面加一层缓存,会让后面那层的自适应失效。**
+// 那条已改成"没到内存上限就原地扩容"(见 `text.rs` 的 `CAP`),与查询次数解耦;
+// 记在这里是因为这类耦合极难从代码上看出来 —— 它没有任何错误行为,只是慢。
+// ---------------------------------------------------------------------------
 
 /// sv-ui Style → taffy::Style 纯映射(sv-ui 不依赖 taffy 类型,
 /// 与 Painter 边界同理;调研 23 §2.2 映射表)
@@ -254,7 +268,7 @@ fn to_taffy(s: &sv_ui::Style) -> taffy::Style {
         // "顶对齐不拉伸"行为,迁移零回归优先(调研 23 §2.2)
         align_items: Some(map_align(s.align_items)),
         align_self: s.align_self.map(map_align),
-        overflow: if s.overflow == Overflow::Visible {
+        overflow: if s.overflow == Overflow::Visible && s.overflow_x == Overflow::Visible {
             taffy::Point {
                 x: taffy::Overflow::Visible,
                 y: taffy::Overflow::Visible,
@@ -283,12 +297,35 @@ fn map_align(a: sv_ui::AlignItems) -> taffy::AlignItems {
 
 /// build 期递归建 TaffyTree(View → with_children,叶子 → leaf+context;
 /// 继承字号在此解析,taffy 不知道继承)
+/// 建树递归深度上限。**超了就把该子树当叶子处理,而不是继续递归爆栈**。
+///
+/// 实测(membench `--scene deep`,Windows 主线程 1MB 栈):约 400 层时
+/// `build_taffy`/`walk_taffy` 的递归会**栈溢出**,而同样深度加 `--no-render`
+/// 安然无恙 —— 爆的确实是这两个递归,不是建树也不是析构。
+///
+/// 为什么不改成显式栈的迭代版:那是正解,但两个递归都要改、都要重测,
+/// 而真实 UI 不会有 256 层嵌套(有的话是生成器写崩了)。这里先用一道
+/// **可诊断的截断**换掉"不可恢复的崩溃":栈溢出既不能 catch 也没有栈回溯,
+/// 是所有失败模式里最难查的一种(R4 去 panic 同一纪律:宁可降级,不要崩)。
+const MAX_TREE_DEPTH: usize = 256;
+
 fn build_taffy(
     inner: &DocumentInner,
     tree: &mut taffy::TaffyTree<MeasureCtx>,
     map: &mut HashMap<u64, ViewId>,
     id: ViewId,
     inherited_font: f32,
+) -> taffy::NodeId {
+    build_taffy_at(inner, tree, map, id, inherited_font, 0)
+}
+
+fn build_taffy_at(
+    inner: &DocumentInner,
+    tree: &mut taffy::TaffyTree<MeasureCtx>,
+    map: &mut HashMap<u64, ViewId>,
+    id: ViewId,
+    inherited_font: f32,
+    depth: usize,
 ) -> taffy::NodeId {
     let n = &inner.nodes[id];
     let fs = if n.style.font_size.is_nan() {
@@ -297,11 +334,17 @@ fn build_taffy(
         n.style.font_size
     };
     let tstyle = to_taffy(&n.style);
-    let node = if n.kind == ElementKind::View {
+    // 到顶就不再往下:该子树整体当叶子(零尺寸),界面会缺一块,
+    // 但进程还活着、日志里写清了是谁太深
+    let too_deep = depth >= MAX_TREE_DEPTH;
+    if too_deep {
+        report_too_deep(id);
+    }
+    let node = if n.kind == ElementKind::View && !too_deep {
         let children: Vec<taffy::NodeId> = n
             .children
             .iter()
-            .map(|c| build_taffy(inner, tree, map, *c, fs))
+            .map(|c| build_taffy_at(inner, tree, map, *c, fs, depth + 1))
             .collect();
         tree.new_with_children(tstyle, &children)
             .expect("sv-shell: taffy 建节点失败")
@@ -313,6 +356,12 @@ fn build_taffy(
                 text: n.text.clone(),
                 px: fs,
                 wrap: n.kind == ElementKind::Text && n.style.text_wrap == sv_ui::TextWrap::Wrap,
+                rows: n
+                    .input
+                    .as_deref()
+                    .filter(|i| i.multiline)
+                    .map_or(1, |i| i.rows),
+                intrinsic: n.anim.as_deref().map_or((0.0, 0.0), |a| a.intrinsic),
             },
         )
         .expect("sv-shell: taffy 建叶子失败")
@@ -324,7 +373,6 @@ fn build_taffy(
 /// 叶子测量(taffy measure function 通道;调研 23 §2.3 两趟协议:
 /// MaxContent 问固有宽 → Definite/known 问折行后高)
 fn measure_leaf(
-    font: &FontRef,
     known: taffy::Size<Option<f32>>,
     available: taffy::Size<taffy::AvailableSpace>,
     ctx: Option<&mut MeasureCtx>,
@@ -365,14 +413,23 @@ fn measure_leaf(
                 height: side,
             }
         }
-        ElementKind::TextInput => {
-            let (_, line_h) = line_metrics(font, ctx.px);
-            taffy::Size {
-                width: 200.0,
-                height: line_h,
-            }
-        }
-        ElementKind::View => unreachable!("View 不是叶子"),
+        // 多行 textarea 的高 = rows × 行高(内容再长也不撑高:溢出靠滚动,
+        // 与浏览器 textarea 一致)
+        ElementKind::TextInput => taffy::Size {
+            width: 200.0,
+            height: crate::text::line_height(ctx.px) * f32::from(ctx.rows.max(1)),
+        },
+        // 动画的固有尺寸就是素材尺寸,不随帧号变。
+        // 素材还没接上(占位)时是 0×0 —— 于是"忘了接素材"表现为界面上缺一块,
+        // 而不是撑出一个莫名其妙的大洞
+        ElementKind::Animation => taffy::Size {
+            width: ctx.intrinsic.0,
+            height: ctx.intrinsic.1,
+        },
+        // View 通常不是叶子——**除了被 MAX_TREE_DEPTH 截断的那一个**:
+        // 它带着 View 的 kind 进了 new_leaf_with_context。给零尺寸,
+        // 于是超深子树表现为"这里缺一块",而不是 unreachable! 崩掉
+        ElementKind::View => taffy::Size::ZERO,
     }
 }
 
@@ -409,7 +466,9 @@ fn walk_taffy(
         return;
     }
 
-    let (child_clip, child_depth, scroll) = if n.style.overflow != Overflow::Visible {
+    // 任一轴非 Visible 就要裁剪(裁剪矩形是二维的,没法只裁一轴)
+    let clips = n.style.overflow != Overflow::Visible || n.style.overflow_x != Overflow::Visible;
+    let (child_clip, child_depth, scroll) = if clips {
         let clip2 = Some(clip.map_or(rect, |c| intersect(c, rect)));
         // 内容尺寸与滚动范围:content_override(virtual_scroll 桥)优先,
         // 否则取 taffy 的 scrollable overflow(content_size 含 padding 贡献)
@@ -424,7 +483,17 @@ fn walk_taffy(
                 (l.scroll_width(), l.scroll_height()),
             ),
         };
-        if n.style.overflow == Overflow::Scroll {
+        // 只在**该轴可滚**时给出滚动范围:横向 hidden + 纵向 scroll 的
+        // 容器不该被滚轮横推,滚动条也只该出纵向那根
+        let scrollable = (
+            n.style.overflow_x == Overflow::Scroll,
+            n.style.overflow == Overflow::Scroll,
+        );
+        let max = (
+            if scrollable.0 { max.0 } else { 0.0 },
+            if scrollable.1 { max.1 } else { 0.0 },
+        );
+        if scrollable.0 || scrollable.1 {
             out.scroll_areas.push(ScrollArea {
                 id: vid,
                 viewport: rect,
@@ -461,110 +530,264 @@ fn walk_taffy(
 /// 静止帧的 O(n) measure/place 归零(细粒度更新模型下,静止是常态)。
 /// 滚动改 offset → bump 版本 → 键自然失效(滚动帧 = 全树重布局,
 /// 大全量树靠 virtual_list 兜底,ADR-9)
-pub fn layout_full_cached(doc: &Doc, logical_w: f32, logical_h: f32) -> Layout {
-    use std::cell::RefCell;
-    thread_local! {
-        static CACHE: RefCell<Option<(usize, u64, u32, u32, Layout)>> =
-            const { RefCell::new(None) };
-    }
-    let key = (
-        doc.identity(),
-        doc.version(),
-        logical_w.to_bits(),
-        logical_h.to_bits(),
-    );
+/// 建好并算完的布局树 —— **持久但只读**。
+///
+/// 关键性质:它只有两种状态 —— **和 Doc 完全一致,或者已经被整棵扔掉**。
+/// 没有"增量更新"这条路,于是也就不存在"两棵树失同步"这一整类 bug。
+/// taffy 那几条著名的陷阱(`add_child` 不摘旧父、`remove` 不递归删后代、
+/// `get_node_context_mut` 不标脏)一条都碰不到 —— 我们从不调用它们。
+///
+/// 它买到的是:滚动帧、`content_override` 帧不用再重建 30k 个 taffy 节点,
+/// 只重走一遍产出坐标(实测 30k 档 2.6–4.6ms,对照全量 328–361ms)。
+/// 代价是影子树从每帧临时变成常驻(30k 档约 33MB)——所以 [`KEEP_TREE_MIN_NODES`]
+/// 给了闸门,小界面根本不付这笔钱。
+struct LayoutTrees {
+    tree: taffy::TaffyTree<MeasureCtx>,
+    map: HashMap<u64, ViewId>,
+    root: taffy::NodeId,
+    /// 弹层各一棵独立树,**按 walk 顺序存**(Popup 注册序在前、Tooltip 恒最后)。
+    /// 顺序只在"注册表没变"的前提下有效 —— 而注册表一变就是重建,所以恒有效
+    overlays: Vec<OverlayTree>,
+}
+
+struct OverlayTree {
+    entry: sv_ui::overlay::OverlayEntry,
+    tree: taffy::TaffyTree<MeasureCtx>,
+    map: HashMap<u64, ViewId>,
+    root: taffy::NodeId,
+}
+
+/// 小于这个节点数就不留树。
+///
+/// 留树是拿内存换时间,而小界面**两头都不划算**:全量重建本来就只要零点几毫秒,
+/// 留着的树却要一直占着内存。阈值取 512 是因为实测 3k 档全量重建已经 ~19ms
+/// (值得留),而几百个节点的对话框在噪声里。
+const KEEP_TREE_MIN_NODES: usize = 512;
+
+struct LayoutCache {
+    doc_id: usize,
+    w: u32,
+    h: u32,
+    layout: Rc<Layout>,
+    /// 树可能没留(小界面,见 [`KEEP_TREE_MIN_NODES`]);没留就退化成全量重建
+    trees: Option<LayoutTrees>,
+}
+
+thread_local! {
+    static CACHE: std::cell::RefCell<Option<LayoutCache>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// 按 [`sv_ui::Doc::take_dirty`] 的分级决定这一帧到底要做多少事。
+///
+/// 三档,从便宜到贵:
+/// 1. **什么都没脏** → 直接把上一帧的 `Rc<Layout>` 递回去(连 clone 都没有);
+/// 2. **只挪位置**(滚动 / `content_override`)→ 复用布局树,只重走产出坐标;
+/// 3. **真布局脏**(文本 / 布局样式 / 结构 / 弹层注册表)→ 整棵重建。
+///
+/// 返回 **`Rc<Layout>`** 而不是 `Layout`:命中时只拷指针。以前命中返回
+/// `layout.clone()` —— 深拷三个 Vec,而每帧**要调两次**(`render_frame` 内部
+/// 一次、事件循环存 `self.layout` 一次),30k 档一份 Layout ≈1.4MB,
+/// 于是静止帧也在跑 1.4MB × 2 × 帧率的纯 memcpy。
+///
+/// # 关于"日志被取走"这件事
+///
+/// [`sv_ui::Doc::take_dirty`] 是破坏性的。这看起来危险,实际上正好修掉一个旧问题:
+/// 同一帧内第二次调用本函数时日志已空 → 走第 1 档直接复用,
+/// 而以前它靠版本号比较,拿到"命中"之后仍然深拷了一份。
+///
+/// 没有渲染壳的调用方(单测、离屏 PNG、直调 [`layout_tree_full`])不取日志,
+/// 日志会一直涨到上限然后置 `overflowed` —— 那是"退化成全量",方向是安全的。
+pub fn layout_full_cached(doc: &Doc, logical_w: f32, logical_h: f32) -> Rc<Layout> {
+    let dirty = doc.take_dirty();
+    let (doc_id, w, h) = (doc.identity(), logical_w.to_bits(), logical_h.to_bits());
+
     CACHE.with(|c| {
         let mut slot = c.borrow_mut();
-        if let Some((id, ver, w, h, layout)) = slot.as_ref()
-            && (*id, *ver, *w, *h) == key
-        {
-            return layout.clone();
+        // Doc 换了或窗口尺寸变了:缓存整个作废。
+        // 【已知局限】缓存是单槽 —— 两个窗口交替渲染会互相顶掉,退化成每帧全量。
+        // 多窗口今天还没有支持,真做的时候这里要改成按 doc_id 分槽
+        let reusable = match slot.as_ref() {
+            Some(cached) => cached.doc_id == doc_id && cached.w == w && cached.h == h,
+            None => false,
+        };
+
+        // 判据是 `needs_rewalk`,**不是 `is_clean`**:一帧里全是 Paint 时日志非空
+        // 但布局产物逐字节不变。第一版写成 `is_clean()`,于是换色帧掉进了下面的
+        // "重走"分支 —— 结果正确、但白跑一遍 walk,而 walk 正是 30k 档空转帧的
+        // 全部成本。`paint_only_change_reuses_layout_verbatim` 就是逮它的
+        if reusable && !dirty.needs_rewalk() {
+            return Rc::clone(&slot.as_ref().expect("reusable 已保证非空").layout);
         }
-        let layout = layout_tree_full(doc, logical_w, logical_h);
-        *slot = Some((key.0, key.1, key.2, key.3, layout.clone()));
+
+        if reusable && !dirty.needs_rebuild() {
+            // 只挪位置:布局树整棵复用,重走一遍产出坐标
+            let cached = slot.as_mut().expect("reusable 已保证非空");
+            if let Some(trees) = cached.trees.as_ref() {
+                let layout =
+                    Rc::new(doc.read(|inner| walk_trees(inner, trees, logical_w, logical_h)));
+                cached.layout = Rc::clone(&layout);
+                return layout;
+            }
+            // 树没留(小界面):落到重建,反正它便宜
+        }
+
+        // **先把旧树扔掉再建新的**。留着它直到 `*slot = Some(..)` 才落地,
+        // 意味着重建帧上新旧两棵树同时活着 —— 峰值内存翻倍,分配器局部性变差。
+        // 实测 membench `rows 3k --mutate`(每帧都重建):不扔 20.0–21.0ms,
+        // 扔了 19.0–19.3ms,**白拿 5%**。这条只在"每帧都是 C 类"的负载上看得见,
+        // 而那恰恰是最坏情况
+        *slot = None;
+        let (layout, trees) = doc.read(|inner| {
+            let trees = build_trees(inner, logical_w, logical_h);
+            let layout = walk_trees(inner, &trees, logical_w, logical_h);
+            let keep = layout.placed.len() >= KEEP_TREE_MIN_NODES;
+            (layout, keep.then_some(trees))
+        });
+        let layout = Rc::new(layout);
+        *slot = Some(LayoutCache {
+            doc_id,
+            w,
+            h,
+            layout: Rc::clone(&layout),
+            trees,
+        });
         layout
     })
+}
+
+/// 测试探针:上一帧的布局树还留着吗。
+/// 用来断言"滚动帧没有重建树",比计时可靠得多
+#[cfg(test)]
+pub(crate) fn cache_has_trees() -> bool {
+    CACHE.with(|c| c.borrow().as_ref().is_some_and(|x| x.trees.is_some()))
+}
+
+#[cfg(test)]
+pub(crate) fn cache_reset() {
+    CACHE.with(|c| *c.borrow_mut() = None);
 }
 
 /// 布局整棵树(完整产物:Placed + 滚动区元数据)。root 强制占满窗口逻辑尺寸。
 /// 引擎 = taffy 0.12(调研 23:变更帧重建 + measure fn;disable_rounding
 /// 保逻辑坐标精度,取整留给绘制端——HiDPI 下逻辑取整会放大成整物理像素跳动)
 pub fn layout_tree_full(doc: &Doc, logical_w: f32, logical_h: f32) -> Layout {
-    let font = ui_font();
     doc.read(|inner| {
-        let mut tree: taffy::TaffyTree<MeasureCtx> = taffy::TaffyTree::new();
-        tree.disable_rounding();
-        let mut map: HashMap<u64, ViewId> = HashMap::new();
-        let root = build_taffy(inner, &mut tree, &mut map, inner.root, ROOT_FONT_SIZE);
-        // root 强制占满窗口
-        let mut rs = to_taffy(&inner.nodes[inner.root].style);
-        rs.size = taffy::Size {
-            width: taffy::Dimension::length(logical_w),
-            height: taffy::Dimension::length(logical_h),
-        };
-        tree.set_style(root, rs)
-            .expect("sv-shell: 设 root 样式失败");
-        tree.compute_layout_with_measure(
-            root,
-            taffy::Size {
-                width: taffy::AvailableSpace::Definite(logical_w),
-                height: taffy::AvailableSpace::Definite(logical_h),
-            },
-            |known, available, _id, ctx, _style| measure_leaf(&font, known, available, ctx),
-        )
-        .expect("sv-shell: taffy 布局失败");
-
-        let mut out = Layout::default();
-        walk_taffy(inner, &tree, &map, root, (0.0, 0.0), None, 0, &mut out);
-
-        // 弹层(调研 25):基础层后追加;Popup 注册序,Tooltip 恒最后。
-        // 每弹层一棵独立 taffy 树(游离子树,尺寸=内容,上限=窗口)
-        for pass_tooltip in [false, true] {
-            for e in &inner.overlays {
-                if (e.layer == sv_ui::OverlayLayer::Tooltip) != pass_tooltip {
-                    continue;
-                }
-                let mut otree: taffy::TaffyTree<MeasureCtx> = taffy::TaffyTree::new();
-                otree.disable_rounding();
-                let mut omap: HashMap<u64, ViewId> = HashMap::new();
-                let oroot = build_taffy(inner, &mut otree, &mut omap, e.root, ROOT_FONT_SIZE);
-                otree
-                    .compute_layout_with_measure(
-                        oroot,
-                        taffy::Size {
-                            width: taffy::AvailableSpace::Definite(logical_w),
-                            height: taffy::AvailableSpace::Definite(logical_h),
-                        },
-                        |known, available, _id, ctx, _style| {
-                            measure_leaf(&font, known, available, ctx)
-                        },
-                    )
-                    .expect("sv-shell: 弹层布局失败");
-                let ol = otree.layout(oroot).expect("sv-shell: 弹层根缺布局");
-                let Some(origin) = resolve_anchor(
-                    e.anchor,
-                    ol.size.width,
-                    ol.size.height,
-                    logical_w,
-                    logical_h,
-                    &out.placed,
-                ) else {
-                    continue; // 锚点节点不存在/被裁:本帧不显示
-                };
-                let start = out.placed.len();
-                walk_taffy(inner, &otree, &omap, oroot, origin, None, 0, &mut out);
-                out.overlay_regions.push(OverlayRegion {
-                    root: e.root,
-                    start,
-                    end: out.placed.len(),
-                    layer: e.layer,
-                    modal: e.modal,
-                    close: e.close,
-                });
-            }
-        }
-        out
+        let trees = build_trees(inner, logical_w, logical_h);
+        walk_trees(inner, &trees, logical_w, logical_h)
     })
+}
+
+/// 建树 + 算尺寸。**贵的那一半**:30k 档 300ms 量级,其中绝大部分是叶子测量。
+fn build_trees(inner: &DocumentInner, logical_w: f32, logical_h: f32) -> LayoutTrees {
+    let mut tree: taffy::TaffyTree<MeasureCtx> = taffy::TaffyTree::new();
+    tree.disable_rounding();
+    let mut map: HashMap<u64, ViewId> = HashMap::new();
+    let root = build_taffy(inner, &mut tree, &mut map, inner.root, ROOT_FONT_SIZE);
+    // root 强制占满窗口
+    let mut rs = to_taffy(&inner.nodes[inner.root].style);
+    rs.size = taffy::Size {
+        width: taffy::Dimension::length(logical_w),
+        height: taffy::Dimension::length(logical_h),
+    };
+    tree.set_style(root, rs)
+        .expect("sv-shell: 设 root 样式失败");
+    tree.compute_layout_with_measure(
+        root,
+        taffy::Size {
+            width: taffy::AvailableSpace::Definite(logical_w),
+            height: taffy::AvailableSpace::Definite(logical_h),
+        },
+        |known, available, _id, ctx, _style| measure_leaf(known, available, ctx),
+    )
+    .expect("sv-shell: taffy 布局失败");
+
+    // 弹层(调研 25):基础层后追加;Popup 注册序,Tooltip 恒最后。
+    // 每弹层一棵独立 taffy 树(游离子树,尺寸=内容,上限=窗口)。
+    // **两趟循环在这里就定死顺序**,产出坐标那一半照着存下来的顺序走即可
+    let mut overlays = Vec::new();
+    for pass_tooltip in [false, true] {
+        for e in &inner.overlays {
+            if (e.layer == sv_ui::OverlayLayer::Tooltip) != pass_tooltip {
+                continue;
+            }
+            let mut otree: taffy::TaffyTree<MeasureCtx> = taffy::TaffyTree::new();
+            otree.disable_rounding();
+            let mut omap: HashMap<u64, ViewId> = HashMap::new();
+            let oroot = build_taffy(inner, &mut otree, &mut omap, e.root, ROOT_FONT_SIZE);
+            otree
+                .compute_layout_with_measure(
+                    oroot,
+                    taffy::Size {
+                        width: taffy::AvailableSpace::Definite(logical_w),
+                        height: taffy::AvailableSpace::Definite(logical_h),
+                    },
+                    |known, available, _id, ctx, _style| measure_leaf(known, available, ctx),
+                )
+                .expect("sv-shell: 弹层布局失败");
+            overlays.push(OverlayTree {
+                entry: e.clone(),
+                tree: otree,
+                map: omap,
+                root: oroot,
+            });
+        }
+    }
+
+    LayoutTrees {
+        tree,
+        map,
+        root,
+        overlays,
+    }
+}
+
+/// 算好的树 → 绝对坐标产物。**便宜的那一半**:30k 档 2.6–4.6ms,纯遍历。
+///
+/// 它每次都重读 `inner`,所以滚动偏移、`content_override` 这些"不进 taffy 但
+/// 影响最终坐标"的东西会被如实反映 —— 这正是 Position 档只跑这一半的依据。
+fn walk_trees(
+    inner: &DocumentInner,
+    trees: &LayoutTrees,
+    logical_w: f32,
+    logical_h: f32,
+) -> Layout {
+    let mut out = Layout::default();
+    walk_taffy(
+        inner,
+        &trees.tree,
+        &trees.map,
+        trees.root,
+        (0.0, 0.0),
+        None,
+        0,
+        &mut out,
+    );
+
+    for o in &trees.overlays {
+        let ol = o.tree.layout(o.root).expect("sv-shell: 弹层根缺布局");
+        let Some(origin) = resolve_anchor(
+            o.entry.anchor,
+            ol.size.width,
+            ol.size.height,
+            logical_w,
+            logical_h,
+            &out.placed,
+        ) else {
+            continue; // 锚点节点不存在/被裁:本帧不显示
+        };
+        let start = out.placed.len();
+        walk_taffy(inner, &o.tree, &o.map, o.root, origin, None, 0, &mut out);
+        out.overlay_regions.push(OverlayRegion {
+            root: o.entry.root,
+            start,
+            end: out.placed.len(),
+            layer: o.entry.layer,
+            modal: o.entry.modal,
+            close: o.entry.close,
+        });
+    }
+    out
 }
 
 /// 锚点解析(调研 25 §2.4):Node 锚 → 侧向 + 越界翻转;最后 clamp 进窗口
@@ -654,77 +877,41 @@ fn effective_opacity(inner: &DocumentInner, id: ViewId) -> f32 {
     o
 }
 
-/// shaping:文本 → 已定位字形(物理坐标)。painter 只拿 glyph run。
-/// 简化线性排版:charmap 逐字映射 + advance 推进(无 kerning/连字)。
-/// `oy` 是文本框顶,基线 = oy + ascent;x/y 与 ox/oy 都是基线原点
-/// (CPU 端由光栅 Placement 换算位图左上角,GPU 端直接喂 draw_glyphs)
-fn shape_text(
-    font: crate::font::FontHandle,
-    text: &str,
-    px: f32,
-    ox: f32,
-    oy: f32,
-) -> Vec<GlyphPos> {
-    if text.is_empty() {
-        return Vec::new();
-    }
-    let fref = font.font_ref();
-    let (ascent, _) = line_metrics(&fref, px);
-    let baseline = oy + ascent;
-    let charmap = fref.charmap();
-    let gm = fref.glyph_metrics(&[]).scale(px);
-    let mut pen = ox;
-    let mut out = Vec::new();
-    for c in text.chars() {
-        let id = charmap.map(c);
-        let adv = gm.advance_width(id);
-        // 空白字符只推进 pen,不产出字形(与原 fontdue 过滤零宽位图语义一致)
-        if !c.is_whitespace() {
-            out.push(GlyphPos {
-                key: GlyphKey::new(font, id, px),
-                x: pen,
-                y: baseline,
-                id,
-                ox: pen,
-                oy: baseline,
-            });
-        }
-        pen += adv;
-    }
-    out
+/// 多行输入的纵向滚移(逻辑 px):光标行掉出可视区底部时把文本整体上推,
+/// 其余不动 —— 与浏览器 textarea 同款"最小移动"
+fn input_scroll_y(caret_y: f32, caret_h: f32, content_h: f32) -> f32 {
+    (caret_y + caret_h - content_h).max(0.0)
 }
 
-/// 光标 x 偏移(逻辑 px,相对文本起点):`byte_idx` 前所有字符的 advance 和。
-/// 与 [`shape_text`] 同一 advance 逻辑——保证"画的"和"点的"一致
-pub fn caret_x(font: &FontRef, text: &str, px: f32, byte_idx: usize) -> f32 {
-    let charmap = font.charmap();
-    let gm = font.glyph_metrics(&[]).scale(px);
-    text[..byte_idx.min(text.len())]
-        .chars()
-        .map(|c| gm.advance_width(charmap.map(c)))
-        .sum()
+/// 超深子树的限流告警:前三次逐条报,之后每 600 次报一次。
+/// 不限流的话一棵病树能刷屏刷到看不见别的东西
+fn report_too_deep(id: ViewId) {
+    use std::cell::Cell;
+    thread_local! {
+        static HITS: Cell<u32> = const { Cell::new(0) };
+    }
+    let n = HITS.with(|h| {
+        h.set(h.get() + 1);
+        h.get()
+    });
+    if n <= 3 || n.is_multiple_of(600) {
+        eprintln!(
+            "sv-shell: 子树嵌套超过 {MAX_TREE_DEPTH} 层(节点 {id:?}),\
+             该子树按叶子处理以避免栈溢出;累计 {n} 次"
+        );
+    }
 }
 
-/// 点击 x 坐标(相对文本起点)→ 最近 char 边界的字节偏移(与 caret_x 互逆)
-pub fn caret_index_at(font: &FontRef, text: &str, px: f32, x: f32) -> usize {
-    let charmap = font.charmap();
-    let gm = font.glyph_metrics(&[]).scale(px);
-    let mut pen = 0.0f32;
-    for (i, c) in text.char_indices() {
-        let adv = gm.advance_width(charmap.map(c));
-        if x < pen + adv / 2.0 {
-            return i;
-        }
-        pen += adv;
-    }
-    text.len()
+/// 单行输入的横向滚移(逻辑 px):光标顶到右内边时把文本整体推左。
+/// 绘制、命中、IME 上报三处共用本函数——"画的"、"点的"、"报的"同一个数
+fn input_scroll_x(display: &str, px: f32, caret_byte: usize, content_w: f32) -> f32 {
+    let caret = crate::text::caret_x(display, px, caret_byte);
+    (caret - (content_w - 2.0)).max(0.0)
 }
 
 /// 共享绘制遍历:对任意 Painter 后端发出同一命令流。
 /// 这是"可切换渲染后端"的支点(调研 14):后端只实现 Painter 三个动词
 pub fn paint_tree(doc: &Doc, placed: &[Placed], painter: &mut dyn Painter, scale: f32) {
-    let font = ui_font();
-    let fh = crate::font::ui_font_handle();
     doc.read(|inner| {
         // 裁剪栈按 clip_depth 同步(Placed 是 DFS 序,深度每步至多 +1;
         // effective rect 已含祖先交集,push 交集幂等)
@@ -745,7 +932,6 @@ pub fn paint_tree(doc: &Doc, placed: &[Placed], painter: &mut dyn Painter, scale
             };
             let s = &n.style;
             let op = effective_opacity(inner, p.id);
-            let fs = resolve_font_size(inner, p.id) * scale;
             let bw = s.border.map(|b| b.width).unwrap_or(0.0);
             let (x, y, w, h) = (
                 p.rect.x * scale,
@@ -779,6 +965,19 @@ pub fn paint_tree(doc: &Doc, placed: &[Placed], painter: &mut dyn Painter, scale
             }
 
             match n.kind {
+                ElementKind::Animation => {
+                    // 贴在**内容盒**上(扣掉 padding 与边框),与文本同口径。
+                    // 素材没接上 / 帧号越界 / 矢量档 → 什么都不画。
+                    // **刻意不画占位方块**:占位方块会让"素材没接上"看起来像
+                    // "接上了但内容是灰的",而这两者查的方向完全不同
+                    if let Some(a) = n.anim.as_deref()
+                        && let Some(img) = crate::animation::image_for(a)
+                    {
+                        let cw = (p.rect.w - s.padding.horizontal()) * scale - bw * 2.0;
+                        let ch = (p.rect.h - s.padding.vertical()) * scale - bw * 2.0;
+                        painter.draw_image(x + inset, y + inset_top, cw, ch, &img);
+                    }
+                }
                 ElementKind::Text => {
                     let fg = with_opacity(resolve_fg(inner, p.id), op);
                     // 断行在逻辑坐标做,与布局(taffy measure)同源;
@@ -881,64 +1080,102 @@ pub fn paint_tree(doc: &Doc, placed: &[Placed], painter: &mut dyn Painter, scale
                     let (display, caret_byte, preedit_range) =
                         sv_ui::input::display_text(value, input);
 
-                    // 光标跟随:每帧无状态计算横向滚移(fs 已含 scale,均物理 px)
-                    let caret_px = caret_x(&font, &display, fs, caret_byte);
-                    let scroll = (caret_px - (content_w - 2.0 * scale)).max(0.0);
-                    let text_x = content_x - scroll;
+                    // 几何一律在**逻辑 px**求(与 taffy measure/断行同源),
+                    // 画的时候再乘 scale
+                    let fs_l = resolve_font_size(inner, p.id);
+                    let content_w_l = p.rect.w - (s.padding.horizontal() + bw * 2.0);
+                    let content_h_l = p.rect.h - (s.padding.vertical() + bw * 2.0);
+                    // 多行按内容宽折行;单行不折(靠横向滚移)
+                    let wrap_w = input.multiline.then_some(content_w_l);
+                    let (caret_lx, caret_ly, caret_lh) =
+                        crate::text::caret_rect(&display, fs_l, wrap_w, caret_byte);
+                    // 光标跟随:单行推 x,多行推 y —— 都是每帧无状态算
+                    let (scroll_x, scroll_y) = if input.multiline {
+                        (0.0, input_scroll_y(caret_ly, caret_lh, content_h_l))
+                    } else {
+                        (input_scroll_x(&display, fs_l, caret_byte, content_w_l), 0.0)
+                    };
+                    let text_x = content_x - scroll_x * scale;
+                    let text_y = content_y - scroll_y * scale;
 
                     painter.push_clip(content_x - scale, y, content_w + 2.0 * scale, h, 0.0);
 
-                    // 选区高亮(组合中隐藏选区,IME 惯例)
+                    // 选区高亮(组合中隐藏选区,IME 惯例)。
+                    // Selection::geometry 逐行给矩形——多行选区天然分行,
+                    // BiDi 混排也会分段,故是序列而不是一对 x
                     if focused && input.preedit.is_none() && input.cursor != input.anchor {
-                        let lo = caret_x(&font, value, fs, input.cursor.min(input.anchor));
-                        let hi = caret_x(&font, value, fs, input.cursor.max(input.anchor));
-                        painter.fill_rounded_rect(
-                            text_x + lo,
-                            content_y,
-                            hi - lo,
-                            content_h,
-                            0.0,
-                            with_opacity(Color::rgba(60, 120, 255, 80), op),
-                        );
-                    }
-
-                    // 文本 / placeholder
-                    if display.is_empty() {
-                        if !input.placeholder.is_empty() {
-                            let run = shape_text(fh, &input.placeholder, fs, text_x, content_y);
-                            painter.glyph_run(
-                                fh,
-                                &run,
-                                with_opacity(Color::rgb(152, 152, 166), op),
+                        for (rx, ry, rw, rh) in crate::text::selection_rects_wrapped(
+                            value,
+                            fs_l,
+                            wrap_w,
+                            input.cursor.min(input.anchor),
+                            input.cursor.max(input.anchor),
+                        ) {
+                            let (sy, sh) = if input.multiline {
+                                (text_y + ry * scale, rh * scale)
+                            } else {
+                                (content_y, content_h)
+                            };
+                            painter.fill_rounded_rect(
+                                text_x + rx * scale,
+                                sy,
+                                rw * scale,
+                                sh,
+                                0.0,
+                                with_opacity(Color::rgba(60, 120, 255, 80), op),
                             );
                         }
-                    } else {
-                        let fg = with_opacity(resolve_fg(inner, p.id), op);
-                        let run = shape_text(fh, &display, fs, text_x, content_y);
-                        painter.glyph_run(fh, &run, fg);
                     }
 
-                    // 预编辑整段 2px 下划线(over-the-spot,候选窗是输入法自己的)
+                    // 文本 / placeholder(与 Text/Button 同一 TextEngine 通道:
+                    // kerning、fallback 混排在输入框里同样生效)
+                    let (draw, fg) = if display.is_empty() {
+                        (
+                            input.placeholder.as_str(),
+                            with_opacity(Color::rgb(152, 152, 166), op),
+                        )
+                    } else {
+                        (display.as_str(), with_opacity(resolve_fg(inner, p.id), op))
+                    };
+                    for run in crate::text::shape(
+                        draw,
+                        fs_l,
+                        wrap_w,
+                        sv_ui::TextAlign::Left,
+                        text_x,
+                        text_y,
+                        scale,
+                    ) {
+                        painter.glyph_run(run.font, &run.glyphs, fg);
+                    }
+
+                    // 预编辑整段 2px 下划线(over-the-spot,候选窗是输入法自己的)。
+                    // 组合串不跨行(输入法上屏前是一段),按光标所在行画
                     if let Some((lo, hi)) = preedit_range {
-                        let x0 = caret_x(&font, &display, fs, lo);
-                        let x1 = caret_x(&font, &display, fs, hi);
+                        let (x0, uy, uh) = crate::text::caret_rect(&display, fs_l, wrap_w, lo);
+                        let (x1, _, _) = crate::text::caret_rect(&display, fs_l, wrap_w, hi);
                         painter.fill_rounded_rect(
-                            text_x + x0,
-                            content_y + content_h - 2.0 * scale,
-                            x1 - x0,
+                            text_x + x0 * scale,
+                            text_y + (uy + uh) * scale - 2.0 * scale,
+                            (x1 - x0) * scale,
                             2.0 * scale,
                             0.0,
                             with_opacity(resolve_fg(inner, p.id), op),
                         );
                     }
 
-                    // 光标竖线(仅焦点时)
+                    // 光标竖线(仅焦点时):多行按行定位,单行占满内容高
                     if focused {
+                        let (cy, ch) = if input.multiline {
+                            (text_y + caret_ly * scale, caret_lh * scale)
+                        } else {
+                            (content_y, content_h)
+                        };
                         painter.fill_rounded_rect(
-                            text_x + caret_px,
-                            content_y,
+                            text_x + caret_lx * scale,
+                            cy,
                             (1.5 * scale).max(1.0),
-                            content_h,
+                            ch,
                             0.0,
                             with_opacity(Color::rgb(255, 62, 0), op),
                         );
@@ -978,63 +1215,123 @@ pub fn paint_tree(doc: &Doc, placed: &[Placed], painter: &mut dyn Painter, scale
     });
 }
 
-/// 渲染一帧:布局(逻辑坐标)+ 绘制(物理坐标)。返回像素与命中测试用的布局
-pub fn render_frame(doc: &Doc, phys_w: u32, phys_h: u32, scale: f32) -> (Pixmap, Vec<Placed>) {
+/// 渲染一帧:布局(逻辑坐标)+ 绘制(物理坐标)。返回像素与命中测试用的布局。
+/// 布局是 `Rc`:调用方多半还要再存一份(事件循环的命中测试),不该再拷一次
+pub fn render_frame(doc: &Doc, phys_w: u32, phys_h: u32, scale: f32) -> (Pixmap, Rc<Layout>) {
     let logical_w = phys_w as f32 / scale;
     let logical_h = phys_h as f32 / scale;
     let layout = layout_full_cached(doc, logical_w, logical_h);
 
-    let mut pixmap = Pixmap::new(phys_w.max(1), phys_h.max(1)).expect("sv-shell: 创建 pixmap 失败");
+    // 分配失败(尺寸超大/内存耗尽)退化成 1×1:调用方拿到的是一帧无用像素,
+    // 而不是一个崩掉的进程(R4 去 panic,调研 25 §3.4)
+    let mut pixmap = match Pixmap::new(phys_w.max(1), phys_h.max(1)) {
+        Some(p) => p,
+        None => {
+            eprintln!("sv-shell: {phys_w}×{phys_h} pixmap 分配失败,本帧退化为 1×1");
+            Pixmap::new(1, 1).expect("1×1 pixmap 分配不可能失败")
+        }
+    };
     pixmap.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
     let mut painter = TinySkiaPainter::new(&mut pixmap);
     paint_tree(doc, &layout.placed, &mut painter, scale);
     paint_scrollbars(doc, &layout.scroll_areas, &mut painter, scale);
 
-    (pixmap, layout.placed)
+    (pixmap, layout)
 }
 
-/// 点击命中 TextInput 时:窗口逻辑 x → 值内字节偏移(含 padding/border 内缩)。
-/// v0 忽略溢出滚移(光标跟随滚动是绘制层每帧无状态计算,点击场景多为未溢出)
-pub fn input_caret_at(doc: &Doc, p: &Placed, lx: f32) -> usize {
-    let font = ui_font();
+/// 点击命中 TextInput 时:窗口逻辑坐标 → 值内字节偏移(含 padding/border 内缩)。
+/// 溢出滚移与绘制层同源(`input_scroll_x` / `input_scroll_y`,私有),长文本尾部
+/// 点击不再偏到左边;多行时 `ly` 决定落在第几行
+pub fn input_caret_at(doc: &Doc, p: &Placed, lx: f32, ly: f32) -> usize {
     doc.read(|inner| {
         let Some(n) = inner.nodes.get(p.id) else {
             return 0;
         };
+        let Some(input) = n.input.as_deref() else {
+            return 0;
+        };
+        let s = &n.style;
         let fs = resolve_font_size(inner, p.id);
-        let bw = n.style.border.map(|b| b.width).unwrap_or(0.0);
-        let text_x = p.rect.x + n.style.padding.left + bw;
-        caret_index_at(&font, &n.text, fs, lx - text_x)
+        let bw = s.border.map(|b| b.width).unwrap_or(0.0);
+        let text_x = p.rect.x + s.padding.left + bw;
+        let text_y = p.rect.y + s.padding.top + bw;
+        let content_w = p.rect.w - (s.padding.horizontal() + bw * 2.0);
+        let content_h = p.rect.h - (s.padding.vertical() + bw * 2.0);
+        // 滚移按显示串算(与绘制一致),命中按值算——组合中点击本就少见,
+        // 且预编辑期光标由输入法掌控
+        let (display, caret_byte, _) = sv_ui::input::display_text(&n.text, input);
+        let wrap_w = input.multiline.then_some(content_w);
+        if input.multiline {
+            let (_, cy, ch) = crate::text::caret_rect(&display, fs, wrap_w, caret_byte);
+            let scroll_y = input_scroll_y(cy, ch, content_h);
+            crate::text::caret_index_at_point(
+                &n.text,
+                fs,
+                wrap_w,
+                lx - text_x,
+                ly - text_y + scroll_y,
+            )
+        } else {
+            let scroll = input_scroll_x(&display, fs, caret_byte, content_w);
+            crate::text::caret_index_at(&n.text, fs, lx - text_x + scroll)
+        }
+    })
+}
+
+/// 多行输入的上下行移动:模型层只认字节,视觉行是排版的产物,所以这一步
+/// 归渲染壳。返回目标字节偏移(已在行首/行尾则原地不动)
+pub fn input_caret_line_move(doc: &Doc, p: &Placed, down: bool) -> Option<usize> {
+    doc.read(|inner| {
+        let n = inner.nodes.get(p.id)?;
+        let input = n.input.as_deref()?;
+        if !input.multiline {
+            return None;
+        }
+        let s = &n.style;
+        let fs = resolve_font_size(inner, p.id);
+        let bw = s.border.map(|b| b.width).unwrap_or(0.0);
+        let content_w = p.rect.w - (s.padding.horizontal() + bw * 2.0);
+        let wrap_w = Some(content_w);
+        let (cx, cy, ch) = crate::text::caret_rect(&n.text, fs, wrap_w, input.cursor);
+        // 目标点 = 同一 x、上/下一行的行中;越界时 from_point 会钳到首/末行
+        let ty = if down { cy + ch * 1.5 } else { cy - ch * 0.5 };
+        Some(crate::text::caret_index_at_point(
+            &n.text, fs, wrap_w, cx, ty,
+        ))
     })
 }
 
 /// 焦点输入框的光标矩形(物理 px;IME 候选窗定位用)。
 /// 与绘制层同一 display/caret/scroll 计算——"画的"与"报的"一致
 pub fn ime_caret_rect(doc: &Doc, placed: &[Placed], scale: f32) -> Option<(f32, f32, f32, f32)> {
-    let font = ui_font();
     doc.read(|inner| {
         let id = inner.focused?;
         let n = inner.nodes.get(id)?;
         let input = n.input.as_deref()?;
         let p = placed.iter().find(|p| p.id == id)?;
-        let fs = resolve_font_size(inner, id) * scale;
-        let bw = n.style.border.map(|b| b.width).unwrap_or(0.0);
+        let fs = resolve_font_size(inner, id);
         let s = &n.style;
-        let (x, y, w, h) = (
-            p.rect.x * scale,
-            p.rect.y * scale,
-            p.rect.w * scale,
-            p.rect.h * scale,
-        );
-        let content_x = x + (s.padding.left + bw) * scale;
-        let content_y = y + (s.padding.top + bw) * scale;
-        let content_w = w - (s.padding.horizontal() + bw * 2.0) * scale;
-        let content_h = h - (s.padding.vertical() + bw * 2.0) * scale;
+        let bw = s.border.map(|b| b.width).unwrap_or(0.0);
+        let content_x = (p.rect.x + s.padding.left + bw) * scale;
+        let content_y = (p.rect.y + s.padding.top + bw) * scale;
+        let content_w = p.rect.w - (s.padding.horizontal() + bw * 2.0);
+        let content_h = (p.rect.h - (s.padding.vertical() + bw * 2.0)) * scale;
         let (display, caret_byte, _) = sv_ui::input::display_text(&n.text, input);
-        let caret_px = caret_x(&font, &display, fs, caret_byte);
-        let scroll = (caret_px - (content_w - 2.0 * scale)).max(0.0);
+        let wrap_w = input.multiline.then_some(content_w);
+        let (cx, cy, ch) = crate::text::caret_rect(&display, fs, wrap_w, caret_byte);
+        if input.multiline {
+            let content_h_l = p.rect.h - (s.padding.vertical() + bw * 2.0);
+            let scroll_y = input_scroll_y(cy, ch, content_h_l);
+            return Some((
+                content_x + cx * scale,
+                content_y + (cy - scroll_y) * scale,
+                (1.5 * scale).max(1.0),
+                ch * scale,
+            ));
+        }
+        let scroll = input_scroll_x(&display, fs, caret_byte, content_w);
         Some((
-            content_x - scroll + caret_px,
+            content_x + (cx - scroll) * scale,
             content_y,
             (1.5 * scale).max(1.0),
             content_h,
@@ -1066,24 +1363,71 @@ pub fn scrollbar_thumb(track: f32, viewport: f32, content: f32, offset: f32) -> 
 /// 滚动条绘制:shell 合成,不入场景树(egui 同构;调研 22 §2.4)。
 /// v0 纵向 thumb only(横向 API 留通道);宽 6 逻辑 px、右缘内贴 2px
 pub fn paint_scrollbars(doc: &Doc, areas: &[ScrollArea], painter: &mut dyn Painter, scale: f32) {
-    const BAR_W: f32 = 6.0;
-    const MARGIN: f32 = 2.0;
     for a in areas {
-        let track = a.viewport.h - MARGIN * 2.0;
-        let inner_h = a.viewport.h; // 近似:track 按 border-box 高(视觉够用)
         let (_, sy) = doc.scroll_of(a.id);
-        let Some((pos, len)) = scrollbar_thumb(track, inner_h, a.content.1, sy) else {
+        let Some((pos, len)) = vbar_thumb(a, sy) else {
             continue;
         };
+        let (bx, bw) = vbar_x(a);
         painter.fill_rounded_rect(
-            (a.viewport.x + a.viewport.w - BAR_W - MARGIN) * scale,
-            (a.viewport.y + MARGIN + pos) * scale,
-            BAR_W * scale,
+            bx * scale,
+            (a.viewport.y + SCROLLBAR_MARGIN + pos) * scale,
+            bw * scale,
             len * scale,
-            BAR_W / 2.0 * scale,
+            bw / 2.0 * scale,
             Color::rgba(120, 120, 134, 140),
         );
     }
+}
+
+/// 滚动条几何常量(绘制与命中共用一套,拖起来才不会偏)
+const SCROLLBAR_W: f32 = 6.0;
+const SCROLLBAR_MARGIN: f32 = 2.0;
+/// 命中容差:6px 的条太细,指针差一两像素就抓空(Fitts 定律,业界普遍加宽)
+const SCROLLBAR_GRAB_PAD: f32 = 4.0;
+
+/// 纵向滚动条的 x 与宽(逻辑 px)
+fn vbar_x(a: &ScrollArea) -> (f32, f32) {
+    (
+        a.viewport.x + a.viewport.w - SCROLLBAR_W - SCROLLBAR_MARGIN,
+        SCROLLBAR_W,
+    )
+}
+
+/// 纵向 thumb 的 (轨内偏移, 长度);内容未溢出返回 None
+fn vbar_thumb(a: &ScrollArea, sy: f32) -> Option<(f32, f32)> {
+    let track = a.viewport.h - SCROLLBAR_MARGIN * 2.0;
+    // 近似:track 按 border-box 高(视觉够用)
+    scrollbar_thumb(track, a.viewport.h, a.content.1, sy)
+}
+
+/// 点(逻辑坐标)命中了哪个纵向 thumb —— 返回 (滚动容器, 指针在 thumb 内的偏移)。
+/// 抓住 thumb 的**哪一点**要记住,否则拖动时 thumb 会跳到指针中心(S4)
+pub fn scrollbar_grab(doc: &Doc, areas: &[ScrollArea], x: f32, y: f32) -> Option<(ViewId, f32)> {
+    // 后画的在上层:与绘制顺序一致地反向找
+    areas.iter().rev().find_map(|a| {
+        let (_, sy) = doc.scroll_of(a.id);
+        let (pos, len) = vbar_thumb(a, sy)?;
+        let (bx, bw) = vbar_x(a);
+        let top = a.viewport.y + SCROLLBAR_MARGIN + pos;
+        let in_x = x >= bx - SCROLLBAR_GRAB_PAD && x <= bx + bw + SCROLLBAR_GRAB_PAD;
+        let in_y = y >= top && y <= top + len;
+        (in_x && in_y).then_some((a.id, y - top))
+    })
+}
+
+/// 拖动中:指针 y → 新的纵向 offset(按轨道/内容比例反算,并钳到范围内)。
+/// `grab` 是按下时记住的"指针在 thumb 内的偏移"
+pub fn scrollbar_drag_offset(areas: &[ScrollArea], id: ViewId, y: f32, grab: f32) -> Option<f32> {
+    let a = areas.iter().find(|a| a.id == id)?;
+    let track = a.viewport.h - SCROLLBAR_MARGIN * 2.0;
+    let (_, len) = scrollbar_thumb(track, a.viewport.h, a.content.1, 0.0)?;
+    let travel = track - len;
+    if travel <= 0.0 {
+        return Some(0.0);
+    }
+    let top = (y - grab - (a.viewport.y + SCROLLBAR_MARGIN)).clamp(0.0, travel);
+    Some((top / travel * a.max.1).clamp(0.0, a.max.1))
 }
 
 /// 滚轮路由(纯函数,离屏可测;调研 22 §2.4):命中最上层可滚容器,
@@ -1098,16 +1442,32 @@ pub fn route_wheel(
     dx: f32,
     dy: f32,
 ) -> Option<ViewId> {
+    route_wheel_with(doc, placed, areas, x, y, dx, dy, false)
+}
+
+/// 同上,`smooth=true` 时纵向走平滑滚动(S6):把目标交给动画通道逐帧逼近。
+/// 横向仍是直接写 —— 触摸板横滚本身连续,再补一层缓动只会更黏
+#[allow(clippy::too_many_arguments)]
+pub fn route_wheel_with(
+    doc: &Doc,
+    placed: &[Placed],
+    areas: &[ScrollArea],
+    x: f32,
+    y: f32,
+    dx: f32,
+    dy: f32,
+    smooth: bool,
+) -> Option<ViewId> {
     let mut target = placed
         .iter()
         .rev()
         .find(|p| {
             p.hit(x, y)
                 && doc.read(|inner| {
-                    inner
-                        .nodes
-                        .get(p.id)
-                        .is_some_and(|n| n.style.overflow == Overflow::Scroll)
+                    inner.nodes.get(p.id).is_some_and(|n| {
+                        n.style.overflow == Overflow::Scroll
+                            || n.style.overflow_x == Overflow::Scroll
+                    })
                 })
         })
         .map(|p| p.id);
@@ -1115,9 +1475,23 @@ pub fn route_wheel(
         if let Some(a) = areas.iter().find(|a| a.id == id) {
             let (sx, sy) = doc.scroll_of(id);
             let nx = (sx + dx).clamp(0.0, a.max.0);
-            let ny = (sy + dy).clamp(0.0, a.max.1);
-            if nx != sx || ny != sy {
-                doc.set_scroll(id, nx, ny);
+            // 平滑模式下在**进行中的目标**上累加,而不是在"这一帧画到哪儿"
+            // 上累加 —— 后者会让连续快滚越滚越慢(每次都从落后的位置起算)
+            let base_y = if smooth {
+                sv_ui::anim::scroll_y_target(doc, id)
+            } else {
+                sy
+            };
+            let ny = (base_y + dy).clamp(0.0, a.max.1);
+            if nx != sx || ny != base_y {
+                if smooth && ny != base_y {
+                    sv_ui::anim::scroll_y_to(doc, id, ny);
+                    if nx != sx {
+                        doc.set_scroll(id, nx, sy);
+                    }
+                } else {
+                    doc.set_scroll(id, nx, ny);
+                }
                 return Some(id);
             }
         }
@@ -1125,11 +1499,9 @@ pub fn route_wheel(
         target = doc.read(|inner| {
             let mut cur = inner.nodes.get(id).and_then(|n| n.parent);
             while let Some(c) = cur {
-                if inner
-                    .nodes
-                    .get(c)
-                    .is_some_and(|n| n.style.overflow == Overflow::Scroll)
-                {
+                if inner.nodes.get(c).is_some_and(|n| {
+                    n.style.overflow == Overflow::Scroll || n.style.overflow_x == Overflow::Scroll
+                }) {
                     return Some(c);
                 }
                 cur = inner.nodes.get(c).and_then(|n| n.parent);

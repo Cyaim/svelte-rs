@@ -17,21 +17,26 @@ use slotmap::{SlotMap, new_key_type};
 use sv_reactive::{RootHandle, create_root, derived, effect, on_cleanup, untrack};
 
 pub mod anim;
+pub mod dirty;
 pub mod focus;
 pub mod input;
 pub mod overlay;
 pub mod shortcuts;
 pub mod tasks;
+/// 模板数据面(ADR-2 ②:生成数据而非生成类型;热重载的承重墙)
+pub mod tmpl;
 
-pub use focus::{Key, KeyEvent, Mods, dispatch_key};
+pub use focus::{Key, KeyEvent, KeyPhase, Mods, dispatch_key};
 pub use input::{
-    Caret, Clipboard, EditOp, ImeEvent, InputState, apply_edit, clipboard_get, clipboard_set,
-    handle_ime, set_clipboard,
+    Caret, Clipboard, EditOp, ImeEvent, InputState, UndoEntry, apply_edit, clipboard_get,
+    clipboard_set, handle_ime, next_word_boundary, prev_word_boundary, set_clipboard,
+    word_range_at,
 };
 pub use overlay::{
     Anchor, CloseBehavior, OverlayEntry, OverlayLayer, OverlayOpts, Side, overlay_block, tooltip,
 };
 pub use shortcuts::{Shortcut, register_shortcut};
+pub use tmpl::{Bind, Binder, SlotKind, SlotSig, StyleDecl, TNode, Template, stamp};
 
 /// 组件 children / 具名 snippet 的类型:接收 (doc, 挂载点) 的可复用构建闭包
 pub type Snippet = Rc<dyn Fn(&Doc, ViewId)>;
@@ -207,7 +212,10 @@ pub struct Style {
     pub cursor: Option<Cursor>,
     /// 溢出行为(Hidden/Scroll 的 View 尺寸不被内容撑开,子内容按
     /// scroll 偏移平移并裁剪;调研 22)
+    /// 纵轴溢出行为(`overflow-y`);`overflow` 简写同时写两轴
     pub overflow: Overflow,
+    /// 横轴溢出行为(`overflow-x`)。分轴的常见用法是"横向裁掉、纵向滚"
+    pub overflow_x: Overflow,
     // ---- flex 第一批(调研 23 T3;taffy 直通,渲染层不读) ----
     pub justify_content: JustifyContent,
     pub align_items: AlignItems,
@@ -242,6 +250,7 @@ impl Default for Style {
             opacity: 1.0,
             cursor: None,
             overflow: Overflow::Visible,
+            overflow_x: Overflow::Visible,
             justify_content: JustifyContent::Start,
             align_items: AlignItems::Start,
             align_self: None,
@@ -281,6 +290,7 @@ impl PartialEq for Style {
             && self.opacity == other.opacity
             && self.cursor == other.cursor
             && self.overflow == other.overflow
+            && self.overflow_x == other.overflow_x
             && self.justify_content == other.justify_content
             && self.align_items == other.align_items
             && self.align_self == other.align_self
@@ -312,6 +322,104 @@ pub enum ElementKind {
     Checkbox,
     /// 单行文本输入(value 复用 text 字段,编辑态在 [`ViewNode::input`])
     TextInput,
+    /// 动画叶子(PAG / Lottie / 离线转出的序列帧),载荷在 [`ViewNode::anim`]。
+    ///
+    /// **只有这一个 kind,不叫 `Pag` 也不叫 `Lottie`**(裁决见
+    /// `docs/plans/pag-2-integration.md` §0):格式差异全部收在 [`AnimSource`] 里,
+    /// 以后加 SVG-animate、APNG 都不必再动 `ElementKind` —— 而动 `ElementKind`
+    /// 是要在全仓六十多处 match 上留疤的事。
+    /// 前端标签同理叫 `<animation>` 不叫 `<pag>`:**标签描述用途,不绑格式**
+    /// (`textarea` 是同款先例:前端有 `Tag::TextArea`,运行时只有一个 kind)。
+    Animation,
+}
+
+/// 动画叶子的载荷。
+///
+/// # 为什么这里没有任何像素或矢量数据
+///
+/// sv-ui 是双前端的编译目标,依赖面必须干净(与 `Painter` 边界同一条纪律)——
+/// 它**不能**认识 `velato::Composition`,也不能认识一张解码后的位图。
+/// 所以内容只留一个**不透明句柄**,由渲染壳侧的注册表解析
+/// (`sv_shell::text` 的 `FontHandle` 是同款先例)。
+///
+/// 这里留下的只有布局与时间轴真正需要的东西:固有尺寸、帧率、帧数、当前帧。
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct AnimData {
+    pub source: AnimSource,
+    /// 固有尺寸(逻辑 px)。**进布局** —— 改它是 `Measure` 级变更
+    pub intrinsic: (f32, f32),
+    /// 素材帧率。**注意它与屏幕刷新率无关**:24fps 的素材在 144Hz 屏上
+    /// 每 6 个 vsync 才该换一帧,这正是省电的来处(见 ADR-6 那段警告)
+    pub frame_rate: f32,
+    pub frame_count: u32,
+    /// 当前帧号。**由帧循环写入,动画自己不持有时钟**
+    /// (裁决见 pag-2 §0:PAG 不拥有时钟)
+    pub frame: u32,
+    pub looped: bool,
+    pub playing: bool,
+}
+
+/// 动画内容的来源。**加新格式加变体,不加 `ElementKind`**
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AnimSource {
+    /// 位图序列帧:PAG 的位图序列档,或任何离线转出的帧序列。
+    /// 渲染 = 每帧一次 `draw_image`,成本与素材复杂度无关(恒定)
+    Frames { handle: u64 },
+    /// 矢量:Lottie(经 `sv-lottie`)。渲染成本随素材复杂度走
+    Vector { handle: u64 },
+}
+
+impl AnimData {
+    /// 还没接上内容的占位动画:零尺寸、单帧、不播。
+    ///
+    /// 模板数据面([`tmpl`])建不出真的动画 —— 内容句柄是运行期才有的东西。
+    /// 所以数据面先建这个占位,再由 `Bind::Wire` 把真内容接上
+    pub fn placeholder() -> Self {
+        Self {
+            source: AnimSource::Frames { handle: 0 },
+            intrinsic: (0.0, 0.0),
+            frame_rate: 0.0,
+            frame_count: 0,
+            frame: 0,
+            looped: false,
+            playing: false,
+        }
+    }
+
+    /// 时长(毫秒)。帧率为 0 时返回 0 而不是除零
+    pub fn duration_ms(&self) -> f32 {
+        if self.frame_rate <= 0.0 || self.frame_count == 0 {
+            return 0.0;
+        }
+        self.frame_count as f32 * 1000.0 / self.frame_rate
+    }
+
+    /// 播放 `elapsed_ms` 之后该显示第几帧。
+    ///
+    /// 循环用 `rem_euclid` 而不是 `%`:负的 elapsed(时钟回拨、或调用方
+    /// 传了个更早的时间戳)在 `%` 下是负余数;Rust 的 float→int `as` 会
+    /// **饱和**到 0(实测),于是后果是画面突然跳回第 0 帧 —— 不崩,但看得见
+    pub fn frame_at(&self, elapsed_ms: f32) -> u32 {
+        if self.frame_count == 0 || self.frame_rate <= 0.0 {
+            return 0;
+        }
+        let raw = elapsed_ms * self.frame_rate / 1000.0;
+        if !raw.is_finite() {
+            return 0;
+        }
+        let last = self.frame_count - 1;
+        if self.looped {
+            let n = self.frame_count as f32;
+            (raw.rem_euclid(n) as u32).min(last)
+        } else {
+            // 不循环:钳在最后一帧(不是回到 0,那会闪一下)
+            if raw <= 0.0 {
+                0
+            } else {
+                (raw as u32).min(last)
+            }
+        }
+    }
 }
 
 pub struct ViewNode {
@@ -335,10 +443,15 @@ pub struct ViewNode {
     pub on_pointer_up: Option<Rc<dyn Fn()>>,
     pub on_pointer_leave: Option<Rc<dyn Fn()>>,
     pub on_key: Option<KeyHandler>,
+    /// 捕获段回调(root → 焦点,先于冒泡;祖先拦截后代用)
+    pub on_key_capture: Option<KeyHandler>,
     /// 焦点变化回调(true=获焦,false=失焦;`:focus` 伪类接线用)
     pub on_focus_change: Option<Rc<dyn Fn(bool)>>,
     /// TextInput 的编辑态(其它元素恒 None;Box 控制节点大小预算)
     pub input: Option<Box<input::InputState>>,
+    /// Animation 的载荷(其它元素恒 None;Box 同款,不让 60 字节的动画载荷
+    /// 把每个 Text 节点都撑大)
+    pub anim: Option<Box<AnimData>>,
     /// 滚动偏移(overflow: Scroll 的 View;真源在树上,与 checked 同款)
     pub scroll_x: f32,
     pub scroll_y: f32,
@@ -362,6 +475,9 @@ pub struct DocumentInner {
     pub focused: Option<ViewId>,
     version: u64,
     on_mutate: Option<Box<dyn Fn()>>,
+    /// 本帧的变更日志(见 [`dirty`])。渲染壳 `take_dirty` 走;
+    /// 没人取就靠上限兜底,不会无限涨
+    dirty: dirty::DirtyLog,
 }
 
 /// 场景树句柄。`Clone` 共享同一棵树,可自由塞进事件闭包
@@ -378,6 +494,7 @@ impl Doc {
     pub fn new() -> Self {
         let mut nodes = SlotMap::with_key();
         let root = nodes.insert(ViewNode {
+            anim: None,
             kind: ElementKind::View,
             text: String::new(),
             checked: false,
@@ -392,6 +509,7 @@ impl Doc {
             on_pointer_up: None,
             on_pointer_leave: None,
             on_key: None,
+            on_key_capture: None,
             on_focus_change: None,
             input: None,
             scroll_x: 0.0,
@@ -407,13 +525,21 @@ impl Doc {
             focused: None,
             version: 0,
             on_mutate: None,
+            dirty: dirty::DirtyLog::default(),
         })))
     }
 
-    fn bump(&self) {
+    /// 版本 +1 并记一条**分级过的**变更。
+    ///
+    /// 参数不是可选的:漏了分级就编译不过。前一版设计是"事后按写入口查表",
+    /// 数了一遍才发现全仓有 34 个 `bump` 点而人工整理的表只覆盖了 26 个 ——
+    /// 漏一个就画错一帧,且没有任何报错。把它挪进类型系统之后,
+    /// "新增写方法忘了定级"从线上 bug 变成编译错误。
+    fn bump(&self, item: dirty::DirtyItem) {
         let cb = {
             let mut inner = self.0.borrow_mut();
             inner.version += 1;
+            inner.dirty.push(item);
             // 借用释放后再调回调,回调里可以继续操作树
             inner.on_mutate.take()
         };
@@ -425,6 +551,30 @@ impl Doc {
 
     pub fn version(&self) -> u64 {
         self.0.borrow().version
+    }
+
+    /// 取走并清空这一帧的变更日志。渲染壳每帧调一次。
+    ///
+    /// 没有消费者时日志靠 [`dirty::DIRTY_LOG_CAP`] 兜底(丢弃 + 置
+    /// `overflowed`),所以离屏渲染、单测、直调布局这些没有渲染壳的场景
+    /// 不会无限吃内存 —— 代价只是它们始终走全量,而它们本来就走全量。
+    pub fn take_dirty(&self) -> dirty::DirtyLog {
+        std::mem::take(&mut self.0.borrow_mut().dirty)
+    }
+
+    /// 某个节点的 `set_text` 到底是 Measure 还是 Paint —— **取决于 kind**。
+    ///
+    /// 同一个写方法对 Text/Button 进测量,对 TextInput/Checkbox 完全不进:
+    /// 前者的尺寸就是文本尺寸,后者的测量恒定(输入框 `200 × 行高×rows`、
+    /// 复选框 `字号见方`)。**所以分级必须读 kind,不能只看方法名。**
+    /// 而且只能在**记录时**读 —— 节点删掉之后 kind 就查不回来了。
+    fn text_dirty(inner: &DocumentInner, id: ViewId) -> dirty::DirtyItem {
+        match inner.nodes.get(id).map(|n| n.kind) {
+            // 输入框的 value 复用 text 字段;测量与内容无关。
+            // 【做 auto-size input 时这一条要改成 Measure】
+            Some(ElementKind::TextInput) | Some(ElementKind::Checkbox) => dirty::DirtyItem::Paint,
+            _ => dirty::DirtyItem::Measure { id },
+        }
     }
 
     /// 无障碍名称覆盖(`aria-label` 编译目标;空串清除)
@@ -440,7 +590,8 @@ impl Doc {
             }
             n.accessible_label = new;
         }
-        self.bump();
+        // a11y 名称不进布局也不进绘制几何
+        self.bump(dirty::DirtyItem::Paint);
     }
 
     /// 本树的身份标识(布局/绘制缓存键;同一棵树的所有 Doc 克隆同值)
@@ -484,15 +635,21 @@ impl Doc {
             on_pointer_up: None,
             on_pointer_leave: None,
             on_key: None,
+            on_key_capture: None,
             on_focus_change: None,
             input: (kind == ElementKind::TextInput).then(Default::default),
+            // 与 input 同款:只有对应 kind 才分配
+            anim: (kind == ElementKind::Animation).then(|| Box::new(AnimData::placeholder())),
             scroll_x: 0.0,
             scroll_y: 0.0,
             on_scroll: None,
             content_override: None,
             accessible_label: None,
         });
-        self.bump();
+        // **游离节点**:还没 append,不在任何父的 children 里,布局上什么都不做。
+        // 显式定为 Paint 而不是漏掉,是因为一次 `{#each}` 建表会 create+append
+        // 各一条 —— 若这里也记结构脏,日志预算白白少一半、且每条都是假的
+        self.bump(dirty::DirtyItem::Paint);
         id
     }
 
@@ -519,27 +676,105 @@ impl Doc {
         self.create(ElementKind::TextInput, "")
     }
 
+    /// 建一个动画叶子。内容句柄由渲染壳侧的注册表给出 —— sv-ui 不认识它
+    pub fn create_animation(&self, data: AnimData) -> ViewId {
+        let id = self.create(ElementKind::Animation, "");
+        self.with_inner_mut(|inner| {
+            if let Some(n) = inner.nodes.get_mut(id) {
+                n.anim = Some(Box::new(data));
+            }
+        });
+        // create 已经 bump 过一次(Paint,游离节点);这里再记一条 Measure,
+        // 因为固有尺寸刚刚从 0×0 变成了真实尺寸
+        self.bump(dirty::DirtyItem::Measure { id });
+        id
+    }
+
+    pub fn anim_of(&self, id: ViewId) -> Option<AnimData> {
+        self.read(|inner| inner.nodes.get(id).and_then(|n| n.anim.as_deref().copied()))
+    }
+
+    /// 换当前帧。**这是纯绘制** —— 动画的盒子大小由 `intrinsic` 定,与帧号无关。
+    /// 这条是动画能便宜的全部原因:一秒 60 次帧号变更,一次布局都不触发
+    pub fn set_anim_frame(&self, id: ViewId, frame: u32) {
+        {
+            let mut inner = self.0.borrow_mut();
+            let Some(a) = inner.nodes.get_mut(id).and_then(|n| n.anim.as_deref_mut()) else {
+                return;
+            };
+            if a.frame == frame {
+                return;
+            }
+            a.frame = frame;
+        }
+        self.bump(dirty::DirtyItem::Paint);
+    }
+
+    /// 播放 / 暂停。不改任何几何,纯绘制(暂停帧照样要画出来)
+    pub fn set_anim_playing(&self, id: ViewId, playing: bool) {
+        {
+            let mut inner = self.0.borrow_mut();
+            let Some(a) = inner.nodes.get_mut(id).and_then(|n| n.anim.as_deref_mut()) else {
+                return;
+            };
+            if a.playing == playing {
+                return;
+            }
+            a.playing = playing;
+        }
+        self.bump(dirty::DirtyItem::Paint);
+    }
+
+    /// 换内容(占位 → 真素材,或切一个新素材)。**固有尺寸可能变 → Measure**
+    pub fn set_anim_data(&self, id: ViewId, data: AnimData) {
+        {
+            let mut inner = self.0.borrow_mut();
+            let Some(a) = inner.nodes.get_mut(id).and_then(|n| n.anim.as_deref_mut()) else {
+                return;
+            };
+            if *a == data {
+                return;
+            }
+            *a = data;
+        }
+        self.bump(dirty::DirtyItem::Measure { id });
+    }
+
     /// 可变访问树(crate 内部:编辑内核用;借用期间不得调用户回调)
     pub(crate) fn with_inner_mut<R>(&self, f: impl FnOnce(&mut DocumentInner) -> R) -> R {
         f(&mut self.0.borrow_mut())
     }
 
     pub fn append(&self, parent: ViewId, child: ViewId) {
-        {
+        let from = {
             let mut inner = self.0.borrow_mut();
-            if let Some(old_parent) = inner.nodes[child].parent {
-                let op = old_parent;
+            let from = inner.nodes[child].parent;
+            if let Some(op) = from {
                 inner.nodes[op].children.retain(|c| *c != child);
             }
             inner.nodes[child].parent = Some(parent);
             inner.nodes[parent].children.push(child);
-        }
-        self.bump();
+            from
+        };
+        // **旧父必须现在就记下来** —— 日志被消费时 Doc 里只剩新父了,
+        // 消费端无从知道该把节点从哪儿摘走(taffy 的 `add_child` 不摘旧父,
+        // 于是同一个节点会挂在两个父下、被布局两次)
+        self.bump(dirty::DirtyItem::Structure {
+            id: child,
+            from,
+            to: Some(parent),
+        });
+        // 换了父就可能换了继承字号:子树里所有"自己没设字号"的叶子的测量都变了,
+        // 而它们自己一个字段都没动。这条与 `set_style(font_size)` 是同一条路径,
+        // 只记结构会漏掉它
+        self.bump(dirty::DirtyItem::InheritFontSize {
+            subtree_root: child,
+        });
     }
 
     /// 摘除并递归销毁整棵子树
     pub fn remove(&self, id: ViewId) {
-        let blur_cb = {
+        let (blur_cb, parent) = {
             let mut inner = self.0.borrow_mut();
             // 被删子树含焦点节点:清焦点并留住失焦回调(否则 if_block 重建
             // 会留下悬空焦点)。回调在借用释放后再调
@@ -558,7 +793,8 @@ impl Doc {
                     inner.focused = None;
                 }
             }
-            if let Some(p) = inner.nodes.get(id).and_then(|n| n.parent) {
+            let parent = inner.nodes.get(id).and_then(|n| n.parent);
+            if let Some(p) = parent {
                 inner.nodes[p].children.retain(|c| *c != id);
             }
             fn drop_subtree(inner: &mut DocumentInner, id: ViewId) {
@@ -569,12 +805,18 @@ impl Doc {
                 }
             }
             drop_subtree(&mut inner, id);
-            blur_cb
+            (blur_cb, parent)
         };
         if let Some(cb) = blur_cb {
             cb(false);
         }
-        self.bump();
+        // `to: None` = 删除。父在借用块里就取好了(出了那个块节点已从
+        // slotmap 消失,`nodes.get(id)` 只会返回 None)
+        self.bump(dirty::DirtyItem::Structure {
+            id,
+            from: parent,
+            to: None,
+        });
     }
 
     /// 清空容器的所有子节点(if/each 块重建用)
@@ -592,7 +834,7 @@ impl Doc {
     }
 
     pub fn set_text(&self, id: ViewId, text: &str) {
-        {
+        let item = {
             let mut inner = self.0.borrow_mut();
             let Some(n) = inner.nodes.get_mut(id) else {
                 return;
@@ -601,8 +843,9 @@ impl Doc {
                 return;
             }
             n.text = text.to_string();
-        }
-        self.bump();
+            Self::text_dirty(&inner, id)
+        };
+        self.bump(item);
     }
 
     pub fn set_checked(&self, id: ViewId, checked: bool) {
@@ -616,11 +859,12 @@ impl Doc {
             }
             n.checked = checked;
         }
-        self.bump();
+        // 复选框的测量只看字号(方框恒为字号见方),勾不勾是纯绘制
+        self.bump(dirty::DirtyItem::Paint);
     }
 
     pub fn set_style(&self, id: ViewId, style: Style) {
-        {
+        let (relevant, font_size_changed) = {
             let mut inner = self.0.borrow_mut();
             let Some(n) = inner.nodes.get_mut(id) else {
                 return;
@@ -628,21 +872,51 @@ impl Doc {
             if n.style == style {
                 return;
             }
+            let relevant = dirty::layout_relevant(&n.style, &style);
+            let font_size_changed = !dirty::font_size_eq(n.style.font_size, style.font_size);
             n.style = style;
+            (relevant, font_size_changed)
+        };
+        self.bump(if relevant {
+            dirty::DirtyItem::Measure { id }
+        } else {
+            dirty::DirtyItem::Paint
+        });
+        if font_size_changed {
+            // 字号继承在建树时就地解析,taffy 不知道它 —— 改一个 View 的字号,
+            // 子树里所有没设字号的叶子都要重测。**这是整套分级里最容易漏的一条**
+            self.bump(dirty::DirtyItem::InheritFontSize { subtree_root: id });
         }
-        self.bump();
     }
 
     /// 原地修改样式(比整体替换省事)
     pub fn update_style(&self, id: ViewId, f: impl FnOnce(&mut Style)) {
-        {
+        let (relevant, font_size_changed) = {
             let mut inner = self.0.borrow_mut();
             let Some(n) = inner.nodes.get_mut(id) else {
                 return;
             };
+            // 这里以前**无条件 bump**(不像 set_style 比了 PartialEq),
+            // 于是平滑滚动这类"每帧调一次 update_style、多数帧其实没变"的
+            // 用法在制造假脏帧。先留旧值再比,不等才 bump
+            let before = n.style.clone();
             f(&mut n.style);
+            if before == n.style {
+                return;
+            }
+            (
+                dirty::layout_relevant(&before, &n.style),
+                !dirty::font_size_eq(before.font_size, n.style.font_size),
+            )
+        };
+        self.bump(if relevant {
+            dirty::DirtyItem::Measure { id }
+        } else {
+            dirty::DirtyItem::Paint
+        });
+        if font_size_changed {
+            self.bump(dirty::DirtyItem::InheritFontSize { subtree_root: id });
         }
-        self.bump();
     }
 
     pub fn set_on_click(&self, id: ViewId, f: impl Fn() + 'static) {
@@ -653,7 +927,8 @@ impl Doc {
             };
             n.on_click = Some(Rc::new(f));
         }
-        self.bump();
+        // 注册回调不改任何几何
+        self.bump(dirty::DirtyItem::Paint);
     }
 
     /// 取出点击回调(clone 出来调用,避免调用期间持有树的借用)
@@ -673,7 +948,8 @@ impl Doc {
             };
             n.on_pointer_enter = Some(Rc::new(f));
         }
-        self.bump();
+        // 同上
+        self.bump(dirty::DirtyItem::Paint);
     }
 
     pub fn set_on_pointer_leave(&self, id: ViewId, f: impl Fn() + 'static) {
@@ -684,7 +960,8 @@ impl Doc {
             };
             n.on_pointer_leave = Some(Rc::new(f));
         }
-        self.bump();
+        // 同上
+        self.bump(dirty::DirtyItem::Paint);
     }
 
     /// 取出悬停进入回调(同 [`Doc::click_handler`]:clone 出来调用,不持树借用)
@@ -713,7 +990,8 @@ impl Doc {
             };
             n.on_pointer_down = Some(Rc::new(f));
         }
-        self.bump();
+        // 同上
+        self.bump(dirty::DirtyItem::Paint);
     }
 
     pub fn set_on_pointer_up(&self, id: ViewId, f: impl Fn() + 'static) {
@@ -724,7 +1002,8 @@ impl Doc {
             };
             n.on_pointer_up = Some(Rc::new(f));
         }
-        self.bump();
+        // 同上
+        self.bump(dirty::DirtyItem::Paint);
     }
 
     pub fn pointer_down_handler(&self, id: ViewId) -> Option<Rc<dyn Fn()>> {
@@ -764,7 +1043,8 @@ impl Doc {
             }
             n.focusable = focusable;
         }
-        self.bump();
+        // 可获焦位不进 to_taffy
+        self.bump(dirty::DirtyItem::Paint);
     }
 
     pub fn focusable(&self, id: ViewId) -> bool {
@@ -783,7 +1063,8 @@ impl Doc {
             }
             n.accepts_text = accepts;
         }
-        self.bump();
+        // 同上
+        self.bump(dirty::DirtyItem::Paint);
     }
 
     pub fn set_on_key(&self, id: ViewId, f: impl Fn(&KeyEvent) + 'static) {
@@ -794,12 +1075,35 @@ impl Doc {
             };
             n.on_key = Some(Rc::new(f));
         }
-        self.bump();
+        // 同上
+        self.bump(dirty::DirtyItem::Paint);
     }
 
     /// 取出键盘回调(同 [`Doc::click_handler`]:clone 出来调用,不持树借用)
     pub fn key_handler(&self, id: ViewId) -> Option<KeyHandler> {
         self.0.borrow().nodes.get(id).and_then(|n| n.on_key.clone())
+    }
+
+    /// 捕获段回调:**先于**冒泡、从 root 往焦点走(DOM capture 语义)。
+    /// 用途是祖先要在后代之前拦截(快捷键守卫、模态吞键)
+    pub fn set_on_key_capture(&self, id: ViewId, f: impl Fn(&KeyEvent) + 'static) {
+        {
+            let mut inner = self.0.borrow_mut();
+            let Some(n) = inner.nodes.get_mut(id) else {
+                return;
+            };
+            n.on_key_capture = Some(Rc::new(f));
+        }
+        // 同上
+        self.bump(dirty::DirtyItem::Paint);
+    }
+
+    pub fn key_capture_handler(&self, id: ViewId) -> Option<KeyHandler> {
+        self.0
+            .borrow()
+            .nodes
+            .get(id)
+            .and_then(|n| n.on_key_capture.clone())
     }
 
     pub fn set_on_focus_change(&self, id: ViewId, f: impl Fn(bool) + 'static) {
@@ -810,7 +1114,8 @@ impl Doc {
             };
             n.on_focus_change = Some(Rc::new(f));
         }
-        self.bump();
+        // 同上
+        self.bump(dirty::DirtyItem::Paint);
     }
 
     pub fn focus_change_handler(&self, id: ViewId) -> Option<Rc<dyn Fn(bool)>> {
@@ -847,7 +1152,8 @@ impl Doc {
         if let Some(cb) = new_cb {
             cb(true);
         }
-        self.bump();
+        // 焦点环是渲染壳合成绘制,不进树
+        self.bump(dirty::DirtyItem::Paint);
     }
 
     /// 清焦点(Esc 的默认行为)
@@ -862,7 +1168,8 @@ impl Doc {
         if let Some(cb) = old_cb {
             cb(false);
         }
-        self.bump();
+        // 同上
+        self.bump(dirty::DirtyItem::Paint);
     }
 
     /// 树 DFS 序收集所有 focusable 节点(与 `Placed` 绘制序同构 → Tab 序
@@ -943,7 +1250,26 @@ impl Doc {
             }
             input.placeholder = placeholder.to_string();
         }
-        self.bump();
+        // 输入框测量恒为 200×行高×rows,与内容/占位符无关
+        self.bump(dirty::DirtyItem::Paint);
+    }
+
+    /// 多行模式(`<textarea>`):Enter 换行、粘贴保留换行、按内容宽折行。
+    /// `rows` 是可见行数(布局高度 = rows × 行高)
+    pub fn set_multiline(&self, id: ViewId, multiline: bool, rows: u16) {
+        {
+            let mut inner = self.0.borrow_mut();
+            let Some(input) = inner.nodes.get_mut(id).and_then(|n| n.input.as_deref_mut()) else {
+                return;
+            };
+            if input.multiline == multiline && input.rows == rows {
+                return;
+            }
+            input.multiline = multiline;
+            input.rows = rows.max(1);
+        }
+        // rows 进 MeasureCtx:多行输入框的高 = rows × 行高,真布局脏
+        self.bump(dirty::DirtyItem::Measure { id });
     }
 
     /// 输入框当前值(非 TextInput 返回 None)
@@ -972,9 +1298,13 @@ impl Doc {
                 input.preedit = None;
                 input.cursor = snap_boundary(&n.text, input.cursor);
                 input.anchor = snap_boundary(&n.text, input.anchor);
+                // 程序化赋值不进撤销栈(浏览器 input 同款):否则 Ctrl+Z
+                // 会把外部写入回滚成用户从没打过的中间态
+                input.clear_history();
             }
         }
-        self.bump();
+        // 同上 —— 这是打字帧的大红利
+        self.bump(dirty::DirtyItem::Paint);
     }
 
     /// 当前选中文本(无选区返回 Some("");非 TextInput 返回 None)
@@ -991,25 +1321,21 @@ impl Doc {
 
     /// 定光标(渲染壳点击命中后换算字节偏移调用;extend = 拖选)
     pub fn set_caret(&self, id: ViewId, byte: usize, extend: bool) {
-        let changed = {
-            let mut inner = self.0.borrow_mut();
-            let Some(n) = inner.nodes.get_mut(id) else {
-                return;
-            };
-            let text_len_snap = snap_boundary(&n.text, byte.min(n.text.len()));
-            let Some(input) = n.input.as_deref_mut() else {
-                return;
-            };
-            let before = (input.cursor, input.anchor);
-            input.cursor = text_len_snap;
-            if !extend {
-                input.anchor = input.cursor;
-            }
-            (input.cursor, input.anchor) != before
+        input::apply_edit(self, id, input::EditOp::MoveTo(byte, extend));
+    }
+
+    /// 选中字节区间(渲染壳三击全选走这里)
+    pub fn select_range(&self, id: ViewId, lo: usize, hi: usize) {
+        input::apply_edit(self, id, input::EditOp::SelectRange(lo, hi));
+    }
+
+    /// 选中 `byte` 处的词(渲染壳双击选词;词规则见 [`input::word_range_at`])
+    pub fn select_word_at(&self, id: ViewId, byte: usize) {
+        let Some(text) = self.input_value(id) else {
+            return;
         };
-        if changed {
-            self.bump();
-        }
+        let (lo, hi) = input::word_range_at(&text, byte);
+        self.select_range(id, lo, hi);
     }
 
     pub fn set_on_input(&self, id: ViewId, f: impl Fn(&str) + 'static) {
@@ -1020,7 +1346,8 @@ impl Doc {
             };
             input.on_input = Some(Rc::new(f));
         }
-        self.bump();
+        // 同上
+        self.bump(dirty::DirtyItem::Paint);
     }
 
     pub fn set_on_submit(&self, id: ViewId, f: impl Fn(&str) + 'static) {
@@ -1031,7 +1358,8 @@ impl Doc {
             };
             input.on_submit = Some(Rc::new(f));
         }
-        self.bump();
+        // 同上
+        self.bump(dirty::DirtyItem::Paint);
     }
 
     // -----------------------------------------------------------------------
@@ -1057,7 +1385,9 @@ impl Doc {
         if let Some(cb) = cb {
             cb(x, y);
         }
-        self.bump();
+        // 滚动偏移根本不进 taffy —— 它是产出坐标时对子原点的一次平移。
+        // 布局树整棵可以复用
+        self.bump(dirty::DirtyItem::Position { id });
     }
 
     pub fn scroll_of(&self, id: ViewId) -> (f32, f32) {
@@ -1076,7 +1406,8 @@ impl Doc {
             };
             n.on_scroll = Some(Rc::new(f));
         }
-        self.bump();
+        // 同上
+        self.bump(dirty::DirtyItem::Paint);
     }
 
     pub fn scroll_handler(&self, id: ViewId) -> Option<Rc<dyn Fn(f32, f32)>> {
@@ -1099,7 +1430,8 @@ impl Doc {
             }
             n.content_override = size;
         }
-        self.bump();
+        // 只影响产出坐标时的 ScrollArea content/max 与钳制,不进 taffy
+        self.bump(dirty::DirtyItem::Position { id });
     }
 
     /// 调试:把树 dump 成缩进文本
@@ -1117,6 +1449,23 @@ impl Doc {
                     n.text
                 )),
                 ElementKind::TextInput => out.push_str(&format!("{pad}[input \"{}\"]\n", n.text)),
+                // dump 是结构快照,**刻意不印内容句柄** —— 句柄是运行期分配的,
+                // 印出来会让快照随注册顺序变化,金样测试就废了
+                ElementKind::Animation => {
+                    let a = n
+                        .anim
+                        .as_deref()
+                        .copied()
+                        .unwrap_or(AnimData::placeholder());
+                    out.push_str(&format!(
+                        "{pad}[anim {}x{} {}/{} {}]\n",
+                        a.intrinsic.0,
+                        a.intrinsic.1,
+                        a.frame,
+                        a.frame_count,
+                        if a.playing { "播放" } else { "暂停" }
+                    ));
+                }
             }
             for c in &n.children {
                 walk(inner, *c, depth + 1, out);
@@ -1265,52 +1614,90 @@ pub fn each_block_keyed<T, K>(
     parent: ViewId,
     items: impl Fn() -> Vec<T> + 'static,
     key_of: impl Fn(&T) -> K + 'static,
-    row: impl Fn(&Doc, ViewId, &T) + 'static,
+    row: impl Fn(&Doc, ViewId, sv_reactive::Signal<T>) + 'static,
 ) where
-    T: Clone + 'static,
+    T: Clone + PartialEq + 'static,
     K: PartialEq + Clone + 'static,
 {
     let container = doc.create_view();
     doc.append(parent, container);
     let doc = doc.clone();
-    // 行注册表活在 effect 之外:重跑时复用而不是销毁
-    type Rows<K> = Rc<RefCell<Vec<(K, ViewId, RootHandle)>>>;
-    let rows: Rows<K> = Rc::new(RefCell::new(Vec::new()));
+    // 行的宿主作用域:建在**调用方**的 owner 链上(context 可达),且不在
+    // 下面那个 effect 名下 —— 否则列表一变,effect 重跑会先销毁子树,
+    // 把所有行的 signal/effect 一起带走(表现为"复用的行从此不再更新")
+    let (_, host) = create_root(|| ());
+    // 行注册表活在 effect 之外:重跑时复用而不是销毁。
+    // 每行带一个 `Signal<T>`(ADR-7 目标形态):**内容变化走原地 set**,
+    // reconcile 只管 key 的增删移 —— 否则同 key 换内容的行会一直显示旧数据
+    type Rows<K, T> = Rc<RefCell<Vec<(K, ViewId, RootHandle, sv_reactive::Signal<T>)>>>;
+    let rows: Rows<K, T> = Rc::new(RefCell::new(Vec::new()));
     let rows_cleanup = rows.clone();
     let doc_cleanup = doc.clone();
 
     effect(move || {
         let new_items = items(); // 追踪列表本身
-        let mut old: Vec<(K, ViewId, RootHandle)> = rows.borrow_mut().drain(..).collect();
+        let mut old: Vec<(K, ViewId, RootHandle, sv_reactive::Signal<T>)> =
+            rows.borrow_mut().drain(..).collect();
         let mut new_rows = Vec::with_capacity(new_items.len());
         for item in &new_items {
             let k = untrack(|| key_of(item));
-            if let Some(pos) = old.iter().position(|(ok, _, _)| *ok == k) {
-                // 复用:append 即"移动到末尾",按新序逐个 append 完成重排
+            if let Some(pos) = old.iter().position(|(ok, _, _, _)| *ok == k) {
+                // 复用:先不动位置,顺序统一在末尾对齐(见下)
                 let entry = old.remove(pos);
-                doc.append(container, entry.1);
+                // 内容变了才 set:等值不写 = 行内绑定不重跑(纯重排零开销)。
+                // 读写都 untrack —— 行信号绝不能成为本 effect 的依赖,
+                // 否则改一行会重跑整个列表 reconcile
+                let changed = untrack(|| entry.3.with(|old_item| old_item != item));
+                if changed {
+                    let v = item.clone();
+                    untrack(|| entry.3.set(v));
+                }
                 new_rows.push(entry);
             } else {
                 let cont = doc.create_view();
                 doc.append(container, cont);
                 let d = doc.clone();
                 let item = item.clone();
-                // 行作用域独立于本 effect(不随列表变化销毁);
+                // 行作用域独立于本 effect(不随列表变化销毁);行信号建在该
+                // 作用域内 —— 行销毁时一并释放。
                 // untrack:行构建期的散读不应订阅到本 effect 上
-                let (_, scope) = create_root(|| untrack(|| row(&d, cont, &item)));
-                new_rows.push((k, cont, scope));
+                // 闭包不能 move:`row` 是被外层 effect 捕获的 `Fn`,借用即可
+                let (sig, scope) = sv_reactive::with_owner(&host, || {
+                    create_root(|| {
+                        let sig = sv_reactive::state(item.clone());
+                        untrack(|| row(&d, cont, sig));
+                        sig
+                    })
+                });
+                new_rows.push((k, cont, scope, sig));
             }
         }
-        for (_, cont, scope) in old {
+        for (_, cont, scope, _) in old {
             scope.dispose();
             doc.remove(cont);
+        }
+        // 顺序对齐:**只在真的乱序时**才动树。逐行 append 虽然结果正确,
+        // 但每次都会 bump 版本号触发重绘 —— 而"内容变、顺序没变"是列表最
+        // 常见的更新形态,不该为它重排一遍
+        let desired: Vec<ViewId> = new_rows.iter().map(|(_, id, _, _)| *id).collect();
+        let in_order = doc.read(|inner| {
+            inner
+                .nodes
+                .get(container)
+                .is_some_and(|c| c.children == desired)
+        });
+        if !in_order {
+            // append 即"移到末尾":按新序逐个 append 完成重排
+            for id in &desired {
+                doc.append(container, *id);
+            }
         }
         *rows.borrow_mut() = new_rows;
     });
 
     // 整块卸载时销毁所有行作用域
     on_cleanup(move || {
-        for (_, cont, scope) in rows_cleanup.borrow_mut().drain(..) {
+        for (_, cont, scope, _) in rows_cleanup.borrow_mut().drain(..) {
             scope.dispose();
             doc_cleanup.remove(cont);
         }
@@ -1650,8 +2037,8 @@ mod tests {
                     let my_build = *b.borrow();
                     let t = doc.create_text("");
                     doc.append(parent, t);
-                    let name = it.1;
-                    bind_text(doc, t, move || format!("{name}#{my_build}"));
+                    // 读行信号 → 内容变化原地更新(ADR-7)
+                    bind_text(doc, t, move || format!("{}#{my_build}", it.get().1));
                 },
             );
         });
@@ -1671,6 +2058,18 @@ mod tests {
         assert_eq!(*builds.borrow(), 4, "只应新建 key=4 一行");
         let dump = doc.dump();
         assert!(!dump.contains("乙") && dump.contains("丁#4"), "\n{dump}");
+
+        // 同 key 换内容:**原地更新且不重建**(ADR-7 目标形态)。
+        // 改前行只在构建时读一次 T,同 key 换内容会永远显示旧数据
+        items.set(vec![(3, "丙丙"), (1, "甲"), (4, "丁")]);
+        assert_eq!(*builds.borrow(), 4, "内容变化不该重建行");
+        let dump = doc.dump();
+        assert!(dump.contains("丙丙#3"), "同 key 换内容应原地更新:\n{dump}");
+
+        // 等值再设:不写行信号 → 行内绑定不重跑(纯重排/无变化零树改动)
+        let v = doc.version();
+        items.set(vec![(3, "丙丙"), (1, "甲"), (4, "丁")]);
+        assert_eq!(doc.version(), v, "内容没变不该产生任何树改动");
     }
 
     #[test]
@@ -1844,7 +2243,7 @@ mod tests {
                 |it| *it,
                 |doc, parent, it| {
                     let theme = use_context::<Theme>().map_or("取不到", |t| t.0);
-                    let t = doc.create_text(&format!("{it}:{theme}"));
+                    let t = doc.create_text(&format!("{}:{theme}", it.get()));
                     doc.append(parent, t);
                 },
             );

@@ -20,13 +20,35 @@
 | `$effect.root` | `create_root`(最接近的对应) | 所有权作用域,手动 `dispose` |
 | `$effect.pending()` | `sv_ui::tasks::pending_count` | 响应式的在途任务数 |
 | `$props.id()` | `unique_id` | 线程内自增:`"sv-1"`、`"sv-2"`… |
-| `tick` | `tick` | 为 API 对齐保留;写入本就同步 flush |
+| `tick` | `tick` | 帧对齐下是 flush 逃生舱;离屏路径写入本就同步 flush |
 | `setContext` / `getContext` | `provide_context` / `use_context` | 按 Rust 类型索引,不用字符串键 |
 | `untrack` | `untrack` | |
 
 刻意放弃的特性(见 [DESIGN.md](../DESIGN.md) ADR-1):隐式赋值响应(`count += 1`
 触发更新)与 Proxy 深层响应。裸 Rust 里用显式 `set`/`update`;`.sv` 编译器前端
 则通过源变换把隐式写法找回来。
+
+## `#[derive(Store)]`:字段级信号
+
+`Signal<整个结构体>` 粒度太粗——改一个字段会把只读别的字段的 effect 一起叫醒。
+Svelte 用 Proxy 做深层响应,这里走编译期:**每个字段一个 `Signal`**。
+
+```rust
+use sv_macro::Store;
+
+#[derive(Store, Clone, PartialEq)]
+struct Settings { theme: String, volume: f32 }
+
+let s = Settings { theme: "dark".into(), volume: 0.8 }.into_store();
+s.volume.set(0.5);                  // 只叫醒读 volume 的 effect
+let snap: Settings = s.snapshot();  // 读回整值(会订阅**所有**字段)
+s.apply(next);                      // 整体写回,只写值变了的字段
+```
+
+生成的 `SettingsStore` 是 `Copy` 的(字段都是 `Signal` 句柄),可以随手塞进闭包。
+要求:具名字段、无泛型、字段类型 `Clone + PartialEq + 'static`。
+**不做嵌套 store**:内层结构体仍是一个整体信号,想更细就给内层也 derive 一次
+——自动递归会让类型与所有权难以预料。
 
 ## state
 
@@ -115,7 +137,25 @@ batch(|| {
 tick();          // 立即冲刷待决 effect;batch 内调用是 no-op
 ```
 
-`tick` 主要为 API 对齐保留:batch 外的写入本就同步 flush。
+`tick` 在**开窗应用**里是逃生舱,在离屏/测试里是 API 对齐——差别来自帧调度:
+
+### 帧对齐(ADR-6)
+
+`sv_shell::run_app` 开窗后会调 `set_frame_scheduler`,此后**写入不再当场跑
+effect**:入队 + 请求一帧,由渲染壳在帧前统一冲刷,然后才布局、绘制。
+一次事件里连写十个 state,只重绘一帧、只跑一轮 effect
+(Svelte 用 microtask flush 达成同一件事,桌面端的等价物是帧边界)。
+
+```rust
+count.set(1);
+count.set(2);
+assert_eq!(derived_total.get(), /* 仍是旧值 */);  // 帧还没到
+tick();                                           // 逃生舱:现在就要结果
+```
+
+**只有开窗路径会开启**。离屏渲染(`render_to_png`)与测试保持"写入即同步
+flush",行为与过去一致——所以离屏测试里 `tick` 依旧基本是空操作。
+需要显式关闭时用 `clear_frame_scheduler()`。
 
 ## untrack 与 is_tracking
 

@@ -1,0 +1,75 @@
+# cargo-deny 配置(R4 发布门禁,调研 25 §3.2)
+#
+# 三件事:漏洞公告、许可证合规、依赖来源。CI 里 `cargo deny check advisories
+# bans licenses sources` 阻塞合并。
+
+[graph]
+# 只审我们真正会构建的目标(桌面三平台;鸿蒙进 R5 时补 *-unknown-linux-ohos)
+targets = [
+    "x86_64-pc-windows-msvc",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+]
+# **别改成 false 去换速度**:backend-vello 默认是关的,关掉 all-features 就等于
+# 把 wgpu/naga/vello 整棵树移出审计范围 —— 而那是依赖数量最多、CVE 面最大的
+# 一块,平时又因为 cfg 关着而缺乏关注(2026-07 那次 vello 分支编译回归就是
+# 同一个病根:默认特性照不到的地方会烂)。CI 的特性矩阵管编译,这一行管供应链
+all-features = true
+
+[advisories]
+version = 2
+# 未修复的公告一律阻塞;确需放行时在此登记 ID 并写明理由与复查日期。
+#
+# **下面三条全部来自 winit 的 Linux 窗口装饰链,我们一行都没直接调用**,
+# 而且三条都**没有我们能自己走的升级路**(试过了,见各条)。
+# 复查日期:**2026-10-22**(登记于 2026-07-23)。到期请重跑
+# `cargo tree --target all -i <crate>` 看上游有没有动,能删就删掉这几条。
+ignore = [
+    # quick-xml:两条 DoS 类公告(重复属性名的二次方耗时 / NsReader 命名空间
+    # 声明无上界分配),修复版是 >=0.41。
+    # **够不着**:唯一引入者是 `wayland-scanner`,它把依赖钉在 `quick-xml = "^0.39"`
+    # (实测 `cargo update -p quick-xml --precise 0.41.0` 直接被 cargo 拒),
+    # 要动得等 wayland-rs / winit 先升。
+    # **风险面**:`wayland-scanner` 是 **proc-macro**,只在**构建期**跑,
+    # 解析的是**随 crate 一起发布的** Wayland 协议 XML —— 不是攻击者能控制的输入,
+    # 而这两条公告的前提正是"解析不可信 XML"。且仅 Linux。
+    { id = "RUSTSEC-2026-0194", reason = "wayland-scanner 构建期解析自带协议 XML;上游钉 ^0.39 升不动;仅 Linux" },
+    { id = "RUSTSEC-2026-0195", reason = "同上,同一个 quick-xml" },
+    # ttf-parser 无人维护(**不是漏洞**,是维护状态)。公告自己写着
+    # "No safe upgrade is available"。
+    # 引入路径:`sctk-adwaita`(Wayland 客户端侧窗口装饰)→ `ab_glyph` → 它,
+    # 用途是画标题栏文字。**与本仓库的文本栈无关**(我们走 Parley/swash),
+    # 我们没有任何一行代码调用它。
+    { id = "RUSTSEC-2026-0192", reason = "winit 的 Linux CSD 标题栏字体链;无安全升级版;与本仓库文本栈无关" },
+]
+
+[licenses]
+version = 2
+# 与本仓库 MIT OR Apache-2.0 相容的清单(Linebender/wgpu 生态的实际取值)
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "BSL-1.0",
+    "MPL-2.0",
+    "CC0-1.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "OpenSSL",
+]
+confidence-threshold = 0.9
+
+[bans]
+# 同一依赖多版本共存只提示不阻塞:上游生态(wgpu/winit 链)常态如此,
+# 一刀切会把门禁变成噪音源
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

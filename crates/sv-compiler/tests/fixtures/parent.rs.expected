@@ -1,0 +1,81 @@
+// 由 sv-compiler 生成,请勿手改。
+#[allow(unused_variables, unused_mut, unused_braces, unused_parens, clippy::all)]
+pub fn parent(doc: &::sv_ui::Doc, parent: ::sv_ui::ViewId) {
+    let __doc: ::sv_ui::Doc = doc.clone();
+    let __parent = parent;
+    let n = ::sv_reactive::state(3i32);
+    let title = String::from("子组件");
+    {
+        let title = ::std::clone::Clone::clone(&title);
+        let __el1 = __doc.create_view();
+        __doc.append(__parent, __el1);
+        __doc
+            .update_style(
+                __el1,
+                |s| {
+                    s.gap = 6f32;
+                },
+            );
+        {
+            let __parent = __el1;
+            {
+                let title = ::std::clone::Clone::clone(&title);
+                child(
+                    &__doc,
+                    __parent,
+                    ChildProps {
+                        title: title.clone(),
+                        step: ChildProps::default_step(),
+                        value: n,
+                        children: {
+                            ::std::rc::Rc::new(move |
+                                __doc: &::sv_ui::Doc,
+                                __parent: ::sv_ui::ViewId|
+                            {
+                                let __doc: ::sv_ui::Doc = __doc.clone();
+                                let __el2 = __doc
+                                    .create_text("这是塞进去的 children");
+                                __doc.append(__parent, __el2);
+                            }) as ::sv_ui::Snippet
+                        },
+                    },
+                );
+            }
+            let extra = {
+                move |__doc: &::sv_ui::Doc, __parent: ::sv_ui::ViewId, x: i32| {
+                    let __doc: ::sv_ui::Doc = __doc.clone();
+                    {
+                        let x = ::std::clone::Clone::clone(&x);
+                        let __el3 = __doc.create_text("");
+                        ::sv_ui::bind_text(
+                            &__doc,
+                            __el3,
+                            move || {
+                                let mut __s = ::std::string::String::new();
+                                __s.push_str("片段参数 ");
+                                __s.push_str(&(x).to_string());
+                                __s
+                            },
+                        );
+                        __doc.append(__parent, __el3);
+                    }
+                }
+            };
+            {
+                let extra = ::std::clone::Clone::clone(&extra);
+                ::sv_ui::key_block(
+                    &__doc,
+                    __parent,
+                    { move || (n.get(),) },
+                    {
+                        let extra = ::std::clone::Clone::clone(&extra);
+                        move |__doc, __parent| {
+                            let __doc: ::sv_ui::Doc = __doc.clone();
+                            (extra)(&__doc, __parent, n.get());
+                        }
+                    },
+                );
+            }
+        }
+    }
+}

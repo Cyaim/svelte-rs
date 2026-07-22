@@ -47,7 +47,7 @@ let scroll_y = $state(0.0f32);
 
     <view style="gap:6">
       <text font-size="18">关于</text>
-      <text font-size="13" fg="#666677" style="max-width: 420">sv 是一个 Svelte 风格的 Rust 跨平台桌面 UI 库探索原型。渲染层当前为 CPU/vello 双后端,布局引擎为 taffy 0.12,文本折行为 swash + unicode-linebreak 过渡实现(M2 迁移 Parley)。本面板内容特意超出一屏高度,用滚轮或触摸板滚动查看,右侧应出现合成绘制的滚动条。</text>
+      <text font-size="13" fg="#666677" style="max-width: 420">sv 是一个 Svelte 风格的 Rust 跨平台桌面 UI 库探索原型。渲染层当前为 CPU/vello 双后端,布局引擎为 taffy 0.12,文本栈为 Parley 0.11 + fontique(shaping/折行/光标几何一并接管)。本面板内容特意超出一屏高度:用滚轮滚动(鼠标滚轮带缓动)、或直接拖右侧那根合成绘制的滚动条。</text>
       <text font-size="13" fg="#666677">空间占位段落甲:为了让内容确定超过一屏,这里再放几段文字。</text>
       <text font-size="13" fg="#666677">空间占位段落乙:滚动到底部时,滚动链会把多余的滚动量交给祖先容器。</text>
       <text font-size="13" fg="#666677">空间占位段落丙:Tab 键可以在输入框、复选框与按钮之间移动焦点。</text>

@@ -15,11 +15,21 @@ pub enum Tag {
     Checkbox,
     /// 单行文本输入叶子(bind:value 双向绑定的宿主)
     Input,
+    /// 多行文本输入叶子(`<textarea rows="N" />`):与 Input 共用编辑内核
+    /// 与全部属性,只是 Enter 换行、按内容宽折行、高度按 rows 算
+    TextArea,
     /// 弹层(调研 25:children 编译成 overlay_block 的 build 闭包;
     /// 锚定到**父容器元素**)
     Overlay,
     /// 大写开头的标签 = 组件调用,如 `<TodoItem />`
     Component(String),
+}
+
+impl Tag {
+    /// 文本输入族(`<input>` / `<textarea>`):共用编辑内核与全部输入属性
+    pub fn is_text_input(&self) -> bool {
+        matches!(self, Tag::Input | Tag::TextArea)
+    }
 }
 
 #[derive(Debug)]
@@ -297,6 +307,7 @@ impl<'a> Parser<'a> {
             "button" => Tag::Button,
             "checkbox" => Tag::Checkbox,
             "input" => Tag::Input,
+            "textarea" => Tag::TextArea,
             "overlay" => Tag::Overlay,
             "" => return Err(self.err(off, "`<` 后应为标签名")),
             other if other.chars().next().unwrap().is_ascii_uppercase() => {
@@ -306,7 +317,8 @@ impl<'a> Parser<'a> {
                 return Err(self.err(
                     off + 1,
                     format!(
-                        "未知标签 `{other}`(内置 view/text/button/checkbox/input;组件用大写开头)"
+                        "未知标签 `{other}`(内置 view/text/button/checkbox/input/textarea;\
+                         组件用大写开头)"
                     ),
                 ));
             }
@@ -349,7 +361,7 @@ impl<'a> Parser<'a> {
                 children,
                 offset: off,
             }),
-            Tag::Checkbox | Tag::Input => {
+            Tag::Checkbox | Tag::Input | Tag::TextArea => {
                 if !children.is_empty() {
                     return Err(self.err(off, format!("`<{name}>` 是叶子元素,请自闭合")));
                 }

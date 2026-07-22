@@ -16,3 +16,15 @@ backend-vello = ["sv-shell/backend-vello"]
 
 [build-dependencies]
 sv-compiler = { workspace = true }
+
+# 应用打包(调研 25 §3.3:cargo-packager 为主力)。
+# 这是"库之外的那半个故事":库走 crates.io,用户 App 需要 nsis/dmg/appimage。
+# v0 只做到**未签名**产物 + CI 钩子就位;Authenticode / Developer ID 公证是
+# 组织级账号事务,工程侧无法代劳
+[package.metadata.packager]
+product-name = "sv showcase"
+identifier = "dev.svelte-rs.showcase"
+description = "svelte-rs 能力演示(计数器/样式/过渡/滚动/弹层)"
+authors = ["svelte-rs contributors"]
+license-file = "../../LICENSE-MIT"
+formats = ["nsis", "dmg", "appimage"]

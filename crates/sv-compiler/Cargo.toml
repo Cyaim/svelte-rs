@@ -3,6 +3,13 @@ name = "sv-compiler"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+authors.workspace = true
 description = ".sv 单文件组件编译器:script 块 runes 源变换 + Svelte 语法模板 → Rust 代码生成"
 
 [dependencies]

@@ -8,16 +8,19 @@
 //!   (FontHandle/GlyphKey.font_key)承载;字体注册表按 Blob id 建键,
 //!   每个唯一字体**有意泄漏一次** Blob 句柄(Arc 壳,零拷贝)换取
 //!   `FontRef<'static>` 的稳定 CacheKey(swash ScaleContext 缓存命中前提)。
-//! - TextInput 仍走旧 swash 线性路径(key=0):编辑几何(caret_x)与显示必须
-//!   同源,P3 由 PlainEditor 整体外包后一并切换。
+//! - **P3(2026-07-22)**:TextInput 的光标/选区/命中几何也搬到本门面
+//!   ([`caret_x`] / [`caret_index_at`] / [`selection_rects`]),旧 swash 线性
+//!   路径(逐 char advance 求和)与 `font.rs` 一并退役——全仓再无第二套排版。
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
-use parley::{AlignmentOptions, FontContext, LayoutContext, PositionedLayoutItem, StyleProperty};
+use parley::{
+    Affinity, AlignmentOptions, Cursor, FontContext, LayoutContext, PositionedLayoutItem,
+    Selection, StyleProperty,
+};
 use swash::FontRef;
 
-use crate::font::FontHandle;
 use crate::paint::{GlyphKey, GlyphPos};
 
 struct Engine {
@@ -31,6 +34,27 @@ struct RegisteredFont {
     index: u32,
 }
 
+/// 字体身份句柄(调研 24 P0"载体扩宽"):glyph run 带字体身份,
+/// 光栅缓存/GPU FontData 都按 `key` 索引。键由私有的 `register` 按 fontique
+/// Blob id 生成,同帧多字体 fallback 混排即多个 key
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct FontHandle {
+    pub key: u64,
+}
+
+impl FontHandle {
+    /// 按 key 解析 swash FontRef(CPU 光栅/度量用)
+    pub fn font_ref(&self) -> FontRef<'static> {
+        font_ref_of(self.key).expect("sv-shell: 未注册的字体键")
+    }
+
+    /// 原始字节 + collection index(GPU 端构造 peniko::FontData 用)
+    #[cfg_attr(not(feature = "backend-vello"), allow(dead_code))]
+    pub fn data(&self) -> (&'static [u8], u32) {
+        font_bytes_of(self.key).expect("sv-shell: 未注册的字体键")
+    }
+}
+
 thread_local! {
     static ENGINE: RefCell<Engine> = RefCell::new(Engine {
         fcx: FontContext::new(),
@@ -41,9 +65,9 @@ thread_local! {
 
 /// 注册(或取回)一个 parley 字体的身份句柄
 fn register(font: &parley::FontData) -> FontHandle {
-    // Blob id 进程内唯一但**从 0 起**——必须避开内置字体的保留键 0
-    // (撞键 = Segoe 的字形 id 被雅黑光栅,Latin 全员错字;实测踩过):
-    // 最高位恒置 1,id 左移 16 容纳 TTC index,三段无碰撞
+    // Blob id 进程内唯一但**从 0 起**:最高位恒置 1(P1 期为避开内置字体的
+    // 保留键 0——撞键 = Segoe 的字形 id 被雅黑光栅,Latin 全员错字,实测踩过;
+    // P3 内置字体退役后保留此编码,键值形态不变),id 左移 16 容纳 TTC index
     let key = (1u64 << 63) | (font.data.id() << 16) | (font.index as u64 & 0xFFFF);
     FONTS.with(|f| {
         f.borrow_mut().entry(key).or_insert_with(|| {
@@ -63,13 +87,13 @@ fn register(font: &parley::FontData) -> FontHandle {
     FontHandle { key }
 }
 
-/// 按身份键取 swash FontRef(CPU 光栅;key=0 的内置字体走 font.rs)
-pub(crate) fn font_ref_of(key: u64) -> Option<FontRef<'static>> {
+/// 按身份键取 swash FontRef(CPU 光栅)
+fn font_ref_of(key: u64) -> Option<FontRef<'static>> {
     FONTS.with(|f| f.borrow().get(&key).map(|r| r.fref))
 }
 
 /// 按身份键取原始字节 + index(GPU 端建 FontData)
-pub(crate) fn font_bytes_of(key: u64) -> Option<(&'static [u8], u32)> {
+fn font_bytes_of(key: u64) -> Option<(&'static [u8], u32)> {
     FONTS.with(|f| f.borrow().get(&key).map(|r| (r.bytes, r.index)))
 }
 
@@ -122,14 +146,45 @@ fn with_layout<R>(
 /// (与 glyph_cache 同款分代策略)
 pub fn measure(text: &str, px: f32, wrap_w: Option<f32>) -> (f32, f32) {
     if text.is_empty() {
-        let m = crate::font::ui_font().metrics(&[]).scale(px);
-        return (0.0, m.ascent + m.descent + m.leading);
+        // 空串保持一行高:借代表字形的行度量。P3 前这里取内置 swash 字体的
+        // metrics,与 parley 实际选中的族可能不是同一个字体(空/非空节点行高
+        // 会差几个 px);现在同源了
+        return (0.0, line_height(px));
     }
+    /// 键 =(文本哈希, 字号位, 折行宽位)→ 值 =(宽, 高)
+    type MeasureCache = HashMap<(u64, u32, u32), (f32, f32)>;
     thread_local! {
-        static HOT: RefCell<HashMap<(u64, u32, u32), (f32, f32)>> = RefCell::new(HashMap::new());
-        static COLD: RefCell<HashMap<(u64, u32, u32), (f32, f32)>> = RefCell::new(HashMap::new());
+        static HOT: RefCell<MeasureCache> = RefCell::new(HashMap::new());
+        static COLD: RefCell<MeasureCache> = RefCell::new(HashMap::new());
+        /// 自适应容量。**固定 4096 是个会静默塌方的设计**:taffy 的两趟测量
+        /// 协议让每个叶子按不同 `wrap_w` 问好几次,一棵 30k 树的 distinct 键
+        /// 轻松上万;一旦超过 CAP,HOT 每装满一次就整代降冷,而下一轮命中的
+        /// 又多半在已被顶掉的那批里 —— 缓存进入颠簸,退化成"每个叶子每帧
+        /// 重排一次"。实测(逐行唯一文本的 30k 树,release):
+        /// **2525ms → 约 90ms,约 27 倍**,而这只是一个常数的事。
+        ///
+        /// 策略:**没到内存上限就原地扩容,到了才降代**。
+        /// HOT 装满时:CAP 未封顶 → 容量翻倍、**HOT 原封不动**;
+        /// 已封顶 → 整代降冷(这时两代机制才真正开始工作)。
+        ///
+        /// 为什么不是"装满就降代、顺手把容量翻倍"(本函数的上一版):
+        /// 那样每涨一档就要**丢掉一整代**,而容量爬到能装下工作集需要好几档。
+        /// 爬升快慢取决于**有多少次查询真的打到这一层** —— 于是它会被上游的
+        /// 任何一层缓存拖慢。实测抓到过一次:给叶子加了一层 memo 之后,
+        /// 打到这里的查询从 18 万降到 4.2 万,棘轮爬不上去,
+        /// **30k 档从 96ms 劣化到 365ms**(加了个缓存,反而慢 3.8 倍)。
+        /// 原地扩容没有这个耦合:容量只跟工作集走,与查询次数无关。
+        ///
+        /// 内存按**桶数**算不是按条数:65536 条在 hashbrown 里会开到
+        /// 114688 桶,每桶 24B 载荷 ≈ 2.75MB,**实测每代约 3.1MB、两代 6.3MB**
+        /// (比"1.6MB/代"的直觉高一倍 —— 桶数与控制字节都要算)。
+        /// 对照 ADR-9 的 28MB 基线可接受,但上限必须有:一个每帧生成新串的
+        /// 界面(时钟、日志流)会一路顶到上限。
+        ///
+        /// 它**只涨不落**:工作集缩小后容量不回收。想回落要记每帧 distinct
+        /// 键数并加迟滞,是另一套机制,现在不值得。
+        static CAP: std::cell::Cell<usize> = const { std::cell::Cell::new(4096) };
     }
-    const CAP: usize = 4096;
     let key = {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -152,13 +207,131 @@ pub fn measure(text: &str, px: f32, wrap_w: Option<f32>) -> (f32, f32) {
     });
     HOT.with(|c| {
         let mut hot = c.borrow_mut();
-        if hot.len() >= CAP {
-            let demoted = std::mem::take(&mut *hot);
-            COLD.with(|cold| *cold.borrow_mut() = demoted);
+        let cap = CAP.with(Cell::get);
+        if hot.len() >= cap {
+            if cap < CAP_MAX {
+                // 没顶到内存上限:原地扩容,一条也不丢。容量因此在**同一帧内**
+                // 就能追上工作集,而不是每涨一档丢一整代、慢慢爬好几帧
+                CAP.with(|c| c.set(next_cap(cap)));
+            } else {
+                // 顶到上限了,两代淘汰机制这时才真正开始工作
+                let demoted = std::mem::take(&mut *hot);
+                COLD.with(|cold| *cold.borrow_mut() = demoted);
+            }
         }
         hot.insert(key, result);
     });
     result
+}
+
+/// 容量上限。到了它才开始"降代淘汰",在此之前一律原地扩容
+const CAP_MAX: usize = 65536;
+
+/// 下一档容量:翻倍向上取 2 的幂,钳在 [4096, 65536]
+fn next_cap(cur: usize) -> usize {
+    const MIN: usize = 4096;
+    let want = cur.saturating_mul(2).max(MIN);
+    if want >= CAP_MAX {
+        return CAP_MAX;
+    }
+    want.next_power_of_two().clamp(MIN, CAP_MAX)
+}
+
+/// 单行行高(逻辑 px):空文本节点与 TextInput 的固有高。
+/// 取代表字形 `x` 的行度量——与非空文本同一字体系统,不再各断各的
+pub fn line_height(px: f32) -> f32 {
+    measure("x", px, None).1
+}
+
+// ---------------------------------------------------------------------------
+// 光标 / 选区几何(调研 24 P3)
+//
+// **裁决(修订调研 24 §3.3 的 PlainEditor 编辑器池方案)**:parley 只出几何,
+// 不接管编辑内核。sv-ui 的 `InputState`(字节光标/锚点/预编辑)仍是唯一编辑
+// 真源,于是既不需要 `HashMap<ViewId, PlainEditor>` 第二真源,也不需要
+// `Generation` 回声抑制;`bind:value`/IME/剪贴板全链路一行不改。换来的是
+// parley `Cursor`/`Selection` 的全部好处:kerning/连字后的真实光标位置、
+// fallback 混排下的命中、BiDi 选区多矩形——旧线性 advance 求和全部作废。
+//
+// 全部取 `wrap_w=None` + 左对齐的单行 Layout,与绘制层 [`shape`] 同参构建
+// ——"画的"与"点的"必须出自同一次排版。
+// ---------------------------------------------------------------------------
+
+fn with_line_layout<R>(
+    text: &str,
+    px: f32,
+    wrap_w: Option<f32>,
+    f: impl FnOnce(&parley::Layout<[u8; 4]>) -> R,
+) -> R {
+    with_layout(text, px, wrap_w, sv_ui::TextAlign::Left, f)
+}
+
+/// 光标 x(逻辑 px,相对文本起点);`byte` 非 char 边界时向下取所在簇起点。
+/// 单行专用(多行请用 [`caret_rect`])
+pub fn caret_x(text: &str, px: f32, byte: usize) -> f32 {
+    caret_rect(text, px, None, byte).0
+}
+
+/// 光标矩形(逻辑 px,相对文本起点):`(x, y, 行高)`。
+/// `wrap_w=Some(w)` 时按 w 折行 —— 多行输入的光标要知道自己在第几行
+pub fn caret_rect(text: &str, px: f32, wrap_w: Option<f32>, byte: usize) -> (f32, f32, f32) {
+    if text.is_empty() {
+        return (0.0, 0.0, line_height(px));
+    }
+    with_line_layout(text, px, wrap_w, |l| {
+        let r =
+            Cursor::from_byte_index(l, byte.min(text.len()), Affinity::Downstream).geometry(l, 0.0);
+        (r.x0 as f32, r.y0 as f32, (r.y1 - r.y0) as f32)
+    })
+}
+
+/// 点击 x(逻辑 px,相对文本起点)→ 最近簇边界的字节偏移(与 [`caret_x`] 互逆)
+pub fn caret_index_at(text: &str, px: f32, x: f32) -> usize {
+    caret_index_at_point(text, px, None, x, 0.0)
+}
+
+/// 点(x, y)→ 最近簇边界的字节偏移(多行:y 决定落在第几行)
+pub fn caret_index_at_point(text: &str, px: f32, wrap_w: Option<f32>, x: f32, y: f32) -> usize {
+    if text.is_empty() {
+        return 0;
+    }
+    with_line_layout(text, px, wrap_w, |l| Cursor::from_point(l, x, y).index())
+}
+
+/// 选区矩形(逻辑 px,相对文本起点):`(x, y, w, h)` 序列。
+/// 单行下通常一个矩形,BiDi 混排会分段——所以返回的是序列而不是一对 x
+pub fn selection_rects(text: &str, px: f32, lo: usize, hi: usize) -> Vec<(f32, f32, f32, f32)> {
+    selection_rects_wrapped(text, px, None, lo, hi)
+}
+
+/// 选区矩形(折行版):多行选区天然是**每行一个矩形**
+pub fn selection_rects_wrapped(
+    text: &str,
+    px: f32,
+    wrap_w: Option<f32>,
+    lo: usize,
+    hi: usize,
+) -> Vec<(f32, f32, f32, f32)> {
+    if text.is_empty() || lo >= hi {
+        return Vec::new();
+    }
+    with_line_layout(text, px, wrap_w, |l| {
+        let sel = Selection::new(
+            Cursor::from_byte_index(l, lo.min(text.len()), Affinity::Downstream),
+            Cursor::from_byte_index(l, hi.min(text.len()), Affinity::Downstream),
+        );
+        sel.geometry(l)
+            .into_iter()
+            .map(|(r, _line)| {
+                (
+                    r.x0 as f32,
+                    r.y0 as f32,
+                    (r.x1 - r.x0) as f32,
+                    (r.y1 - r.y0) as f32,
+                )
+            })
+            .collect()
+    })
 }
 
 /// 行字节区间(测试探针:断行行为的最小观察面)

@@ -98,6 +98,19 @@ M0 探索已完成:signal 到像素的完整闭环(中文渲染、HiDPI、命中
 实测达标。这是原型——API 会变,布局/文本整形/帧调度等子系统是占位实现,
 替换计划见 [docs/DESIGN.md](docs/DESIGN.md) 的路线图与 ADR。
 
+## 版本与发布
+
+尚未发布到 crates.io——crate 名待改名裁决(`sv` 已被占用,见
+[docs/DESIGN.md](docs/DESIGN.md) 的 ADR-10)。首发后工作区所有 crate
+同版本号、按依赖序推送。
+
+**0.x 政策:minor 号(`0.X.0`)= 破坏性变更,patch 号(`0.0.X`)= 向后兼容。**
+每次破坏性变更都在 [CHANGELOG.md](CHANGELOG.md) 写明迁移方式。谈 1.0 之前
+还有三项已排期的破坏性变更:双前端内核合并、`on:` 事件语法收敛、
+帧调度语义(ADR-6)。
+
+MSRV 为 **1.88**——由 let-chains(`if let ... && ...`)决定,而不是 edition 2024 的 1.85;CI 有专门一条构建道钉死。
+
 ## 许可
 
 双许可:MIT OR Apache-2.0。

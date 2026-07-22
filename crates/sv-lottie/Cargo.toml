@@ -1,0 +1,35 @@
+[package]
+name = "sv-lottie"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+authors.workspace = true
+description = "Lottie 矢量动画:velato RenderSink → 路径动词(CPU 默认后端原生支持,不需要 GPU)"
+
+[dependencies]
+# **`default-features = false` 是本 crate 存在的前提。** velato 0.11 的 default
+# feature 是 ["vello"];关掉之后依赖树里只剩 kurbo + peniko + serde{,_json,_repr},
+# 没有 vello / wgpu / naga —— 实测本次接入只新增了 4 个包
+# (velato / serde_json / itoa / zmij),kurbo 0.13.1 与 peniko 0.6.1 早就在
+# Cargo.lock 里(经 parley 进来),直接复用同一份解析结果。
+# 也就是说 lottie **不是 GPU 特性**,CPU 默认后端可以原生吃下(见 README §为什么不需要 GPU)。
+velato = { version = "0.11", default-features = false }
+# velato 的 `RenderSink` 签名里有裸的 `peniko::BlendMode` / `kurbo::Shape`,
+# 而 velato 自己**不 re-export** kurbo/peniko(lib.rs 只 re-export 了 vello),
+# 所以实现这个 trait 必须直接依赖 peniko。
+# **只声明 peniko、kurbo 走 `peniko::kurbo`**:peniko 自己 `pub use kurbo;`,
+# 这样"我们看到的 kurbo"与"peniko 看到的 kurbo"在类型上恒等,
+# 不会出现"两条版本约束各自解析、编译期报 mismatched types"的经典坑。
+peniko = "0.6"
+sv-ui = { workspace = true }
+
+[dev-dependencies]
+# 只给测试用:把 PathSink 落到真像素上,验证"确实画出东西了"。
+# 生产路径一个光栅库都不依赖 —— 光栅是 sv-shell Painter 后端的事
+tiny-skia = "0.11"

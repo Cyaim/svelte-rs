@@ -3,6 +3,13 @@ name = "sv-macro"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+authors.workspace = true
 description = "view! 过程宏:把 Svelte 风味模板编译成 sv-ui 细粒度绑定调用"
 
 [lib]
@@ -12,6 +19,9 @@ proc-macro = true
 syn = { version = "2", features = ["full", "extra-traits"] }
 quote = "1"
 proc-macro2 = "1"
+# 编译器核心(ADR-2 无悔三步 ①):绑定原语的调用词汇表由 sv-compiler::emit
+# 统一发射,宏这边只做"Rust token 语法 → IR"。签名变更从此只改一处
+sv-compiler = { workspace = true }
 
 [dev-dependencies]
 sv-reactive = { workspace = true }

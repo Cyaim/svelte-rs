@@ -1,0 +1,106 @@
+// 由 sv-compiler 生成,请勿手改。
+#[allow(dead_code)]
+pub struct ChildProps {
+    pub title: String,
+    pub step: i32,
+    pub value: ::sv_reactive::Signal<i32>,
+    pub children: sv_ui::Snippet,
+}
+impl ChildProps {
+    pub fn default_step() -> i32 {
+        1
+    }
+}
+#[allow(unused_variables, unused_mut, unused_braces, unused_parens, clippy::all)]
+pub fn child(doc: &::sv_ui::Doc, parent: ::sv_ui::ViewId, props: ChildProps) {
+    let __doc: ::sv_ui::Doc = doc.clone();
+    let __parent = parent;
+    let ChildProps { title, step, value, children } = props;
+    {
+        let children = ::std::clone::Clone::clone(&children);
+        let step = ::std::clone::Clone::clone(&step);
+        let title = ::std::clone::Clone::clone(&title);
+        let __el1 = __doc.create_view();
+        __doc.append(__parent, __el1);
+        __doc
+            .update_style(
+                __el1,
+                |s| {
+                    s.direction = ::sv_ui::Direction::Row;
+                    s.gap = 8f32;
+                },
+            );
+        {
+            let __parent = __el1;
+            {
+                let title = ::std::clone::Clone::clone(&title);
+                let __el2 = __doc.create_text("");
+                ::sv_ui::bind_text(
+                    &__doc,
+                    __el2,
+                    move || {
+                        let mut __s = ::std::string::String::new();
+                        __s.push_str(&(title).to_string());
+                        __s
+                    },
+                );
+                __doc.append(__parent, __el2);
+            }
+            {
+                let step = ::std::clone::Clone::clone(&step);
+                let __el3 = __doc.create_button("");
+                ::sv_ui::bind_text(
+                    &__doc,
+                    __el3,
+                    move || {
+                        let mut __s = ::std::string::String::new();
+                        __s.push_str("+");
+                        __s.push_str(&(step).to_string());
+                        __s
+                    },
+                );
+                __doc.append(__parent, __el3);
+                __doc
+                    .update_style(
+                        __el3,
+                        |s| {
+                            s.padding = ::sv_ui::Edges {
+                                top: 6f32,
+                                right: 6f32,
+                                bottom: 6f32,
+                                left: 6f32,
+                            };
+                            s.corner_radius = 4f32;
+                            s.bg = Some(::sv_ui::Color::rgba(112u8, 72u8, 232u8, 255u8));
+                            s.fg = Some(
+                                ::sv_ui::Color::rgba(255u8, 255u8, 255u8, 255u8),
+                            );
+                        },
+                    );
+                __doc
+                    .set_on_click(
+                        __el3,
+                        move || {
+                            let __sv_rhs = step;
+                            value.update(|__v| *__v += __sv_rhs)
+                        },
+                    );
+            }
+            {
+                let children = ::std::clone::Clone::clone(&children);
+                ::sv_ui::key_block(
+                    &__doc,
+                    __parent,
+                    { move || () },
+                    {
+                        let children = ::std::clone::Clone::clone(&children);
+                        move |__doc, __parent| {
+                            let __doc: ::sv_ui::Doc = __doc.clone();
+                            (children)(&__doc, __parent);
+                        }
+                    },
+                );
+            }
+        }
+    }
+}

@@ -27,9 +27,15 @@
 //!
 //! 构建集成:build.rs 里调用 [`build`],生成代码进 OUT_DIR,`include!` 引入。
 
+pub mod check;
 mod codegen;
+/// 绑定原语调用词汇表:**双前端共享的 codegen 内核**
+/// (`view!` 宏从这里发射同一套调用;见 emit.rs 头部说明)
+pub mod emit;
 mod script;
 mod sfc;
+/// 生成 `.rs` ↔ `.sv` 的位置映射(`sv check` 把 rustc 的诊断搬回 `.sv` 靠它)
+pub mod sourcemap;
 mod style;
 mod template;
 
@@ -119,6 +125,41 @@ pub fn compile_sv_with(
     fn_name: &str,
     registry: &PropsRegistry,
 ) -> Result<String, CompileError> {
+    compile_inner(source, fn_name, registry).map(|(code, _)| code)
+}
+
+/// 编译产物 + 位置映射
+pub struct Compiled {
+    pub code: String,
+    pub map: sourcemap::SourceMap,
+}
+
+/// 编译并同时产出 source map。
+///
+/// `sv_path` 会**原样**写进 map 的 `sv` 字段,请传绝对路径:build.rs 的 cwd 是
+/// 包根,`sv check` 的 cwd 是 workspace 根,写相对路径两边对不上。
+pub fn compile_sv_mapped(
+    source: &str,
+    fn_name: &str,
+    registry: &PropsRegistry,
+    sv_path: &str,
+) -> Result<Compiled, CompileError> {
+    sourcemap::begin(source);
+    let r = compile_inner(source, fn_name, registry);
+    let out = r.map(|(code, anchors)| {
+        let map = sourcemap::finish_map(sv_path.to_string(), source, &code, anchors);
+        Compiled { code, map }
+    });
+    // 记录器是 thread_local 且持有整段 provenance,失败路径也必须收干净
+    sourcemap::end();
+    out
+}
+
+fn compile_inner(
+    source: &str,
+    fn_name: &str,
+    registry: &PropsRegistry,
+) -> Result<(String, sourcemap::Anchors), CompileError> {
     let sfc = sfc::split(source)?;
     let script = match &sfc.script {
         Some(block) => script::transform(source, block)?,
@@ -199,18 +240,52 @@ pub fn build(src_dir: impl AsRef<Path>) {
     // 第二遍:编译
     for path in files {
         println!("cargo::rerun-if-changed={}", path.display());
-        let code = match compile_file_with(&path, &registry) {
-            Ok(c) => c,
-            Err(e) => panic!("\n\n.sv 编译失败\n  --> {e}\n"),
+        // 报错一律用绝对路径:build.rs 的 cwd 是包根,而看这条错误的
+        // (`sv check` / VS Code 的 problemMatcher)cwd 是 workspace 根
+        let abs = abs_path(&path);
+        let source = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(e) => panic!("\n\n.sv 读取失败\n  --> {abs}: {e}\n"),
         };
         let stem = path
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("component");
-        let out = Path::new(&out_dir).join(format!("{}.rs", sanitize_fn_name(stem)));
-        std::fs::write(&out, code).expect("写入生成代码失败");
+        let fn_name = sanitize_fn_name(stem);
+        let compiled = match compile_sv_mapped(&source, &fn_name, &registry, &abs) {
+            Ok(c) => c,
+            Err(e) => panic!("\n\n.sv 编译失败\n  --> {abs}:{e}\n"),
+        };
+        // 保险丝熔断 = 这个文件的诊断全都回不到 .sv。它不该只在 .svmap 里留个
+        // 字段等人去读:烧了必须有指示灯,否则用户只会看到一片"落在胶水上"
+        if let Some(why) = &compiled.map.blown {
+            println!(
+                "cargo::warning={abs}: source map 锚点并行走失配({why}),该文件的 rustc 诊断将无法回映射到 .sv,请上报"
+            );
+        }
+        let out = Path::new(&out_dir).join(format!("{fn_name}.rs"));
+        write_if_changed(&out, &compiled.code);
+        // map 与 .rs **同一次写盘**:分两次生成必然漂移,`sv check` 会靠
+        // sv_hash 拒绝用过期的 map
+        write_if_changed(&out.with_extension("rs.svmap"), &compiled.map.to_text());
     }
     println!("cargo::rerun-if-changed={}", src_dir.as_ref().display());
+}
+
+/// 内容不变就不写盘:build.rs 与编辑器/rust-analyzer 的 watcher 同时盯着
+/// OUT_DIR,无谓的 mtime 变化会引发整类"重编译抖动"的玄学问题
+fn write_if_changed(path: &Path, content: &str) {
+    if std::fs::read_to_string(path).is_ok_and(|old| old == content) {
+        return;
+    }
+    std::fs::write(path, content).expect("写入生成代码失败");
+}
+
+/// 绝对路径,并剥掉 Windows 的 `\\?\` UNC 前缀(它进不了 problemMatcher 的正则)
+fn abs_path(path: &Path) -> String {
+    let p = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let s = p.display().to_string();
+    s.strip_prefix(r"\\?\").unwrap_or(&s).to_string()
 }
 
 /// 轻量提取一份 .sv 源码的 $props 签名(build 第一遍用);
@@ -218,7 +293,7 @@ pub fn build(src_dir: impl AsRef<Path>) {
 fn props_signature(source: &str) -> Option<Vec<PropsSigField>> {
     let sfc = sfc::split(source).ok()?;
     let span = sfc.script.as_ref()?;
-    let (_, decl) = script::extract_props(span.text(source)).ok()?;
+    let (_, decl) = script::extract_props(span.text(source), None).ok()?;
     let decl = decl?;
     Some(
         decl.fields
@@ -971,6 +1046,161 @@ let count = $state(0i32);
         assert!(err.message.contains("bindable"), "{err}");
     }
 
+    /// `<textarea>`:与 `<input>` 共用全部输入属性,额外认 rows;
+    /// rows 用错地方要报错(而不是静默忽略)
+    /// `overflow` 简写写两轴,`overflow-x/-y` 各写一轴(CSS 同款)
+    #[test]
+    fn overflow_axis_keys_compile() {
+        let both = compile_sv("<script></script><view style=\"overflow: scroll\" />", "c")
+            .expect("简写应编译成功");
+        assert!(
+            both.contains("s.overflow = ") && both.contains("s.overflow_x = "),
+            "简写应同时写两轴:
+{both}"
+        );
+
+        let split = compile_sv(
+            "<script></script><view style=\"overflow-x: hidden; overflow-y: scroll\" />",
+            "c",
+        )
+        .expect("分轴应编译成功");
+        assert!(
+            split.contains("s.overflow_x = ::sv_ui::Overflow::Hidden"),
+            "
+{split}"
+        );
+        assert!(
+            split.contains("s.overflow = ::sv_ui::Overflow::Scroll"),
+            "
+{split}"
+        );
+        syn::parse_file(&split).unwrap();
+
+        let err = compile_sv("<script></script><view style=\"overflow-x: 斜着\" />", "c")
+            .expect_err("非法值应报错");
+        assert!(err.message.contains("overflow-x"), "{}", err.message);
+    }
+
+    /// `onkeyup` 与 `onkeydown` 共用 sv-ui 的单一槽位:必须合成一次设入,
+    /// 否则后设的把先设的顶掉(R1 档 B)
+    #[test]
+    fn keyup_and_keydown_share_one_slot() {
+        let code = compile_sv(
+            "<script></script><view onkeydown={|e| { let _ = e; }} onkeyup={|e| { let _ = e; }} />",
+            "c",
+        )
+        .expect("应编译成功");
+        assert_eq!(
+            code.matches("set_on_key").count(),
+            1,
+            "两个回调必须合成一次设入:
+{code}"
+        );
+        assert!(
+            code.contains("is_up"),
+            "应按相位分派:
+{code}"
+        );
+        assert!(code.contains("set_focusable"), "键盘回调应自动设可获焦");
+        syn::parse_file(&code).unwrap();
+
+        // 只写一个也照常工作
+        let only_up = compile_sv(
+            "<script></script><view onkeyup={|e| { let _ = e; }} />",
+            "c",
+        )
+        .expect("只写 onkeyup 应编译成功");
+        assert_eq!(only_up.matches("set_on_key").count(), 1);
+    }
+
+    /// `:focus` 伪类(R1 档 B):走焦点链而不是指针;与 onfocus/onblur
+    /// **合成一次**设入(sv-ui 只有一个回调槽,分开设会互相覆盖);
+    /// 元素自动设为可获焦,否则样式永远不生效
+    #[test]
+    fn focus_pseudo_class_compiles() {
+        let src = r#"<script></script>
+<view>
+  <view class="card" onfocus={|| {}} />
+</view>
+<style>
+.card { padding: 8; }
+.card:focus { background: #eef; }
+</style>
+"#;
+        let code = compile_sv(src, "c").expect("应编译成功");
+        assert!(
+            code.contains("set_focusable"),
+            ":focus 应自动设可获焦:
+{code}"
+        );
+        assert_eq!(
+            code.matches("set_on_focus_change").count(),
+            1,
+            ":focus 与 onfocus 必须合成一次设入(否则互相覆盖):
+{code}"
+        );
+        assert!(
+            code.contains("__fc"),
+            "应有 :focus 状态信号:
+{code}"
+        );
+        syn::parse_file(&code).unwrap();
+
+        // 嵌套形态 &:focus 同样认
+        let nested = compile_sv(
+            "<script></script><view class=\"b\" /><style>.b { gap: 2; &:focus { gap: 4; } }</style>",
+            "c",
+        )
+        .expect("嵌套 &:focus 应编译成功");
+        assert!(nested.contains("__fc"));
+
+        // 未知伪类仍然硬报错(错误信息要提到现在支持哪些)
+        let err = compile_sv(
+            "<script></script><view class=\"b\" /><style>.b:disabled { gap: 1; }</style>",
+            "c",
+        )
+        .expect_err(":disabled 尚未支持");
+        assert!(err.message.contains(":focus"), "{}", err.message);
+    }
+
+    #[test]
+    fn textarea_compiles() {
+        let src = r#"<script>
+let note = $state(String::new());
+</script>
+<view>
+  <textarea rows="5" placeholder="写点什么" bind:value={note}
+            oninput={|v| { let _ = v; }} />
+</view>
+"#;
+        let code = compile_sv(src, "c").expect("应编译成功");
+        assert!(
+            code.contains("create_text_input") && code.contains("set_multiline"),
+            "textarea 应建输入框并开多行:
+{code}"
+        );
+        assert!(
+            code.contains("5u16"),
+            "rows 应直通:
+{code}"
+        );
+        assert!(code.contains("set_placeholder") && code.contains("set_on_input"));
+        syn::parse_file(&code).unwrap();
+
+        // rows 只对 textarea 有意义
+        let err = compile_sv("<script></script><view><input rows=\"3\" /></view>", "c")
+            .expect_err("input 上写 rows 应报错");
+        assert!(err.message.contains("textarea"), "{}", err.message);
+
+        // rows 必须是静态数字
+        let err = compile_sv(
+            "<script></script><view><textarea rows=\"很多\" /></view>",
+            "c",
+        )
+        .expect_err("非数字 rows 应报错");
+        assert!(err.message.contains("整数"), "{}", err.message);
+    }
+
     #[test]
     fn keyed_each_compiles() {
         let src = r#"<script>
@@ -988,7 +1218,30 @@ let items = $state(vec![(1i32, String::from("甲"))]);
             "(key) 应走 keyed 版本:\n{code}"
         );
         assert!(code.contains("it.0"), "key 表达式应保留:\n{code}");
+        // ADR-7:行拿的是 Signal<T> —— 行内引用改写成 `.get()`(内容变化原地
+        // 更新),而 key 闭包拿的仍是裸 `&T`(不能是 `.get()`,那里没有 signal)
+        assert!(
+            code.contains("it.get().1"),
+            "行内绑定名应是反应式(Signal):\n{code}"
+        );
+        let key_line = code
+            .lines()
+            .find(|l| l.contains("Clone::clone(__item)"))
+            .expect("key 闭包应克隆裸值");
+        assert!(
+            !key_line.contains(".get()"),
+            "key 闭包里的绑定名不该被改写成 .get():\n{key_line}"
+        );
         syn::parse_file(&code).unwrap();
+
+        // keyed 行的绑定是 Signal,解构模式没法表达 → 明确报错而不是生成坏代码
+        let err = compile_sv(
+            "<script>\nlet xs = $state(vec![(1i32, 2i32)]);\n</script>\n\
+             <view>{#each xs as (a, b) (a)}<text>{a}</text>{/each}</view>",
+            "c",
+        )
+        .expect_err("keyed + 解构应报错");
+        assert!(err.message.contains("单个标识符"), "{}", err.message);
 
         // keyed + 索引应报错
         let err = compile_sv(

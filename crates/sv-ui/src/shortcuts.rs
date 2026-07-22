@@ -198,4 +198,116 @@ mod tests {
         assert_eq!(*log.borrow(), vec!["对话框", "底层"]);
         base.dispose();
     }
+
+    /// 注册挂的是**当前响应式作用域**,所以 effect 重跑会先注销上一轮:
+    /// 同一个 effect 反复注册不堆积,触发的永远是最新那版闭包。
+    /// 防的退化:忘了在重跑路径上注销——分支切换后按一次快捷键,
+    /// 跑的是捕获了旧状态的上一版闭包(最难查的一类"幽灵回调")
+    #[test]
+    fn effect_rerun_reregisters_without_stacking() {
+        let n0 = debug_count();
+        let dep = sv_reactive::state(0);
+        let log: Rc<RefCell<Vec<i32>>> = Default::default();
+        let l = log.clone();
+        let sc = Shortcut::new(Mods::CTRL, Key::Char('r'));
+        let (_, scope) = create_root(move || {
+            sv_reactive::effect(move || {
+                let v = dep.get();
+                let l = l.clone();
+                register_shortcut(sc, move || l.borrow_mut().push(v));
+            });
+        });
+        assert_eq!(debug_count(), n0 + 1);
+        dep.set(1);
+        assert_eq!(debug_count(), n0 + 1, "effect 重跑不该堆积注册");
+        assert!(dispatch_shortcut(sc));
+        assert_eq!(*log.borrow(), vec![1], "触发的应是最新一版闭包");
+        scope.dispose();
+        assert_eq!(debug_count(), n0);
+    }
+
+    /// 回调里再碰注册表(打开对话框顺手注册自己的快捷键、或转派另一个键)
+    /// 必须安全:dispatch 先把 `Rc` clone 出借用再调。
+    /// 防的退化:直接在 `borrow()` 里调回调 —— 上述场景当场 BorrowMutError
+    #[test]
+    fn callback_may_touch_registry_reentrantly() {
+        let n0 = debug_count();
+        let outer = Shortcut::new(Mods::CTRL, Key::Char('o'));
+        let inner = Shortcut::new(Mods::CTRL, Key::Char('i'));
+        let esc = Shortcut::new(Mods::NONE, Key::Escape);
+        let log: Rc<RefCell<Vec<&'static str>>> = Default::default();
+        let dialog: Rc<RefCell<Option<sv_reactive::RootHandle>>> = Default::default();
+        let (l, d) = (log.clone(), dialog.clone());
+        let (_, scope) = create_root(move || {
+            let li = l.clone();
+            register_shortcut(inner, move || li.borrow_mut().push("内层"));
+            register_shortcut(outer, move || {
+                l.borrow_mut().push("外层");
+                // 模拟"回调里弹对话框":新作用域里注册自己的快捷键
+                let (_, s) = create_root(|| register_shortcut(esc, || {}));
+                *d.borrow_mut() = Some(s);
+                dispatch_shortcut(inner); // 回调里再派发别的快捷键
+            });
+        });
+        assert!(dispatch_shortcut(outer));
+        assert_eq!(*log.borrow(), vec!["外层", "内层"]);
+        assert_eq!(debug_count(), n0 + 3);
+        dialog.borrow_mut().take().unwrap().dispose();
+        scope.dispose();
+        assert_eq!(debug_count(), n0);
+    }
+
+    /// 同一作用域重复注册同一个键:两条都在表里,派发只走最后一条,
+    /// 作用域销毁要把**两条一起**摘掉。防的退化:注销时只 retain 掉一条
+    /// (或按键整条删),开关反复的组件会残留幽灵注册
+    #[test]
+    fn duplicate_registration_in_same_scope_unwinds_completely() {
+        let n0 = debug_count();
+        let sc = Shortcut::new(Mods::ALT, Key::Char('d'));
+        let log: Rc<RefCell<Vec<&'static str>>> = Default::default();
+        let (l1, l2) = (log.clone(), log.clone());
+        let (_, scope) = create_root(move || {
+            register_shortcut(sc, move || l1.borrow_mut().push("先"));
+            register_shortcut(sc, move || l2.borrow_mut().push("后"));
+        });
+        assert_eq!(debug_count(), n0 + 2, "两条注册都该在表里");
+        assert!(dispatch_shortcut(sc));
+        assert_eq!(*log.borrow(), vec!["后"], "只调最后注册的一条");
+        scope.dispose();
+        assert_eq!(debug_count(), n0, "销毁要摘掉同键的全部注册");
+        assert!(!dispatch_shortcut(sc));
+    }
+
+    /// 精确匹配是**双向**的:注册无修饰的 F5,按 Ctrl+F5 不该触发;
+    /// 注册 Ctrl+W,按 Cmd+W 或裸 W 都不该触发。
+    /// 防的退化:改成"包含即匹配"的宽松比较(egui matches_logically 的坑),
+    /// 那样 Ctrl+Shift+S 会被 Ctrl+S 的注册者吃掉
+    #[test]
+    fn modifier_match_is_exact_in_both_directions() {
+        let hits = Rc::new(std::cell::Cell::new(0));
+        let (h1, h2) = (hits.clone(), hits.clone());
+        let f5 = Shortcut::new(Mods::NONE, Key::F(5));
+        let ctrl_w = Shortcut::new(Mods::CTRL, Key::Char('w'));
+        let (_, scope) = create_root(move || {
+            register_shortcut(f5, move || h1.set(h1.get() + 1));
+            register_shortcut(ctrl_w, move || h2.set(h2.get() + 1));
+        });
+        assert!(
+            !dispatch_shortcut(Shortcut::new(Mods::CTRL, Key::F(5))),
+            "多带修饰键不该匹配无修饰的注册"
+        );
+        assert!(
+            !dispatch_shortcut(Shortcut::new(Mods::META, Key::Char('w'))),
+            "Cmd 与 Ctrl 不是一回事"
+        );
+        assert!(
+            !dispatch_shortcut(Shortcut::new(Mods::NONE, Key::Char('w'))),
+            "少带修饰键同样不匹配"
+        );
+        assert_eq!(hits.get(), 0);
+        assert!(dispatch_shortcut(f5));
+        assert!(dispatch_shortcut(ctrl_w));
+        assert_eq!(hits.get(), 2);
+        scope.dispose();
+    }
 }

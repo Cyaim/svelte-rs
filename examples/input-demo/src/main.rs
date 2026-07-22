@@ -33,7 +33,7 @@ fn main() {
         println!("已渲染到 {path}");
         return;
     }
-    sv_shell::run_app("sv 输入手测台", |doc, root| input_demo(doc, root)).expect("运行失败");
+    sv_shell::run_app("sv 输入手测台", input_demo).expect("运行失败");
 }
 
 #[cfg(test)]
