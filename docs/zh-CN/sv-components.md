@@ -254,6 +254,47 @@ cargo run -p counter-sfc                    # 开窗运行
 cargo run -p counter-sfc -- --png out.png   # 离屏渲染一帧,无需窗口
 ```
 
+## `sv check`:让 rustc 的报错指回 `.sv`
+
+`.sv` 编译成 `$OUT_DIR` 里的 `.rs`,而 **rustc 没有 `#line` 指令** —— 类型错误
+天然报在生成文件上,行列也是生成文件的。rust-analyzer 其实**已经**索引了
+`OUT_DIR` 下的生成文件并把诊断报在正确位置,剩下的问题纯粹是**位置映射**。
+
+`sv check` 就是干这个的:跑 `cargo check --message-format=json`,把落在生成
+文件上的诊断重映射回 `.sv` 的行列,按 rustc 风格打印。
+
+```sh
+cargo run -p sv-compiler --bin sv-check            # 整个工作区
+cargo run -p sv-compiler --bin sv-check -- -p counter-sfc
+```
+
+```text
+examples/counter-sfc/src/Counter.sv:12:38: error[E0277]: cannot add `&str` to `i32`
+     |
+  12 |   <text font-size="20">Count: {count + "x"} · 双倍 = {double}</text>
+     |                                      ^
+   = 生成文件对应位置: .../out/counter.rs:44:44
+```
+
+列号是 **1-based 字符列**(与 rustc 一致),所以中文/全角字符前缀不会让插入符错位。
+
+`.vscode/tasks.json` 里有配好 problemMatcher 的 task,诊断会直接进 VS Code 的
+Problems 面板。
+
+**映射能力与它的边界**(不夸大,这些都是实测):
+
+- 覆盖率约 **80%**(10 个 `.sv`,281/349 个用户写的 Rust token 拿到精确映射)。
+- 映射不到时**绝不吞掉诊断**——原样输出生成文件的位置,并附一句为什么没映射上
+  (共五种理由:没有 map、map 损坏、map 过期、`.sv` 找不到、锚点表熔断)。
+  吞掉一条诊断比不映射糟得多。
+- 落在 runes 改写产物(胶水代码)上的诊断映射不回去,这是设计上的边界:
+  `count += 1` 会被改写成 `let __sv_rhs = 1; count.update(..)`,`1` 跑到了
+  `count` 前面,**顺序都变了**,硬对齐只会给出"像样但错误"的行号。
+- 包络**不是真嵌套的**:粒度是"一个解析入口的一行",所以跨语句不做插值,
+  宁可降级成"没映射上"。
+
+样式域、模板域的错误由编译器自报,本来就带 `.sv` 行列,不经过这条路。
+
 ## `view!` 宏路线
 
 过程宏前端(`crates/sv-macro`)编译目标同为 `sv-ui` 绑定原语(`bind_text` / `bind_style` / `if_block` / `each_block`),但模板是 Rust 原生语法,反应式**显式**书写——proc-macro 改写不了宏外的代码,所以没有 runes 变换:

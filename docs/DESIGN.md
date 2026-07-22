@@ -84,8 +84,24 @@ UI 线程写 signal。调度采用 Svelte 5 同款 push-pull 三态脏标记
 **编译器路线的结构性代价**(实测 + 调研 07):
 1. rustc 类型错误落在生成文件而非 .sv(rustc 无 `#line`;实验对比见 10 号报告),
    proc-macro 则 span 精确到用户源码字符。缓解三层:模板域错误编译器自报(已做到,
-   带 .sv 行列)→ 生成代码可读 + 锚点注释 → `sv check` 诊断重映射(sidecar span map
-   重写 cargo check JSON,接 r-a `check.overrideCommand`,需 spike)。
+   带 .sv 行列)→ 生成代码可读 + 锚点注释 → `sv check` 诊断重映射。
+   ——**✅ 2026-07-22 第三层落地**(调研 07 的 a0 档;方案见
+   `docs/plans/lsp-spike.md`,复核结论是"先做 `sv check` + problemMatcher,
+   **不要**先写 LSP server / VS Code 扩展"):`sv-compiler` 新增
+   `sourcemap.rs`(编译期 provenance 记录器 + **prettyplease 之后重新解析输出**
+   并与格式化前的 token 流并行走建段 —— 格式化前建的映射全是错的)与
+   `check.rs`/`bin/sv-check.rs`(跑 `cargo check --message-format=json`,
+   把落在生成文件上的诊断重映射回 `.sv` 行列,rustc 风格打印)+
+   `.vscode/tasks.json` 的 problemMatcher。
+   **golden 逐字节零改动**(记录器默认关闭;垫换行只影响 span,
+   prettyplease 从 AST 打印不看 span,有断言钉死)。
+   实测覆盖率 **281/349 = 80.5%**,招牌用例 `Counter.sv:12:38 ↔ counter.rs:44:44`
+   复现;列号口径查清是 **1-based 字符列**(不是字节)。
+   **诚实边界**:映射不到时绝不吞诊断(五种降级理由各自可达,有测试);
+   runes 改写产物(胶水)映射不回去是设计边界(`count += 1` 改写后 `1` 跑到
+   `count` 前面,顺序都变了,硬对齐只会给出"像样但错误"的行号);
+   包络**不是真嵌套**(粒度 = 一个解析入口的一行),跨语句宁可降级。
+   **未做**:LSP server、VS Code 扩展、`build()` 仍 panic(靠 scrape 兜住)。
 2. `.sv` 内 Rust 表达式无 rust-analyzer:唯一解是 Volar/otter.nvim 式转发(生成文件
    落盘为一等产物 + .map 双向映射 + LSP 转发),MVP 约 9–16 人周,第一年只做只读特性。
    **这是 .sv 前端能否转正的最大悬置条件**;双前端策略把这笔税从赌注变成选项。
@@ -214,6 +230,11 @@ N 次重绘请求,现在是一帧一轮。
 彻底失效:动画一跑就满 vsync 全量重绘,拿不到"24fps 素材在 144Hz 屏上每 6 个
 vsync 才真重绘一次"的省电。届时要么让那类通道也 bump(放弃跳帧),要么把
 短路条件改成"内容脏 或 到了该动画的下一个采样点"。**别指望它自动成立**。
+> **✅ 2026-07-22 补充**:变更分级落地后,动画帧至少不再重建布局树了
+> (淡入改 opacity = Paint、平滑滚动改偏移 = Position,都不进 taffy),
+> `animation_frames_do_not_rebuild_layout` 钉住这条。
+> 但**上面那段关于"满 vsync 全量重绘"的警告依然成立** —— 分级管的是布局,
+> 绘制端仍是整窗重画。lottie/PAG 真正的前置条件是**脏矩形**,不是布局增量。
 
 ### ADR-7(2026-07-22 落地)each 块:keyed 行持有 `Signal<Item>`,reconcile 只管 key
 > 原文记为"未实现,现状整块重建"。实际 keyed 复用早已存在,但**行只在构建时
@@ -652,3 +673,28 @@ sv-compiler / sv-macro / sv-build)**空闲**;`runa`、`sylph` 被占。
 
 第七轮(生态探索,2026-07-18):
 - [26 arco.design 视觉标准 UI 组件库(sv-arco)可行性:条件可行 B 档;token 层即刻可开工、组件四波跟 R1–R3 能力线,A0–A5 ≈17–26 人周约 30 组件;最大风险图标管线(需路线图外新增 fill_path + SVG 转译)](research/26-arco-design-ui-kit.md)
+
+第七轮(动画格式探索,2026-07-22,均为"计划 + 落地",非路线图承诺):
+
+- [Lottie 三篇:生态核实 / 架构裁决 / 仓库外可运行 spike](plans/lottie-1-ecology.md)
+  ——**✅ `crates/sv-lottie` 已落地**。核心结论经独立复验:
+  `velato 0.11` 的 `RenderSink` 是后端无关 trait,`default-features = false`
+  之后依赖树里**没有 vello / wgpu / naga**(`cargo tree | grep -ic` = 0)。
+  即 **lottie 不是 GPU 特性,CPU 默认后端可以原生支持** ——
+  这推翻了"lottie 要等 vello 成为默认后端"的隐含前提。
+  已落地:velato → Painter 路径词汇的 RenderSink 桥、时间轴/播放状态、
+  57 条测试(固件是代码内嵌的手写 lottie,不下载不入库)。
+  **未落地**:接帧循环、进场景树、a11y/reduced-motion —— 都要动 sv-shell/sv-ui。
+  **降级项**(每条都有 `RenderStats` 计数器,不静默):渐变退化为纯色、
+  任意路径裁剪忽略、混合模式与图像画刷丢弃。
+  **上游风险**:velato 在**合法** Lottie 上会 `todo!()` panic(六处,解析期),
+  用 `catch_unwind` 接住转 Error —— 创可贴,根治要给上游提 PR。
+- [PAG 两篇:生态核实 / 接入形态裁决](plans/pag-1-ecology.md)
+  ——**裁决:现在不做**。运行期绑 libpag 是**硬否**(其 C++ 闭包含 pathkit
+  「extracted from the Skia library」与 skcms,ADR-3 排除 skia-safe 的理由
+  在这里原样复现且更重;且 Windows/Linux 无预编译原生库);可行的是离线转换。
+  更要紧的是它自己论证出的结论:**真正该先交付的不是 `<animation>`,是 `<img>`**
+  ——`draw_image` 是最前置的缺口,而 `<img>` 的使用频率高一个数量级。
+  接入时场景树只加**一个** `ElementKind::Animation`(不是 `Pag`),
+  格式差异收在 `AnimSource` 枚举里;前端标签叫 `<animation>` 不叫 `<pag>`
+  (标签描述用途,不绑格式)。

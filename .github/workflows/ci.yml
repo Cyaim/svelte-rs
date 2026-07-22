@@ -54,6 +54,14 @@ jobs:
       - name: Test (CPU backend)
         run: cargo test --workspace
 
+      # `#[ignore]` 的测试**默认一条都不跑**,于是"写了但从没被执行过"是常态。
+      # 这里点名跑 sv-compiler 的 e2e:它真的 spawn 一次 `cargo check`
+      # (约 10 s),太慢不该进默认循环,但它是 `.sv` 诊断回映射唯一的
+      # 端到端证据 —— 不跑就等于没有。只在 Linux 跑一份,三平台各跑纯属烧钱
+      - name: 忽略档测试(sv check 端到端,真跑 cargo check)
+        if: runner.os == 'Linux'
+        run: cargo test -p sv-compiler --test sourcemap -- --ignored
+
   # 特性组合道——**独立成 job 是有代价换来的**:2026-07 有过一次真实回归,
   # `cpu_presenter` 改成返回 Result 时漏改了 vello 回退分支,默认特性编得过、
   # `--features backend-vello` 编不过。当时这条 vello 命令埋在 test job 的第
