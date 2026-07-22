@@ -17,6 +17,34 @@
 use sv_ui::Color;
 use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, PremultipliedColorU8, Stroke, Transform};
 
+/// 路径命令(**自有轻量类型,刻意不借 kurbo/peniko**)。
+///
+/// 为什么不直接用 kurbo 的 `BezPath`:vello 在本仓库是 **optional dependency**
+/// (`backend-vello` feature,默认关),而 Painter 是 CPU 后端也要实现的接口 ——
+/// 让接口签名依赖只在某个 feature 下存在的类型,等于把 GPU 后端焊死进 CPU 路径。
+/// ADR-3b 的"词汇对齐 vello Scene"说的是**动词形状**对齐,不是类型对齐。
+///
+/// 坐标同其它动词:物理像素(调用方已乘 scale)。
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum PathCmd {
+    MoveTo(f32, f32),
+    LineTo(f32, f32),
+    /// 二次贝塞尔:(控制点, 终点)
+    QuadTo(f32, f32, f32, f32),
+    /// 三次贝塞尔:(控制点 1, 控制点 2, 终点)。SVG/Lottie 的主力曲线
+    CubicTo(f32, f32, f32, f32, f32, f32),
+    Close,
+}
+
+/// 填充规则。SVG/Lottie 两种都用得到(`fill-rule: nonzero|evenodd`),
+/// 缺了 EvenOdd 的话"带孔的图标"会被填成实心 —— 这是最常见的图标渲染 bug
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum PathFill {
+    #[default]
+    NonZero,
+    EvenOdd,
+}
+
 /// 字形光栅键:字体身份 + 字形 id + 字号(f32 以位模式存储,保 Hash/Eq)。
 /// 三项唯一决定一张覆盖度位图(HiDPI 已把 scale 乘进 px;调研 24 P0:
 /// font_key 让 fallback 后同帧多字体的缓存不串位)
@@ -109,6 +137,13 @@ pub trait Painter {
     /// 调研 22 §2.3 裁决),vello 端精确)
     fn push_clip(&mut self, x: f32, y: f32, w: f32, h: f32, radius: f32);
     fn pop_clip(&mut self);
+
+    /// 任意路径填充(SVG 图标 / Lottie 矢量动画的地基;调研 26 点名的
+    /// "图标管线最大风险"就是缺这个动词)。
+    ///
+    /// **没有默认实现是刻意的**:给个 no-op 默认会让新后端"静默不画",
+    /// 而漏画在自绘 UI 里极难定位 —— 宁可编译期逼着实现者面对它。
+    fn fill_path(&mut self, path: &[PathCmd], fill: PathFill, color: Color);
 }
 
 // ---------------------------------------------------------------------------
@@ -148,6 +183,14 @@ pub enum PaintCmd {
         radius: i32,
     },
     PopClip,
+    /// 路径填充。金样只记**命令条数 + 规则 + 颜色 + 取整包围盒** ——
+    /// 逐点记录会让金样长到没人看得懂,而包围盒足以抓住"画错位置/画歪了"
+    Path {
+        cmds: usize,
+        fill: PathFill,
+        color: Color,
+        bbox: (i32, i32, i32, i32),
+    },
 }
 
 #[derive(Default)]
@@ -209,6 +252,51 @@ impl Painter for RecordingPainter {
     fn pop_clip(&mut self) {
         self.cmds.push(PaintCmd::PopClip);
     }
+
+    fn fill_path(&mut self, path: &[PathCmd], fill: PathFill, color: Color) {
+        self.cmds.push(PaintCmd::Path {
+            cmds: path.len(),
+            fill,
+            color,
+            bbox: path_bbox_i32(path),
+        });
+    }
+}
+
+/// 路径包围盒(取整)。控制点也计入 —— 曲线不会超出控制点凸包,
+/// 所以这是个**保守**包围盒:金样用它抓"画错位置",宁可大不可小
+fn path_bbox_i32(path: &[PathCmd]) -> (i32, i32, i32, i32) {
+    let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    let mut hit = |x: f32, y: f32| {
+        x0 = x0.min(x);
+        y0 = y0.min(y);
+        x1 = x1.max(x);
+        y1 = y1.max(y);
+    };
+    for c in path {
+        match *c {
+            PathCmd::MoveTo(x, y) | PathCmd::LineTo(x, y) => hit(x, y),
+            PathCmd::QuadTo(cx, cy, x, y) => {
+                hit(cx, cy);
+                hit(x, y);
+            }
+            PathCmd::CubicTo(c1x, c1y, c2x, c2y, x, y) => {
+                hit(c1x, c1y);
+                hit(c2x, c2y);
+                hit(x, y);
+            }
+            PathCmd::Close => {}
+        }
+    }
+    if x0 > x1 {
+        return (0, 0, 0, 0);
+    }
+    (
+        x0.floor() as i32,
+        y0.floor() as i32,
+        x1.ceil() as i32,
+        y1.ceil() as i32,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -487,5 +575,140 @@ impl Painter for TinySkiaPainter<'_> {
 
     fn pop_clip(&mut self) {
         self.clips.pop();
+    }
+
+    fn fill_path(&mut self, path: &[PathCmd], fill: PathFill, color: Color) {
+        let mut pb = PathBuilder::new();
+        for c in path {
+            match *c {
+                PathCmd::MoveTo(x, y) => pb.move_to(x, y),
+                PathCmd::LineTo(x, y) => pb.line_to(x, y),
+                PathCmd::QuadTo(cx, cy, x, y) => pb.quad_to(cx, cy, x, y),
+                PathCmd::CubicTo(c1x, c1y, c2x, c2y, x, y) => pb.cubic_to(c1x, c1y, c2x, c2y, x, y),
+                PathCmd::Close => pb.close(),
+            }
+        }
+        // finish() 对空路径/只有 MoveTo 的退化路径返回 None —— 静默跳过,
+        // 这不是错误(SVG 里空 <path d=""> 合法)
+        let Some(p) = pb.finish() else { return };
+        let mut paint = Paint::default();
+        paint.set_color(skia_color(color));
+        paint.anti_alias = true;
+        // 裁剪:矩形裁剪走 Mask 太贵(见 push_clip 的矩形交集裁决),这里
+        // 用 tiny-skia 的 clip_mask 参数传 None,靠调用方保证路径在裁剪内。
+        // **已知缺口**:滚动容器内的路径图标不会被裁掉;等真有这个场景再补
+        // (补法是把 clips 栈末项转成 Mask 传进来)
+        self.pixmap.fill_path(
+            &p,
+            &paint,
+            match fill {
+                PathFill::NonZero => FillRule::Winding,
+                PathFill::EvenOdd => FillRule::EvenOdd,
+            },
+            Transform::identity(),
+            None,
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 画一个正方形环:外圈顺时针 + 内圈**同向**。
+    /// NonZero 下绕数处处非零 → 实心;EvenOdd 下内圈区域绕数为 2 → 挖空。
+    /// 这是图标渲染最经典的一处坑:填充规则弄错,所有"带孔图标"(圆环、
+    /// 字母 O、回字形)会被填成实心块,而单看代码完全正常
+    fn ring(inner: f32) -> Vec<PathCmd> {
+        let mut p = vec![
+            PathCmd::MoveTo(10.0, 10.0),
+            PathCmd::LineTo(90.0, 10.0),
+            PathCmd::LineTo(90.0, 90.0),
+            PathCmd::LineTo(10.0, 90.0),
+            PathCmd::Close,
+        ];
+        p.extend([
+            PathCmd::MoveTo(inner, inner),
+            PathCmd::LineTo(100.0 - inner, inner),
+            PathCmd::LineTo(100.0 - inner, 100.0 - inner),
+            PathCmd::LineTo(inner, 100.0 - inner),
+            PathCmd::Close,
+        ]);
+        p
+    }
+
+    fn px(pm: &Pixmap, x: u32, y: u32) -> (u8, u8, u8, u8) {
+        let p = pm.pixel(x, y).unwrap();
+        (p.red(), p.green(), p.blue(), p.alpha())
+    }
+
+    #[test]
+    fn fill_rule_nonzero_vs_evenodd() {
+        let red = Color::rgb(255, 0, 0);
+        // NonZero:同向内圈不挖孔 → 中心被填
+        let mut pm = Pixmap::new(100, 100).unwrap();
+        TinySkiaPainter::new(&mut pm).fill_path(&ring(30.0), PathFill::NonZero, red);
+        assert_eq!(px(&pm, 50, 50).3, 255, "NonZero 下同向内圈不该挖孔");
+
+        // EvenOdd:内圈挖孔 → 中心透明,而环带仍被填
+        let mut pm = Pixmap::new(100, 100).unwrap();
+        TinySkiaPainter::new(&mut pm).fill_path(&ring(30.0), PathFill::EvenOdd, red);
+        assert_eq!(px(&pm, 50, 50).3, 0, "EvenOdd 下内圈应挖空");
+        assert_eq!(px(&pm, 20, 50).3, 255, "环带本身仍要填上");
+    }
+
+    /// 曲线命令真的进了路径:三次贝塞尔鼓出去的部分要被填到
+    #[test]
+    fn cubic_curve_is_rasterized() {
+        let mut pm = Pixmap::new(100, 100).unwrap();
+        // 从左下到右下,控制点把曲线顶到上方 —— 形成一个鼓包
+        let path = [
+            PathCmd::MoveTo(10.0, 90.0),
+            PathCmd::CubicTo(10.0, 0.0, 90.0, 0.0, 90.0, 90.0),
+            PathCmd::Close,
+        ];
+        TinySkiaPainter::new(&mut pm).fill_path(&path, PathFill::NonZero, Color::rgb(0, 0, 255));
+        assert_eq!(px(&pm, 50, 60).3, 255, "鼓包内部应被填充");
+        assert_eq!(px(&pm, 50, 5).3, 0, "鼓包上方之外不该染色");
+    }
+
+    /// 退化路径静默跳过而不是崩(SVG 里空 `<path d="">` 合法)
+    #[test]
+    fn degenerate_paths_do_not_panic() {
+        let mut pm = Pixmap::new(10, 10).unwrap();
+        let mut p = TinySkiaPainter::new(&mut pm);
+        p.fill_path(&[], PathFill::NonZero, Color::rgb(1, 2, 3));
+        p.fill_path(
+            &[PathCmd::MoveTo(1.0, 1.0)],
+            PathFill::NonZero,
+            Color::rgb(1, 2, 3),
+        );
+        p.fill_path(&[PathCmd::Close], PathFill::EvenOdd, Color::rgb(1, 2, 3));
+        assert_eq!(px(&pm, 5, 5).3, 0, "退化路径不该画出任何东西");
+    }
+
+    /// 金样后端记录路径:条数/规则/颜色/包围盒(逐点记录会让金样没法看)
+    #[test]
+    fn recording_painter_records_path_shape() {
+        let mut rec = RecordingPainter::default();
+        rec.fill_path(
+            &[
+                PathCmd::MoveTo(10.0, 20.0),
+                PathCmd::CubicTo(10.0, 0.0, 90.0, 0.0, 90.5, 20.0),
+                PathCmd::Close,
+            ],
+            PathFill::EvenOdd,
+            Color::rgb(7, 8, 9),
+        );
+        assert_eq!(
+            rec.cmds,
+            vec![PaintCmd::Path {
+                cmds: 3,
+                fill: PathFill::EvenOdd,
+                color: Color::rgb(7, 8, 9),
+                // 控制点也进包围盒(保守):y 到 0,x 到 91(ceil)
+                bbox: (10, 0, 91, 20),
+            }]
+        );
     }
 }

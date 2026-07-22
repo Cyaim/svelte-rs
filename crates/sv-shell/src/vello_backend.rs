@@ -12,7 +12,7 @@
 
 use std::sync::Arc;
 
-use vello::kurbo::{Affine, RoundedRect, Stroke};
+use vello::kurbo::{Affine, BezPath, RoundedRect, Stroke};
 use vello::peniko::{Blob, Fill, FontData};
 use vello::util::{RenderContext, RenderSurface};
 use vello::wgpu::{self, CurrentSurfaceTexture};
@@ -21,7 +21,7 @@ use winit::window::Window;
 
 use sv_ui::{Color, Doc};
 
-use crate::paint::{GlyphPos, Painter, PainterCaps};
+use crate::paint::{GlyphPos, Painter, PainterCaps, PathCmd, PathFill};
 use crate::render::{Placed, paint_tree};
 
 fn pcolor(c: Color) -> vello::peniko::Color {
@@ -161,6 +161,41 @@ impl Painter for VelloPainter {
 
     fn pop_clip(&mut self) {
         self.scene.pop_layer();
+    }
+
+    fn fill_path(&mut self, path: &[PathCmd], fill: PathFill, color: Color) {
+        // 自有 PathCmd → kurbo BezPath:类型翻译只在 GPU 后端内部发生,
+        // Painter 接口不沾 kurbo(vello 是 optional dependency,见 paint.rs
+        // 里 PathCmd 的裁决)
+        let mut p = BezPath::new();
+        for c in path {
+            match *c {
+                PathCmd::MoveTo(x, y) => p.move_to((x as f64, y as f64)),
+                PathCmd::LineTo(x, y) => p.line_to((x as f64, y as f64)),
+                PathCmd::QuadTo(cx, cy, x, y) => {
+                    p.quad_to((cx as f64, cy as f64), (x as f64, y as f64))
+                }
+                PathCmd::CubicTo(c1x, c1y, c2x, c2y, x, y) => p.curve_to(
+                    (c1x as f64, c1y as f64),
+                    (c2x as f64, c2y as f64),
+                    (x as f64, y as f64),
+                ),
+                PathCmd::Close => p.close_path(),
+            }
+        }
+        if p.is_empty() {
+            return;
+        }
+        self.scene.fill(
+            match fill {
+                PathFill::NonZero => Fill::NonZero,
+                PathFill::EvenOdd => Fill::EvenOdd,
+            },
+            Affine::IDENTITY,
+            pcolor(color),
+            None,
+            &p,
+        );
     }
 }
 

@@ -22,6 +22,8 @@ pub mod input;
 pub mod overlay;
 pub mod shortcuts;
 pub mod tasks;
+/// 模板数据面(ADR-2 ②:生成数据而非生成类型;热重载的承重墙)
+pub mod tmpl;
 
 pub use focus::{Key, KeyEvent, KeyPhase, Mods, dispatch_key};
 pub use input::{
@@ -33,6 +35,7 @@ pub use overlay::{
     Anchor, CloseBehavior, OverlayEntry, OverlayLayer, OverlayOpts, Side, overlay_block, tooltip,
 };
 pub use shortcuts::{Shortcut, register_shortcut};
+pub use tmpl::{Bind, Binder, SlotKind, SlotSig, StyleDecl, TNode, Template, stamp};
 
 /// 组件 children / 具名 snippet 的类型:接收 (doc, 挂载点) 的可复用构建闭包
 pub type Snippet = Rc<dyn Fn(&Doc, ViewId)>;
