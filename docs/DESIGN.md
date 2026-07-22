@@ -579,7 +579,16 @@ sv-compiler / sv-macro / sv-build)**空闲**;`runa`、`sylph` 被占。
 - **R5 鸿蒙(档 C,原 M3 不变)**:XComponent + wgpu(GLES)三角形 → 场景树渲染 →
   触摸事件 → 真机 IME/VSync 验证;窄窗口 trait 落地;hvigorw CI;
   另加 accesskit-ohos 桥(调研 05 估 2–4 人周)。
-- **M4 遗留独立项**(不阻塞商用分档):热重载(模板数据化后接 subsecond 路线);
+- **M4 遗留独立项**(不阻塞商用分档):热重载(模板数据化后接 subsecond 路线)
+  ——**✅ 2026-07-22 判据侧落地(ADR-2 ③ 的 S5)**:`sv_ui::tmpl` 的
+  `hot_swap_verdict` 按调研 09 §5.2 实现"新签名表是旧表的子集(可少、可重排、
+  **可多对一**)",并产出 `remap` 表;`remap_slots` 把新数据面的槽位号改写成
+  旧 binders 表的下标 —— 这一步是 Dioxus 卡住的地方,漏了就是**静默绑错闭包**
+  (界面显示错东西且不 panic)。
+  纠错记录:旧实现是 `sig == sig` 逐位全等,连"删掉一个插值"都判成要 rustc,
+  而**它那条测试断言的方向也是错的**(fixture 少了一个槽位、注释却写成
+  "新增插值")—— 错的实现配上同样错的测试,一直是绿的。
+  仍缺的是**通道**(编译端产 sig、dev 端推送、运行端重放)与 ③ 的 S1–S4;
   ~~`#[derive(Store)]`~~ ——**✅ 2026-07-22 落地**:derive 生成 `XxxStore`
   (每字段一个 `Signal`,句柄 `Copy`)+ `snapshot()` 整值读 + `apply()` 整值写
   **只写变了的字段**;要求具名字段/无泛型/字段 `Clone + PartialEq`。
