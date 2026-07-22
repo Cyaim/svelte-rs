@@ -6,9 +6,13 @@
 > `crates/sv-ui/src/lib.rs`、`crates/sv-reactive/src/lib.rs` 的通读 + 三组实测。
 >
 > 前置:ADR-2 ①(共享发射口 `sv_compiler::emit`)**已落地**;
-> ②(Template 数据化,`crates/sv-ui/src/tmpl.rs`)**主进程正在实现,本文写作时该文件尚不存在**
-> ——本文对 ② 的所有引用都是**接口要求**而非事实,见 §9;落地第一步就是拿真实的 `tmpl.rs`
-> 逐条核对本文假设。
+> ②(Template 数据化,`crates/sv-ui/src/tmpl.rs`)**已落地**(commit `7966785`,807 行)。
+> 本文初稿写于 ② 之前,§9 曾整表标"未核实";**2026-07-22 对抗性复核已按真实
+> `tmpl.rs` 逐条核对完毕**,结论见 §9 与文末「复核记录」。
+>
+> ⚠ **读之前先读文末的「## 复核记录」**:复核推翻了本文四处结论(§3.3 的两个数字、
+> §5.3 表格第二行、§6 S3 的等价性判据),并发现一处**编译不过的硬冲突**(§0.11)。
+> 正文里已用【复核修正】标出。
 
 ---
 
@@ -44,6 +48,19 @@
    彻底换了,回退等于回滚 S3+S2。
 10. **③ 只做 `.sv` 前端,`view!` 宏不跟。**宏路径改模板本来就要 rustc,拿不到热重载红利,
     却要照付装箱税与可读性税。emit 词汇表继续共享(ADR-2 ① 的成果不动)。
+    【复核修正】最后半句是自欺:S3 之后 `.sv` 侧不再发射 `create`/`append`/`update_style`/
+    `rebuild_closure`,emit.rs 的建树词汇表**只剩 `view!` 一个消费者**,ADR-2 ① 的
+    "唯一发射口"名存实亡。这不是反对 ③ 的理由,但必须记在代价栏里(§7.5)。
+11. 【复核新增,硬约束】**`stamp` 不能收 `&[Binder]`,必须收 `Rc<[Binder]>`(或等价的
+    owned 句柄)。**只要 `TNode::If`/`Sub` 的分支体由 stamp 自己解释(裁决 5、附录 A
+    第 2/3 行),分支构建闭包就要满足 `sv_ui::if_block` / `each_block*` 的
+    `impl Fn(&Doc, ViewId) + 'static` 约束(sv-ui lib.rs:1240/1268/1313),
+    而借用的 binders 切片进不了 `'static` 闭包 —— **本次复核用最小复现实测到
+    rustc `E0521: borrowed data escapes outside of function`**。
+    连带:§9 要求 4 的签名要改,每个 if/each 块多一次 `Rc::clone`(两个计数器字,
+    不额外分配),`binders![]` 要产 `Rc<[Binder]>`。②(tmpl.rs:359)今天的
+    `binders: &[Binder]` 之所以够用,正是因为它把整块交给了一个自带 `Rc` 的
+    `Wire` 闭包 —— 附录 A 要推翻的恰恰是这条,推翻就得付这笔账。
 
 ---
 
@@ -64,8 +81,23 @@
   `parse_style()` style.rs:377)。**数据化必须先改这里**,否则静态样式进不了数据面。
 - `emit_element` 的属性面很宽:两个属性循环合计 **约 20 个具名分支**(`onclick`/`bind:value`/
   `bind:checked`/`bind:scrolly`/`@attach`/`aria-label`/`rows`/`placeholder`/… codegen.rs:869–1239)
-  **+ 6 个前缀族**(`class:`/`style:`/`transition:`/`in:`/`out:`/`on:`)。这个数字决定了
-  "数据面 vs Wire binder"的边界要画在哪(§8 的自我质疑指标 2)。
+  **+ 7 个前缀族**(`class:`/`style:`/`bind:`/`transition:`/`in:`/`out:`/`on:`;【复核修正】
+  初稿写 6 个,漏了 `bind:` 的通配分支 codegen.rs:1153;`out:` 目前是"已推迟"的报错分支
+  codegen.rs:1193)。这个数字决定了"数据面 vs Wire binder"的边界要画在哪
+  (§8 的自我质疑指标 2)。
+- `emit_element` **本体 788 行**(codegen.rs:489–1276),占 codegen.rs 的 43%;
+  `emit_component` 195 行(1277–1471)、`emit_overlay` 约 130 行(1472–)。
+  **S3 要重排的就是这 1100 行**,这是估算 §6 的分母。
+- 【复核新增,S3 最大的未解结构问题】**一个元素上的静态样式与全部动态样式合成在
+  同一个 `bind_style` 闭包里**(codegen.rs:823–838):闭包体依次是
+  `静态 setters → class: 条件类 arms → :focus/:hover/:active 块 → style: 指令`,
+  **后写覆盖先写**;而 `sv_ui::bind_style`(lib.rs:1226)每次重跑都
+  `Style::default()` 全量重设 —— 伪类退出时那些声明是靠"重设"消失的,不是靠回滚。
+  于是"静态样式进数据面、动态样式留 binder"**不是对现有语义的分解**:一旦元素有
+  任意一条动态样式,静态部分就不能单独搬进 `TNode::Elem.style`,否则 stamp 先
+  `update_style` 写的静态值会被随后的 `bind_style` 第一次运行整个抹掉。
+  同一个块里还声明了元素局部的 `__hv`/`__ac`/`__fc` 三个 `state`,被样式闭包与
+  指针/焦点接线闭包**共同捕获**。见 §7.6。
 - 运行时侧:`Signal`/`Derived` 是 `Copy`(sv-reactive lib.rs:811/910);
   effect 存 `Rc<RefCell<dyn FnMut()>>`(lib.rs:69);Doc 的回调槽全是 `Rc<dyn Fn…>`
   (sv-ui lib.rs:341–351);`create_root` 挂在**当前 owner** 之下(lib.rs:751),
