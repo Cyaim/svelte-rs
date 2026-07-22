@@ -8,16 +8,19 @@
 //!   (FontHandle/GlyphKey.font_key)承载;字体注册表按 Blob id 建键,
 //!   每个唯一字体**有意泄漏一次** Blob 句柄(Arc 壳,零拷贝)换取
 //!   `FontRef<'static>` 的稳定 CacheKey(swash ScaleContext 缓存命中前提)。
-//! - TextInput 仍走旧 swash 线性路径(key=0):编辑几何(caret_x)与显示必须
-//!   同源,P3 由 PlainEditor 整体外包后一并切换。
+//! - **P3(2026-07-22)**:TextInput 的光标/选区/命中几何也搬到本门面
+//!   ([`caret_x`] / [`caret_index_at`] / [`selection_rects`]),旧 swash 线性
+//!   路径(逐 char advance 求和)与 `font.rs` 一并退役——全仓再无第二套排版。
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use parley::{AlignmentOptions, FontContext, LayoutContext, PositionedLayoutItem, StyleProperty};
+use parley::{
+    Affinity, AlignmentOptions, Cursor, FontContext, LayoutContext, PositionedLayoutItem,
+    Selection, StyleProperty,
+};
 use swash::FontRef;
 
-use crate::font::FontHandle;
 use crate::paint::{GlyphKey, GlyphPos};
 
 struct Engine {
@@ -31,6 +34,27 @@ struct RegisteredFont {
     index: u32,
 }
 
+/// 字体身份句柄(调研 24 P0"载体扩宽"):glyph run 带字体身份,
+/// 光栅缓存/GPU FontData 都按 `key` 索引。键由 [`register`] 按 fontique
+/// Blob id 生成,同帧多字体 fallback 混排即多个 key
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct FontHandle {
+    pub key: u64,
+}
+
+impl FontHandle {
+    /// 按 key 解析 swash FontRef(CPU 光栅/度量用)
+    pub fn font_ref(&self) -> FontRef<'static> {
+        font_ref_of(self.key).expect("sv-shell: 未注册的字体键")
+    }
+
+    /// 原始字节 + collection index(GPU 端构造 peniko::FontData 用)
+    #[cfg_attr(not(feature = "backend-vello"), allow(dead_code))]
+    pub fn data(&self) -> (&'static [u8], u32) {
+        font_bytes_of(self.key).expect("sv-shell: 未注册的字体键")
+    }
+}
+
 thread_local! {
     static ENGINE: RefCell<Engine> = RefCell::new(Engine {
         fcx: FontContext::new(),
@@ -41,9 +65,9 @@ thread_local! {
 
 /// 注册(或取回)一个 parley 字体的身份句柄
 fn register(font: &parley::FontData) -> FontHandle {
-    // Blob id 进程内唯一但**从 0 起**——必须避开内置字体的保留键 0
-    // (撞键 = Segoe 的字形 id 被雅黑光栅,Latin 全员错字;实测踩过):
-    // 最高位恒置 1,id 左移 16 容纳 TTC index,三段无碰撞
+    // Blob id 进程内唯一但**从 0 起**:最高位恒置 1(P1 期为避开内置字体的
+    // 保留键 0——撞键 = Segoe 的字形 id 被雅黑光栅,Latin 全员错字,实测踩过;
+    // P3 内置字体退役后保留此编码,键值形态不变),id 左移 16 容纳 TTC index
     let key = (1u64 << 63) | (font.data.id() << 16) | (font.index as u64 & 0xFFFF);
     FONTS.with(|f| {
         f.borrow_mut().entry(key).or_insert_with(|| {
@@ -63,13 +87,13 @@ fn register(font: &parley::FontData) -> FontHandle {
     FontHandle { key }
 }
 
-/// 按身份键取 swash FontRef(CPU 光栅;key=0 的内置字体走 font.rs)
-pub(crate) fn font_ref_of(key: u64) -> Option<FontRef<'static>> {
+/// 按身份键取 swash FontRef(CPU 光栅)
+fn font_ref_of(key: u64) -> Option<FontRef<'static>> {
     FONTS.with(|f| f.borrow().get(&key).map(|r| r.fref))
 }
 
 /// 按身份键取原始字节 + index(GPU 端建 FontData)
-pub(crate) fn font_bytes_of(key: u64) -> Option<(&'static [u8], u32)> {
+fn font_bytes_of(key: u64) -> Option<(&'static [u8], u32)> {
     FONTS.with(|f| f.borrow().get(&key).map(|r| (r.bytes, r.index)))
 }
 
@@ -122,8 +146,10 @@ fn with_layout<R>(
 /// (与 glyph_cache 同款分代策略)
 pub fn measure(text: &str, px: f32, wrap_w: Option<f32>) -> (f32, f32) {
     if text.is_empty() {
-        let m = crate::font::ui_font().metrics(&[]).scale(px);
-        return (0.0, m.ascent + m.descent + m.leading);
+        // 空串保持一行高:借代表字形的行度量。P3 前这里取内置 swash 字体的
+        // metrics,与 parley 实际选中的族可能不是同一个字体(空/非空节点行高
+        // 会差几个 px);现在同源了
+        return (0.0, line_height(px));
     }
     thread_local! {
         static HOT: RefCell<HashMap<(u64, u32, u32), (f32, f32)>> = RefCell::new(HashMap::new());
@@ -159,6 +185,75 @@ pub fn measure(text: &str, px: f32, wrap_w: Option<f32>) -> (f32, f32) {
         hot.insert(key, result);
     });
     result
+}
+
+/// 单行行高(逻辑 px):空文本节点与 TextInput 的固有高。
+/// 取代表字形 `x` 的行度量——与非空文本同一字体系统,不再各断各的
+pub fn line_height(px: f32) -> f32 {
+    measure("x", px, None).1
+}
+
+// ---------------------------------------------------------------------------
+// 光标 / 选区几何(调研 24 P3)
+//
+// **裁决(修订调研 24 §3.3 的 PlainEditor 编辑器池方案)**:parley 只出几何,
+// 不接管编辑内核。sv-ui 的 `InputState`(字节光标/锚点/预编辑)仍是唯一编辑
+// 真源,于是既不需要 `HashMap<ViewId, PlainEditor>` 第二真源,也不需要
+// `Generation` 回声抑制;`bind:value`/IME/剪贴板全链路一行不改。换来的是
+// parley `Cursor`/`Selection` 的全部好处:kerning/连字后的真实光标位置、
+// fallback 混排下的命中、BiDi 选区多矩形——旧线性 advance 求和全部作废。
+//
+// 全部取 `wrap_w=None` + 左对齐的单行 Layout,与绘制层 [`shape`] 同参构建
+// ——"画的"与"点的"必须出自同一次排版。
+// ---------------------------------------------------------------------------
+
+fn with_line_layout<R>(text: &str, px: f32, f: impl FnOnce(&parley::Layout<[u8; 4]>) -> R) -> R {
+    with_layout(text, px, None, sv_ui::TextAlign::Left, f)
+}
+
+/// 光标 x(逻辑 px,相对文本起点);`byte` 非 char 边界时向下取所在簇起点
+pub fn caret_x(text: &str, px: f32, byte: usize) -> f32 {
+    if text.is_empty() {
+        return 0.0;
+    }
+    with_line_layout(text, px, |l| {
+        Cursor::from_byte_index(l, byte.min(text.len()), Affinity::Downstream)
+            .geometry(l, 0.0)
+            .x0 as f32
+    })
+}
+
+/// 点击 x(逻辑 px,相对文本起点)→ 最近簇边界的字节偏移(与 [`caret_x`] 互逆)
+pub fn caret_index_at(text: &str, px: f32, x: f32) -> usize {
+    if text.is_empty() {
+        return 0;
+    }
+    with_line_layout(text, px, |l| Cursor::from_point(l, x, 0.0).index())
+}
+
+/// 选区矩形(逻辑 px,相对文本起点):`(x, y, w, h)` 序列。
+/// 单行下通常一个矩形,BiDi 混排会分段——所以返回的是序列而不是一对 x
+pub fn selection_rects(text: &str, px: f32, lo: usize, hi: usize) -> Vec<(f32, f32, f32, f32)> {
+    if text.is_empty() || lo >= hi {
+        return Vec::new();
+    }
+    with_line_layout(text, px, |l| {
+        let sel = Selection::new(
+            Cursor::from_byte_index(l, lo.min(text.len()), Affinity::Downstream),
+            Cursor::from_byte_index(l, hi.min(text.len()), Affinity::Downstream),
+        );
+        sel.geometry(l)
+            .into_iter()
+            .map(|(r, _line)| {
+                (
+                    r.x0 as f32,
+                    r.y0 as f32,
+                    (r.x1 - r.x0) as f32,
+                    (r.y1 - r.y0) as f32,
+                )
+            })
+            .collect()
+    })
 }
 
 /// 行字节区间(测试探针:断行行为的最小观察面)

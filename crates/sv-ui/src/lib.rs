@@ -25,8 +25,9 @@ pub mod tasks;
 
 pub use focus::{Key, KeyEvent, Mods, dispatch_key};
 pub use input::{
-    Caret, Clipboard, EditOp, ImeEvent, InputState, apply_edit, clipboard_get, clipboard_set,
-    handle_ime, set_clipboard,
+    Caret, Clipboard, EditOp, ImeEvent, InputState, UndoEntry, apply_edit, clipboard_get,
+    clipboard_set, handle_ime, next_word_boundary, prev_word_boundary, set_clipboard,
+    word_range_at,
 };
 pub use overlay::{
     Anchor, CloseBehavior, OverlayEntry, OverlayLayer, OverlayOpts, Side, overlay_block, tooltip,
@@ -972,6 +973,9 @@ impl Doc {
                 input.preedit = None;
                 input.cursor = snap_boundary(&n.text, input.cursor);
                 input.anchor = snap_boundary(&n.text, input.anchor);
+                // 程序化赋值不进撤销栈(浏览器 input 同款):否则 Ctrl+Z
+                // 会把外部写入回滚成用户从没打过的中间态
+                input.clear_history();
             }
         }
         self.bump();
@@ -991,25 +995,21 @@ impl Doc {
 
     /// 定光标(渲染壳点击命中后换算字节偏移调用;extend = 拖选)
     pub fn set_caret(&self, id: ViewId, byte: usize, extend: bool) {
-        let changed = {
-            let mut inner = self.0.borrow_mut();
-            let Some(n) = inner.nodes.get_mut(id) else {
-                return;
-            };
-            let text_len_snap = snap_boundary(&n.text, byte.min(n.text.len()));
-            let Some(input) = n.input.as_deref_mut() else {
-                return;
-            };
-            let before = (input.cursor, input.anchor);
-            input.cursor = text_len_snap;
-            if !extend {
-                input.anchor = input.cursor;
-            }
-            (input.cursor, input.anchor) != before
+        input::apply_edit(self, id, input::EditOp::MoveTo(byte, extend));
+    }
+
+    /// 选中字节区间(渲染壳三击全选走这里)
+    pub fn select_range(&self, id: ViewId, lo: usize, hi: usize) {
+        input::apply_edit(self, id, input::EditOp::SelectRange(lo, hi));
+    }
+
+    /// 选中 `byte` 处的词(渲染壳双击选词;词规则见 [`input::word_range_at`])
+    pub fn select_word_at(&self, id: ViewId, byte: usize) {
+        let Some(text) = self.input_value(id) else {
+            return;
         };
-        if changed {
-            self.bump();
-        }
+        let (lo, hi) = input::word_range_at(&text, byte);
+        self.select_range(id, lo, hi);
     }
 
     pub fn set_on_input(&self, id: ViewId, f: impl Fn(&str) + 'static) {

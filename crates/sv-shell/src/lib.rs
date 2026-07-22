@@ -10,7 +10,6 @@
 //! - [`render_to_png`]:离屏渲染一帧存 PNG(CI / 可视化验证用,不需要窗口)。
 
 mod a11y;
-mod font;
 mod paint;
 mod render;
 mod text;
@@ -18,15 +17,15 @@ mod text;
 mod vello_backend;
 
 pub use a11y::{build_tree_update, dispatch_action};
-pub use font::{FontHandle, ui_font_handle};
 pub use paint::{
     GlyphKey, GlyphPos, PaintCmd, Painter, PainterCaps, RecordingPainter, TinySkiaPainter,
 };
 pub use render::{
-    Layout, OverlayRegion, Placed, Rect, ScrollArea, caret_index_at, caret_x, hit_click_target,
-    ime_caret_rect, input_caret_at, layout_full_cached, layout_tree, layout_tree_full,
-    overlay_click_gate, paint_scrollbars, paint_tree, render_frame, route_wheel, scrollbar_thumb,
+    Layout, OverlayRegion, Placed, Rect, ScrollArea, hit_click_target, ime_caret_rect,
+    input_caret_at, layout_full_cached, layout_tree, layout_tree_full, overlay_click_gate,
+    paint_scrollbars, paint_tree, render_frame, route_wheel, scrollbar_thumb,
 };
+pub use text::{FontHandle, caret_index_at, caret_x, selection_rects};
 #[cfg(feature = "backend-vello")]
 pub use vello_backend::{VelloPainter, VelloWin, render_frame_vello};
 
@@ -130,6 +129,11 @@ struct App {
     cursor: (f64, f64),
     hovered: Option<ViewId>,
     pressed: Option<ViewId>,
+    /// 文本拖选中的输入框(按下时记,松开清;Placed 是 Copy 快照)
+    drag_input: Option<(ViewId, Placed)>,
+    /// 连击串:(上次按下时刻, 物理坐标, 第几击)——双击选词/三击全选。
+    /// winit 不给点击计数,阈值自持:500ms + 4 物理 px(平台惯例中值)
+    last_click: Option<(std::time::Instant, (f64, f64), u32)>,
     /// 当前修饰键状态(winit 单独派发 ModifiersChanged,应用自存)
     mods: ModifiersState,
     /// IME 会话开关镜像(焦点落在 accepts_text 节点时开;避免重复系统调用)
@@ -238,6 +242,29 @@ impl App {
         let placed = &self.layout.placed;
         ws.access
             .update_if_active(|| a11y::build_tree_update(&doc, placed, scale));
+    }
+
+    /// 本次按下是第几击(1/2/3 循环)。窗口 500ms、位移 4 物理 px 内算连击
+    fn click_streak(&mut self) -> u32 {
+        const WINDOW_MS: u128 = 500;
+        const SLOP: f64 = 4.0;
+        let now = std::time::Instant::now();
+        let n = match self.last_click {
+            Some((t, (cx, cy), n))
+                if now.duration_since(t).as_millis() < WINDOW_MS
+                    && (cx - self.cursor.0).abs() <= SLOP
+                    && (cy - self.cursor.1).abs() <= SLOP =>
+            {
+                if n >= 3 {
+                    1
+                } else {
+                    n + 1
+                }
+            }
+            _ => 1,
+        };
+        self.last_click = Some((now, self.cursor, n));
+        n
     }
 
     /// 悬停派发:命中最上层带 enter/leave 回调的节点,变化时先 leave 后 enter
@@ -529,6 +556,15 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = (position.x, position.y);
+                // 拖选:按住左键在输入框上移动 = 扩选(anchor 停在按下处)。
+                // 指针未捕获,拖出控件外仍跟随——与桌面文本框一致
+                if let Some((id, p)) = self.drag_input
+                    && let Some(ws) = &self.win
+                {
+                    let lx = (position.x / ws.window.scale_factor()) as f32;
+                    let byte = input_caret_at(&self.doc, &p, lx);
+                    self.doc.set_caret(id, byte, true);
+                }
                 self.update_hover();
             }
             WindowEvent::MouseWheel { delta, .. } => {
@@ -656,7 +692,7 @@ impl ApplicationHandler<UserEvent> for App {
                     .map(|(_, p)| *p)
                 {
                     self.doc.focus(p.id);
-                    // 输入框:点击处换算字节偏移定光标
+                    // 输入框:点击处换算字节偏移定光标;连击升级为选词/全选
                     if self.doc.read(|inner| {
                         inner
                             .nodes
@@ -664,7 +700,18 @@ impl ApplicationHandler<UserEvent> for App {
                             .is_some_and(|n| n.kind == sv_ui::ElementKind::TextInput)
                     }) {
                         let byte = input_caret_at(&self.doc, &p, lx);
-                        self.doc.set_caret(p.id, byte, false);
+                        match self.click_streak() {
+                            1 => {
+                                self.doc.set_caret(p.id, byte, false);
+                                // 按下即进入拖选(移动时扩选,松开结束)
+                                self.drag_input = Some((p.id, p));
+                            }
+                            2 => self.doc.select_word_at(p.id, byte),
+                            _ => {
+                                let len = self.doc.input_value(p.id).map(|v| v.len()).unwrap_or(0);
+                                self.doc.select_range(p.id, 0, len);
+                            }
+                        }
                     }
                 }
                 self.sync_ime();
@@ -675,6 +722,7 @@ impl ApplicationHandler<UserEvent> for App {
                 button: MouseButton::Left,
                 ..
             } => {
+                self.drag_input = None;
                 if let Some(id) = self.pressed.take()
                     && let Some(h) = self.doc.pointer_up_handler(id)
                 {
@@ -706,6 +754,8 @@ pub fn run_app(
         cursor: (0.0, 0.0),
         hovered: None,
         pressed: None,
+        drag_input: None,
+        last_click: None,
         mods: ModifiersState::empty(),
         ime_allowed: false,
         epoch: std::time::Instant::now(),
@@ -1064,27 +1114,102 @@ mod tests {
     }
 
     /// 光标几何互逆:任意 char 边界 caret_x → caret_index_at 回到原位;
-    /// caret_x 单调不减
+    /// caret_x 单调不减。P3 起两者都出自 Parley 的同一次单行排版
     #[test]
     fn caret_geometry_roundtrip() {
-        use crate::render::{caret_index_at, caret_x};
-        let font = crate::font::ui_font();
         let text = "a你b好c!";
         let px = 16.0;
         let mut last = -1.0f32;
         for (i, _) in text.char_indices().chain([(text.len(), ' ')]) {
-            let x = caret_x(&font, text, px, i);
+            let x = caret_x(text, px, i);
             assert!(x >= last, "caret_x 应单调:{i}");
             last = x;
             assert_eq!(
-                caret_index_at(&font, text, px, x + 0.1),
+                caret_index_at(text, px, x + 0.1),
                 i,
                 "caret_x({i}) 处点击应回到 {i}"
             );
         }
         // 远超行尾 → 末尾;负数 → 0
-        assert_eq!(caret_index_at(&font, text, px, 10_000.0), text.len());
-        assert_eq!(caret_index_at(&font, text, px, -5.0), 0);
+        assert_eq!(caret_index_at(text, px, 10_000.0), text.len());
+        assert_eq!(caret_index_at(text, px, -5.0), 0);
+        // 空串退化:光标恒 0
+        assert_eq!(caret_x("", px, 0), 0.0);
+        assert_eq!(caret_index_at("", px, 12.0), 0);
+    }
+
+    /// 光标 x 现在带 shaping:CJK/Latin 混排下不再是"逐字 advance 求和",
+    /// 且与实际绘制的 glyph run 起点对齐(画/点同源的最小可观测证据)
+    #[test]
+    fn caret_x_follows_shaped_runs() {
+        let text = "AV你好";
+        let px = 32.0;
+        // 末尾光标 == 整串排版宽(fallback 换字体后仍成立)
+        let (w, _) = crate::text::measure(text, px, None);
+        assert!(
+            (caret_x(text, px, text.len()) - w).abs() < 0.5,
+            "末尾光标应落在排版宽处:{} vs {w}",
+            caret_x(text, px, text.len())
+        );
+        // 每个 CJK 字起点应与该处 shaping 出的字形 x 对齐(±0.5px)
+        let runs = crate::text::shape(text, px, None, sv_ui::TextAlign::Left, 0.0, 0.0, 1.0);
+        let xs: Vec<f32> = runs
+            .iter()
+            .flat_map(|r| r.glyphs.iter().map(|g| g.x))
+            .collect();
+        let cx = caret_x(text, px, 2); // "你" 起点
+        assert!(
+            xs.iter().any(|x| (x - cx).abs() < 0.5),
+            "光标 x={cx} 应命中某个字形起点:{xs:?}"
+        );
+    }
+
+    /// 选区矩形:覆盖选中区间、区间为空时无矩形
+    #[test]
+    fn selection_rects_cover_range() {
+        let text = "hello 世界";
+        let px = 16.0;
+        assert!(selection_rects(text, px, 3, 3).is_empty(), "空选区无矩形");
+        let rects = selection_rects(text, px, 0, text.len());
+        assert!(!rects.is_empty());
+        let (x0, w) = (rects[0].0, rects.iter().map(|r| r.2).sum::<f32>());
+        let (tw, _) = crate::text::measure(text, px, None);
+        assert!(
+            x0 <= 0.5 && (w - tw).abs() < 1.0,
+            "全选矩形应覆盖整串:{rects:?}"
+        );
+    }
+
+    /// 溢出输入框的点击命中:文本被光标跟随推左后,点右端应落在串尾附近
+    /// (P3 前 `input_caret_at` 忽略滚移,长文本点哪都偏到左边)
+    #[test]
+    fn click_hits_scrolled_text() {
+        use sv_ui::{Caret, EditOp, apply_edit};
+        let doc = Doc::new();
+        let (_, _scope) = create_root(|| {
+            let input = doc.create_text_input();
+            doc.append(doc.root(), input);
+            doc.update_style(input, |s| s.width = Some(120.0));
+        });
+        let input = doc.read(|inner| inner.nodes[inner.root].children[0]);
+        let text = "abcdefghijklmnopqrstuvwxyz0123456789";
+        apply_edit(&doc, input, EditOp::InsertStr(text.into()));
+        apply_edit(&doc, input, EditOp::Move(Caret::End, false));
+        let placed = layout_tree(&doc, 480.0, 100.0);
+        let p = *placed.iter().find(|p| p.id == input).unwrap();
+
+        // 光标在末尾 → 已滚到最右;点内容区右缘应命中串尾附近
+        let right = p.rect.x + p.rect.w - 4.0;
+        let hit = input_caret_at(&doc, &p, right);
+        assert!(
+            hit >= text.len() - 2,
+            "右缘点击应命中串尾附近,得到 {hit}/{}",
+            text.len()
+        );
+        // 回到串首(滚移归零)后,同一 x 命中的是可见窗口内的字符,不再是串尾
+        apply_edit(&doc, input, EditOp::Move(Caret::Home, false));
+        let hit0 = input_caret_at(&doc, &p, right);
+        assert!(hit0 < hit, "滚移归零后同一坐标应命中更靠前的字符:{hit0}");
     }
 
     /// IME 光标区域上报:随键入右移、随 HiDPI 缩放、无焦点输入框时为 None
@@ -1505,8 +1630,7 @@ mod tests {
         });
         let placed = layout_tree(&doc, 480.0, 400.0);
         let text_p = placed.last().unwrap();
-        let font = crate::font::ui_font();
-        let (_, single_h) = crate::render::measure_text(&font, "字", 16.0);
+        let (_, single_h) = crate::text::measure("字", 16.0, None);
         assert!(
             text_p.rect.h > single_h * 2.5,
             "长文本在 120px 容器内应折成多行(高 {} vs 单行 {single_h})",

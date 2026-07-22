@@ -115,7 +115,7 @@ impl Painter for VelloPainter {
         );
     }
 
-    fn glyph_run(&mut self, font: crate::font::FontHandle, glyphs: &[GlyphPos], color: Color) {
+    fn glyph_run(&mut self, font: crate::text::FontHandle, glyphs: &[GlyphPos], color: Color) {
         let Some(first) = glyphs.first() else { return };
         // 一段 run 内字号一致(paint_tree 按节点发射);px 语义 = font size。
         // FontData 按字体身份缓存建一次:与 CPU 端 swash 共用同一份 'static

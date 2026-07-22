@@ -7,6 +7,8 @@ let history = $state(Vec::<String>::new());
 <view style="padding:24; gap:12">
   <text font-size="26">文本输入 / IME / 剪贴板 手测台</text>
   <text font-size="13" fg="#666677">中文输入法:候选窗应贴光标;Ctrl+A/C/X/V;Enter 提交;Tab 换焦点</text>
+  <text font-size="13" fg="#666677">编辑:Ctrl+←/→ 词跳;Ctrl+Backspace 删词;Ctrl+Z / Ctrl+Y 撤销重做</text>
+  <text font-size="13" fg="#666677">指针:拖拽选择;双击选词;三击全选</text>
 
   <input placeholder="在这里输入(支持中文 IME)" bind:value={name}
          onsubmit={|v| {

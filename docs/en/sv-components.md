@@ -71,7 +71,7 @@ Everything below is verified by a compiler test in `crates/sv-compiler/src/lib.r
 <text onpointerenter={|| hovers += 1}>hover area</text>
 ```
 
-Mixed static/interpolated text compiles to a single `bind_text` binding; fully static text gets zero bindings. Attribute values are `name="static string"` or `name={rust_expr}`. The event set today: `onclick`/`on:click`, `onpointerenter`, `onpointerleave`, plus keyboard/focus (R1): `onkeydown={|e| ...}` (automatically makes the element focusable; `e.stop_propagation()` cuts bubbling, `e.prevent_default()` cancels the Tab/Enter default layer), `onfocus`/`onblur`, and the boolean attribute `autofocus`. Buttons are Tab-focusable and Enter/Space-activatable with no annotation. Text entry uses `<input>` (a self-closing leaf): `placeholder="..."`, two-way `bind:value={x}`, `oninput={|v| ...}`/`onsubmit={|v| ...}` (signature `Fn(&str)`); caret/selection/IME preedit/Ctrl+C/X/V work out of the box. Unsupported events are a compile error, not a silent no-op. Inline `style="k:v; ..."` and shorthand style attributes (`fg=`, `font-size=`, …) are the styling mini-language — see [./styling.md](./styling.md).
+Mixed static/interpolated text compiles to a single `bind_text` binding; fully static text gets zero bindings. Attribute values are `name="static string"` or `name={rust_expr}`. The event set today: `onclick`/`on:click`, `onpointerenter`, `onpointerleave`, plus keyboard/focus (R1): `onkeydown={|e| ...}` (automatically makes the element focusable; `e.stop_propagation()` cuts bubbling, `e.prevent_default()` cancels the Tab/Enter default layer), `onfocus`/`onblur`, and the boolean attribute `autofocus`. Buttons are Tab-focusable and Enter/Space-activatable with no annotation. Text entry uses `<input>` (a self-closing leaf): `placeholder="..."`, two-way `bind:value={x}`, `oninput={|v| ...}`/`onsubmit={|v| ...}` (signature `Fn(&str)`); caret/selection/IME preedit/Ctrl+C/X/V work out of the box, as do drag-select, double-click-to-select-word, triple-click-to-select-all, word motion (Ctrl/⌥+←/→, Ctrl+Backspace/Delete) and undo/redo (Ctrl+Z / Ctrl+Y). Caret and hit-testing geometry come from the same Parley layout that draws the text, so they stay exact under kerning and CJK/Latin font fallback. Unsupported events are a compile error, not a silent no-op. Inline `style="k:v; ..."` and shorthand style attributes (`fg=`, `font-size=`, …) are the styling mini-language — see [./styling.md](./styling.md).
 
 ### `{#if}` / `{#each}` / `{#key}`
 
@@ -151,7 +151,7 @@ Snippets compile to local closures; parameters are typed Rust patterns. Argument
 <Stepper bind:value={count} />       <!-- component binding: raw Signal handle, see $bindable -->
 ```
 
-Element-level `bind:` supports **only `bind:checked` on `<checkbox>`** today. `bind:value` and the other Svelte targets need text-input controls and layout measurement that don't exist yet — using them is a compile error pointing at the support matrix.
+Element-level `bind:` supports `bind:checked` on `<checkbox>`, `bind:value` on `<input>`, and `bind:scrolly` on a scroll container. The remaining Svelte targets (`bind:this`, dimension bindings, media bindings) are a compile error pointing at the support matrix.
 
 ### Transitions
 
