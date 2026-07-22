@@ -12,7 +12,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use sv_reactive::{RootHandle, create_root, derived, effect, on_cleanup, untrack};
+use sv_reactive::{RootHandle, create_root, derived, effect, on_cleanup, untrack, with_owner};
 
 use crate::{Doc, ViewId};
 
@@ -184,6 +184,14 @@ pub fn overlay_block(
     let slot: Slot = Rc::new(RefCell::new(None));
     let slot_cleanup = slot.clone();
     let doc_cleanup = doc.clone();
+    // 宿主作用域必须建在驱动 effect **之外**。踩过的坑:`create_root` 挂在
+    // 当前 owner 之下,直接在 effect 里建,弹层子作用域就成了这个 effect 的
+    // 子节点;而 `anchor()` 是被追踪的依赖,锚点一动 effect 重跑 → cleanup
+    // 先级联销毁子树。视图与 entry 活在 Doc 里不受影响,于是弹层还挂在屏幕上,
+    // 里面的绑定却全死了;更糟的是嵌套子菜单会被自己的 on_cleanup 摘掉注册,
+    // 当场消失。解法与 keyed each 的行作用域同型(见 with_owner 的注释):
+    // 预建宿主 root(挂调用方作用域,组件卸载时随之回收),弹层挂它名下。
+    let (_, host) = create_root(|| {});
 
     effect(move || {
         let is_open = open_d.get();
@@ -195,7 +203,7 @@ pub fn overlay_block(
                 let root = doc.create_overlay_root();
                 let d = doc.clone();
                 let b = &build;
-                let (_, scope) = create_root(|| untrack(|| b(&d, root)));
+                let (_, scope) = with_owner(&host, || create_root(|| untrack(|| b(&d, root))));
                 let prev_focus = doc.focused();
                 doc.add_overlay(OverlayEntry {
                     root,
@@ -587,12 +595,65 @@ mod tests {
         scope.dispose();
     }
 
+    /// 锚点跟随(菜单锚在会移动的按钮上、tooltip 跟指针)会让驱动 effect 重跑。
+    /// 弹层子作用域必须**活过**这次重跑:它挂在 effect 之外预建的宿主 root 下,
+    /// 而不是 effect 自己的子树。防的退化:把 `with_owner(&host, ..)` 退回成
+    /// 裸 `create_root` —— 弹层视图还在屏幕上,里面的绑定却已被级联清理,
+    /// 嵌套子菜单更是被自己的 on_cleanup 摘掉注册、当场消失
+    #[test]
+    fn overlay_scope_survives_anchor_driven_rerun() {
+        let doc = Doc::new();
+        let deaths = Rc::new(Cell::new(0));
+        let d = deaths.clone();
+        let (_, scope) = create_root(|| {
+            let open = state(true);
+            let x = state(10.0f32);
+            overlay_block(
+                &doc,
+                move || open.get(),
+                move || Anchor::Point(x.get(), 0.0),
+                OverlayOpts::default(),
+                move |doc, root| {
+                    let t = doc.create_text("外层");
+                    doc.append(root, t);
+                    let d = d.clone();
+                    on_cleanup(move || d.set(d.get() + 1));
+                    // 子菜单:它的注册/注销挂在本作用域上
+                    let sub = sv_reactive::state(true);
+                    overlay_block(
+                        doc,
+                        move || sub.get(),
+                        || Anchor::Point(5.0, 5.0),
+                        OverlayOpts::default(),
+                        |d2, r2| {
+                            let t = d2.create_text("子菜单");
+                            d2.append(r2, t);
+                        },
+                    );
+                },
+            );
+            assert_eq!(overlay_roots(&doc).len(), 2);
+            x.set(200.0);
+            assert_eq!(deaths.get(), 0, "锚点变化不该销毁弹层子作用域");
+            assert_eq!(overlay_roots(&doc).len(), 2, "子菜单不该跟着消失");
+            assert!(doc.dump().contains("子菜单"));
+        });
+        scope.dispose();
+        assert!(overlay_roots(&doc).is_empty(), "卸载仍应带走宿主下的弹层");
+        assert_eq!(deaths.get(), 1);
+    }
+
     /// build 里读 signal 是家常便饭(初值、条件分支)。它跑在 `untrack` 下,
-    /// 这些读取不能记到驱动 effect 头上——否则那个 signal 一变,驱动 effect
-    /// 重跑,弹层的子作用域被连带销毁(弹层还在,里面的绑定已经死了)
+    /// 这些读取不能记到驱动 effect 头上——弹层内容的每一次变动都把整个驱动
+    /// effect 拖起来重跑,是**一整片子树替一个字符串买单**的量级错误
     #[test]
     fn build_reads_are_untracked() {
         let doc = Doc::new();
+        // 直接数**驱动 effect 跑了几轮**:anchor 闭包每轮求值一次,是最贴身的探针。
+        // (别拿"弹层子作用域有没有被清理"当判据——子作用域挂的是 effect 之外的
+        // 宿主 root,重跑本来就不会连坐它,那样断言会永远为真)
+        let effect_runs = Rc::new(Cell::new(0));
+        let er = effect_runs.clone();
         let deaths = Rc::new(Cell::new(0));
         let d = deaths.clone();
         let label = state("初始");
@@ -601,7 +662,10 @@ mod tests {
             overlay_block(
                 &doc,
                 move || open.get(),
-                || Anchor::WindowCenter,
+                move || {
+                    er.set(er.get() + 1);
+                    Anchor::WindowCenter
+                },
                 OverlayOpts::default(),
                 move |doc, root| {
                     let t = doc.create_text(label.get());
@@ -611,13 +675,14 @@ mod tests {
                 },
             );
         });
-        assert_eq!(deaths.get(), 0);
+        assert_eq!(effect_runs.get(), 1);
         label.set("改了");
         assert_eq!(
-            deaths.get(),
-            0,
-            "build 内的读取不该成为驱动 effect 的依赖(弹层子作用域被误销毁)"
+            effect_runs.get(),
+            1,
+            "build 内的读取不该成为驱动 effect 的依赖"
         );
+        assert_eq!(deaths.get(), 0);
         assert_eq!(overlay_roots(&doc).len(), 1);
         scope.dispose();
     }

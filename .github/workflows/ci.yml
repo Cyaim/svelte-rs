@@ -40,11 +40,13 @@ jobs:
           # 固定只让 main 维护基线,PR 单向读取(Actions 允许从默认分支恢复)
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      # 渲染测试要真实字体:Linux 装 Noto CJK 供 fontique 发现(sv-shell/src/text.rs);
-      # mesa-vulkan-drivers 提供 lavapipe 软件 Vulkan,让 vello 测试在无 GPU 跑道上也能跑
-      - name: Install fonts & software Vulkan (Linux)
+      # 渲染测试要真实字体:Linux 装 Noto CJK 供 fontique 发现(sv-shell/src/text.rs)。
+      # 这一道**不装** mesa-vulkan-drivers:vello 测试连同 lavapipe 一起搬去了
+      # features job,默认特性下整个 wgpu 路径被 cfg 掉(SV_ALLOW_SOFTWARE_GPU
+      # 只在 vello_backend.rs 里读),留着纯属每轮多花一次 apt
+      - name: Install fonts (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y fonts-noto-cjk mesa-vulkan-drivers
+        run: sudo apt-get update && sudo apt-get install -y fonts-noto-cjk
 
       - name: Build (all targets)
         run: cargo build --workspace --all-targets
@@ -123,18 +125,19 @@ jobs:
           set -euo pipefail
           cargo doc --workspace --no-deps --all-features 2>&1 | tee "$RUNNER_TEMP/doc.log"
         env:
-          # **逐条 deny,不用 `-D warnings`**:全仓现存 4 条
-          # `rustdoc::private_intra_doc_links`(公开文档链到私有项,都在
-          # crates/sv-shell 的 text.rs / render.rs),要清掉得改 Rust 源码
-          # ——把目标项转 pub、或把 [`x`] 退化成 `x`。这轮只动 CI,不拿 CI
-          # 去逼一个不相干的源码改动,所以那条 lint **暂不阻塞**,由下一步
-          # 计数盯着不许再涨。
+          # 这份清单 + 下一步的计数(基线 0)**合起来等价于 `-D warnings`**,
+          # 别以为写成逐条就是放水。分两层是为了两件不同的事:
+          #   1. 清单里这几类是"文档写错了"的核心,让 rustdoc 当场 error,
+          #      拿到的是它自己的原生诊断(带 span、带候选建议),最好读;
+          #   2. 清单之外的一切(含将来 stable 新加的 warn-by-default lint)
+          #      由计数那步兜底,一条也不放过,同时打印成人话摘要。
+          # 也就是说这份清单是**可读性**取舍,不是严格性取舍——想放水得去改
+          # 下一步的基线,而那一步的注释写明了不许抬。
           #
-          # 也别写成 `-D warnings -A rustdoc::private_intra_doc_links`:那样确实
-          # 能绿,但 4 条告警会被**一起吞掉**,日志里干干净净,等于假装没欠债。
-          # 顺带一提 `-D warnings -W rustdoc::private_intra_doc_links` 是无效的
-          # ——实测 rustdoc 里 `warnings` 组压过后面的单条 -W,照样红(所以
-          # 才走逐条 deny 这条路)。
+          # 踩过的坑:`-D warnings -W rustdoc::某条` 这种"整体 deny + 单条降级"
+          # 在 rustdoc 里**不生效**,`warnings` 组会压过后面的单条 -W,照样红;
+          # 能生效的写法是 `-A`,但那会把告警一起吞掉,日志干干净净 = 假装
+          # 没欠债。当初存量还在时就是因为这两条路都不通,才走的逐条 deny。
           #
           # 下面这几条覆盖 rustdoc 全部 warn-by-default 的"写错了"类 lint,
           # 已实测在当前 stable 上无 unknown-lint。
@@ -146,19 +149,28 @@ jobs:
             -D rustdoc::bare_urls
             -D rustdoc::redundant_explicit_links
 
-      # 棘轮:允许存量,不允许新增。基线降到 0 时把这一步连同上面的 lint 清单
-      # 一起简化成 `-D warnings` 即可
-      - name: 剩余 rustdoc 告警(可见,只防新增)
+      # 棘轮:基线 0,上一趟 cargo doc 里**任何**带源码位置的告警都红。
+      #
+      # 注意它数的**不只是 rustdoc 的 doc lint**:`cargo doc` 要先把各 crate
+      # checking 一遍才能交给 rustdoc,rustc 的普通编译告警(unused_imports
+      # 之类)同样会落进这份日志,一样被这一步拦下。这是**有意保留**的,
+      # 因为它恰好补上了 lint job 的缺口:那边的 clippy 只跑默认特性,而
+      # 这一趟是 `--all-features`,vello 那半边的编译告警只有这里看得见。
+      # 所以下面的措辞一律说"源码告警"而不是"rustdoc 告警"——红的时候
+      # 得让人一眼知道该去找 unused import 还是找坏掉的文档链接,别再重蹈
+      # 那次"红叉长得跟别的一模一样"的覆辙。
+      - name: cargo doc 源码告警(rustdoc + rustc,可见且清零)
         if: always()
         env:
-          # **基线已降到 0**(2026-07-22 当天清完,rustc 1.88.0 实测)。
-          # 原来的 4 条 private_intra_doc_links 分两类修:三条指的是真·私有实现
-          # 细节(`input_scroll_x/y`、`register`),退化成反引号——不该为了让文档
-          # 链接合法就把内部函数转 pub;一条是 `caret_rect` 本就该 re-export 却在
-          # R3-P3 时漏了,补上顺带把多行几何的公开面补齐(commit 2845cea)。
-          # membench 那条冗余显式链接一并清掉。
-          # 到 0 之后这一步等价于 `-D warnings`,留着是因为它的失败信息
-          # (剩几条 + 逐条列出)比 rustdoc 自己的输出好读
+          # **基线 0**(2026-07-22 清完,rustc 1.88.0 实测)。历史包袱是 4 条
+          # `rustdoc::private_intra_doc_links`,分两类修掉的:三条指向真·私有
+          # 实现细节(`input_scroll_x/y`、`register`),退化成反引号——不该为了
+          # 让文档链接合法就把内部函数转 pub;一条是 `caret_rect` 本就该
+          # re-export 却在 R3-P3 时漏了,补上顺带把多行几何的公开面补齐
+          # (commit 2845cea)。membench 那条冗余显式链接一并清掉。
+          #
+          # 这个数只该往下走。要抬它之前先想清楚:抬 1 就等于允许 1 条谁都
+          # 不看的告警长期趴在日志里,而棘轮的全部意义就是不让这种事发生
           DOC_WARN_BASELINE: 0
         run: |
           set -euo pipefail
@@ -170,13 +182,13 @@ jobs:
           # "`~/.cargo/config` is deprecated" —— 跑道上没有,但别让计数依赖这一点)
           n=$(awk 'p ~ /^warning: / && /^[[:space:]]*-->/ { c++ } { p = $0 } END { print c+0 }' "$log")
           {
-            echo "### rustdoc 告警"
+            echo "### cargo doc 源码告警"
             echo
-            echo "剩余 **${n}** 条(基线 ${DOC_WARN_BASELINE},只防新增)"
+            echo "共 **${n}** 条(基线 ${DOC_WARN_BASELINE};含 rustdoc 文档 lint 与 rustc 编译告警)"
           } >> "$GITHUB_STEP_SUMMARY"
           awk '/^[[:space:]]*-->/ && p ~ /^warning: / { print p; print "  " $0 } { p = $0 }' "$log"
           if [ "$n" -gt "$DOC_WARN_BASELINE" ]; then
-            echo "::error::rustdoc 告警 ${n} 条 > 基线 ${DOC_WARN_BASELINE} —— 新增的请就地修掉,别抬基线"
+            echo "::error::cargo doc 源码告警 ${n} 条 > 基线 ${DOC_WARN_BASELINE}(上面逐条列出了,注意可能是普通编译告警而非文档链接)—— 就地修掉,别抬基线"
             exit 1
           fi
 
@@ -318,8 +330,14 @@ jobs:
   # 特性或一个 OS,名字就变一批,保护规则会**悄悄漏掉新的那条**。挂这一个
   # 固定名字的汇总 job 就没这问题。
   # 配置提示:branch protection 里只需要勾 `ci-ok` 这一项。
+  #
+  # **这里刻意不写 `name:`**:必需检查匹配的是 check run 的显示名,有 `name:`
+  # 就以它为准、没有才回落到 job id。给它起个"ci-ok(分支保护挂这一个)"这类
+  # 说明性显示名,要勾的字符串就变成了那一长串中文带括号,而不是上面写的
+  # `ci-ok` —— 哪天谁觉得这名字啰嗦顺手改短,保护规则会立刻匹配不上、
+  # 变成永远 pending 或直接失效,正好是这个 job 要防的那种"悄悄漏掉"。
+  # 让 job id 直接当显示名,唯一的真名就只有一个,改不动也就错不了。
   ci-ok:
-    name: ci-ok(分支保护挂这一个)
     if: always()
     needs:
       - test

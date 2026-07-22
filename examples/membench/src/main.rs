@@ -117,6 +117,19 @@ fn main() {
     };
     let virtual_mode = scene == Scene::Virtual;
 
+    // 深树的渲染侧天花板:build_taffy / walk_taffy 都是递归下降,Windows 主线程
+    // 1MB 栈到 ~400 层就爆。爆栈是 `thread 'main' has overflowed its stack` +
+    // 退出码 127,**不带任何上下文**——不预告一声,下一个人只会以为渲染器坏了。
+    // 这里只警告不钳制:真要复现这条递归极限(比如有人把 walker 改成显式栈之后
+    // 来验收)得能跑得到 400。实测边界:300 渲染正常、400 必爆、600 --no-render 无恙
+    if scene == Scene::Deep && !no_render && cfg.depth > 300 {
+        println!(
+            "DEPTH-WARN depth={} 渲染侧递归(build_taffy/walk_taffy)约 400 层爆栈;\
+             只量建树/内存请加 --no-render",
+            cfg.depth
+        );
+    }
+
     // 窗口模式:真实呈现路径(配 SV_SHOW_FPS=1 / SV_RENDERER 用);
     // --mutate 时用自续任务链驱动增量更新(每次后台完成 → 改一次 → 再排队)
     if windowed {
@@ -380,13 +393,22 @@ fn build_rows_into(doc: &Doc, parent: ViewId, rows: usize) -> Vec<Signal<i32>> {
 /// 对照组不是别的场景,而是**同一场景的小 --depth**:节点数、内容、控件种类
 /// 全都一样,只有深度变——差值就是父链那部分。
 ///
-/// 叶子刻意用色块 View 而不是 Text:绘制端的 `text::shape` 没有缓存,一个叶子
-/// 一次 parley 布局(几十 µs),几千个叶子的文本成本能把深度信号整个淹掉
-/// (实测混文本时深度 200↔4 只差 20%,换色块后差一倍以上)。每层留一个
-/// 绑定 Text 当"取样探针",保证 fg/font_size 两条继承路径也在被压。
+/// 叶子绝大多数是色块 View 而不是 Text:绘制端的 `text::shape` 没有缓存,
+/// 一个文本叶子一帧一次 parley(短串实测 ~6µs),几千个叶子的文本成本能把
+/// 深度信号整个淹掉。Text 只按固定密度插一小撮当"取样探针",保证
+/// fg/font_size 两条继承路径也在被压。
+///
+/// **探针密度按节点数算,不是"每层一个"**:每层一个会让 Text 总数 = depth,
+/// 于是 200↔4 的对照里除了深度还多变了一个变量。实测(i5-12400/release/CPU)
+/// 每层一个 Text 时比值 13.6:9.9 = **1.38**,把 Text 数改成与深度无关后
+/// 12.3:10.3 = **1.20** —— 差出来的那一半根本不是深度,是多出来的 196 个
+/// Text 的 shape 成本。同理也核过 opacity:去掉那几层半透明后比值不动
+/// (1.38 → 1.38),说明 alpha 混合不是这里的变量,不用为它做等量化。
 fn build_deep(doc: &Doc, controls: usize, depth: usize) -> Vec<Signal<i32>> {
+    /// 每多少个子节点插一个 Text 探针(节点总数固定 → 两档探针数也固定)
+    const TEXT_EVERY: usize = 16;
     let depth = depth.clamp(1, controls.max(1));
-    // 每层 = 1 个链节 View + leaves 个叶子,凑够 controls 个节点
+    // 每层 = 1 个链节 View + leaves 个子节点,凑够 controls 个节点
     let leaves = (controls / depth).saturating_sub(1).max(1);
     let root = doc.root();
     // 字号与前景色**只在根上给**:继承解析必须走满整条链才收敛(最坏工况);
@@ -396,8 +418,9 @@ fn build_deep(doc: &Doc, controls: usize, depth: usize) -> Vec<Signal<i32>> {
         s.font_size = 14.0;
         s.fg = Some(Color::rgb(30, 30, 34));
     });
-    let mut sigs = Vec::with_capacity(depth);
+    let mut sigs = Vec::with_capacity(controls / TEXT_EVERY + 1);
     let mut cur = root;
+    let mut seen = 0usize; // 全局子节点序号:探针按它定位,与 depth 无关
     for level in 0..depth {
         let link = doc.create_view();
         doc.append(cur, link);
@@ -410,26 +433,27 @@ fn build_deep(doc: &Doc, controls: usize, depth: usize) -> Vec<Signal<i32>> {
                 s.opacity = 0.92;
             }
         });
-        // 【临时实验:去掉 Text 探针,改成同数量的色块】
-        let head = doc.create_view();
-        doc.append(link, head);
-        doc.update_style(head, |s| {
-            s.width = Some(8.0);
-            s.height = Some(8.0);
-            s.bg = Some(Color::rgb(200, 205, 210));
-        });
-        let sig = state(level as i32);
-        sigs.push(sig);
-        // 定尺色块:布局有确定尺寸(不进 measure 通道)、绘制只有一次 fill,
-        // 于是每个叶子的帧成本几乎只剩 effective_opacity 的那趟父链
-        for _ in 1..leaves {
-            let leaf = doc.create_view();
-            doc.append(link, leaf);
-            doc.update_style(leaf, |s| {
-                s.width = Some(8.0);
-                s.height = Some(8.0);
-                s.bg = Some(Color::rgb(200, 205, 210));
-            });
+        for _ in 0..leaves {
+            seen += 1;
+            // `sigs.is_empty()` 兜底:极小规模(子节点总数 < TEXT_EVERY)时
+            // 一个探针都不建的话,--mutate 会静默变成空转
+            if seen % TEXT_EVERY == 0 || (sigs.is_empty() && level + 1 == depth) {
+                let probe = doc.create_text("");
+                doc.append(link, probe);
+                let sig = state(level as i32);
+                sigs.push(sig);
+                bind_text(doc, probe, move || format!("层 {}", sig.get()));
+            } else {
+                // 定尺色块:布局有确定尺寸(不进 measure 通道)、绘制只有一次 fill,
+                // 于是每个叶子的帧成本几乎只剩 effective_opacity 的那趟父链
+                let leaf = doc.create_view();
+                doc.append(link, leaf);
+                doc.update_style(leaf, |s| {
+                    s.width = Some(8.0);
+                    s.height = Some(8.0);
+                    s.bg = Some(Color::rgb(200, 205, 210));
+                });
+            }
         }
         cur = link;
     }
@@ -516,17 +540,25 @@ fn build_scroll(doc: &Doc, rows: usize) -> (ViewId, f32) {
 
 /// 结构搅动工况:each 列表每帧整表左旋 1(顺序全变、成员一个不少)。
 ///
-/// 默认 keyed:行子树与行内状态全部复用(不重建、不重跑行内绑定),reconcile
-/// 落到"逐行 append 对齐新序"的重排分支——append 先从父的 children 里摘掉再推到
-/// 末尾,整表重排 = n 次 O(n) 摘除。这是 keyed each 唯一的超线性风险点,
-/// 别的场景一个都压不到。
+/// 默认 keyed:行子树与行内状态全部复用(不重建、不重跑行内绑定;key 就是行值,
+/// 所以同 key 连 `set` 都省了 = 纯重排)。reconcile 落到"逐行 append 对齐新序"的
+/// 重排分支——[`sv_ui::Doc::append`] 先 `children.retain` 摘除再 push,整表重排
+/// = n 次 O(n) 摘除。
 ///
 /// `--unkeyed` 换成不带 key 的 [`sv_ui::each_block`]:列表一变就
 /// `clear_children` + 整表重建。它不是"另一个工况",而是**复用一旦失效的参照值**
 /// ——keyed 那档的数字单看没有意义,要跟这一档比才知道复用值多少钱。
 ///
-/// 实测结论(见 README):600–2400 行档两者同价(建/毁节点很便宜,而 keyed 自己
-/// 的按 key 线性查找也是 O(n²)),keyed each 的价值是**状态保留**而不是帧成本。
+/// **左旋 1 是 key 查找的最好情况,不是最坏情况**:`each_block_keyed` 用
+/// `old.iter().position(...)` 线性查 old 表,左旋后每次命中都落在剩余 old 表的
+/// 第 1 位,单次 O(1)。所以本场景压不到那条 O(n²) 查找——想压它得让顺序**逆序**
+/// 或大步长旋转。实测 600→1200→2400 行是 22→44→89ms 的**线性**,两条 O(n²)
+/// 项(查找、retain)在这个规模上都还没抬头。
+///
+/// 实测结论(见 README):600–2400 行档两者同价,但原因不是"两边都 O(n²)",
+/// 而是**两边的 reconcile 都只占帧成本一小块**:同规模 `rows --mutate` 基线
+/// 19.5ms,keyed 22.1 / unkeyed 21.2 —— 重排 2.6ms、重建 1.7ms,90% 的帧时间是
+/// 两档共有的布局+绘制。keyed each 的价值是**状态保留**,不是帧成本。
 fn build_churn(doc: &Doc, rows: usize, keyed: bool) -> Signal<Vec<u32>> {
     let items = state((0..rows as u32).collect::<Vec<u32>>());
     let root = doc.root();
