@@ -14,7 +14,6 @@ use std::collections::HashSet;
 
 use proc_macro2::{TokenStream, TokenTree};
 use quote::{ToTokens, format_ident, quote};
-use syn::parse::Parser as _;
 
 use crate::emit::{self, ElemKind, TextPart};
 use crate::script::{self, ScriptOutput, collect_pat_idents};
@@ -35,6 +34,13 @@ struct Scope {
     snippets: HashSet<String>,
 }
 
+/// 生成代码的文件头。source map 的生成侧偏移是**最终文件**里的字节偏移,
+/// 所以并行走拿到的 unparse 侧偏移要整体加上这一段的长度。
+const HEADER: &str = "// 由 sv-compiler 生成,请勿手改。\n";
+
+/// 返回 (生成代码, source map 锚点表)。第二项只在
+/// [`crate::sourcemap::begin`] 之后非空;否则是空表,且整条路径与开启前
+/// **逐字节一致**(`mapped_output_is_byte_identical` 守这条)。
 pub fn generate(
     source: &str,
     fn_name: &str,
@@ -42,7 +48,7 @@ pub fn generate(
     nodes: &[Node],
     registry: &PropsRegistry,
     sheet: &StyleSheet,
-) -> Result<String, CompileError> {
+) -> Result<(String, crate::sourcemap::Anchors), CompileError> {
     let mut root_scope = Scope::default();
     root_scope.plain.extend(script.plain_vars.iter().cloned());
 
@@ -128,10 +134,9 @@ pub fn generate(
         line: 1,
         col: 1,
     })?;
-    Ok(format!(
-        "// 由 sv-compiler 生成,请勿手改。\n{}",
-        prettyplease::unparse(&file)
-    ))
+    let formatted = prettyplease::unparse(&file);
+    let anchors = crate::sourcemap::build_segs(&file, &formatted, HEADER.len(), source);
+    Ok((format!("{HEADER}{formatted}"), anchors))
 }
 
 fn pascal(snake: &str) -> String {
@@ -198,7 +203,7 @@ impl Cg<'_> {
     }
 
     fn parse_expr(&self, e: &ExprSrc) -> Result<syn::Expr, CompileError> {
-        syn::parse_str(&e.src).map_err(|err| {
+        crate::sourcemap::parse_str_at(&e.src, e.offset).map_err(|err| {
             CompileError::at_offset(self.source, e.offset, format!("表达式解析失败: {err}"))
         })
     }
@@ -1018,7 +1023,8 @@ impl Cg<'_> {
                             "bind:value 的值应为 {反应式变量}",
                         ));
                     };
-                    let sig_ts = if let Ok(syn::Expr::Path(p)) = syn::parse_str::<syn::Expr>(&e.src)
+                    let sig_ts = if let Ok(syn::Expr::Path(p)) =
+                        crate::sourcemap::parse_str_at::<syn::Expr>(&e.src, e.offset)
                         && p.path.segments.len() == 1
                         && self
                             .script
@@ -1078,7 +1084,8 @@ impl Cg<'_> {
                             "bind:scrolly 的值应为 {反应式变量}",
                         ));
                     };
-                    let sig_ts = if let Ok(syn::Expr::Path(p)) = syn::parse_str::<syn::Expr>(&e.src)
+                    let sig_ts = if let Ok(syn::Expr::Path(p)) =
+                        crate::sourcemap::parse_str_at::<syn::Expr>(&e.src, e.offset)
                         && p.path.segments.len() == 1
                         && self
                             .script
@@ -1109,7 +1116,8 @@ impl Cg<'_> {
                             "bind:checked 的值应为 {反应式变量}",
                         ));
                     };
-                    let sig_ts = if let Ok(syn::Expr::Path(p)) = syn::parse_str::<syn::Expr>(&e.src)
+                    let sig_ts = if let Ok(syn::Expr::Path(p)) =
+                        crate::sourcemap::parse_str_at::<syn::Expr>(&e.src, e.offset)
                         && p.path.segments.len() == 1
                         && self
                             .script
@@ -1385,7 +1393,8 @@ impl Cg<'_> {
                 Some(attr) => match &attr.value {
                     AttrValue::Expr(e) => {
                         // 零参 snippet 名作为 prop:自动包成 sv_ui::Snippet
-                        if let Ok(syn::Expr::Path(p)) = syn::parse_str::<syn::Expr>(&e.src)
+                        if let Ok(syn::Expr::Path(p)) =
+                            crate::sourcemap::parse_str_at::<syn::Expr>(&e.src, e.offset)
                             && p.path.segments.len() == 1
                             && scope
                                 .snippets
@@ -1400,7 +1409,8 @@ impl Cg<'_> {
                         }
                         // $bindable + 裸反应式变量名:直接传句柄(双向绑定零胶水)
                         if field.bindable
-                            && let Ok(syn::Expr::Path(p)) = syn::parse_str::<syn::Expr>(&e.src)
+                            && let Ok(syn::Expr::Path(p)) =
+                                crate::sourcemap::parse_str_at::<syn::Expr>(&e.src, e.offset)
                             && p.qself.is_none()
                             && p.path.segments.len() == 1
                             && self
@@ -1685,13 +1695,14 @@ impl Cg<'_> {
             offset,
         } = parts;
         let list_expr = self.value_closure_expr(list, scope)?;
-        let pat = syn::Pat::parse_single.parse_str(pat_src).map_err(|e| {
-            CompileError::at_offset(
-                self.source,
-                pat_offset,
-                format!("{{#each}} 模式解析失败: {e}"),
-            )
-        })?;
+        let pat = crate::sourcemap::parse_with_at(syn::Pat::parse_single, pat_src, pat_offset)
+            .map_err(|e| {
+                CompileError::at_offset(
+                    self.source,
+                    pat_offset,
+                    format!("{{#each}} 模式解析失败: {e}"),
+                )
+            })?;
         let mut inner_scope = scope.clone();
         let mut pat_binds = HashSet::new();
         collect_pat_idents(&pat, &mut pat_binds);

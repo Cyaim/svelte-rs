@@ -21,12 +21,13 @@
 use std::collections::{HashMap, HashSet};
 
 use proc_macro2::{TokenStream, TokenTree};
-use quote::{ToTokens, format_ident, quote};
+use quote::{ToTokens, quote};
 use syn::punctuated::Punctuated;
 use syn::visit_mut::{self, VisitMut};
 use syn::{BinOp, Block, Expr, Pat, Stmt, Token, parse_quote};
 
 use crate::sfc::Span;
+use crate::sourcemap::RuneHit;
 use crate::{CompileError, line_col};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -234,7 +235,12 @@ fn mask_rust_source(content: &str) -> String {
 /// 从 script 内容里摘出 `$props { ... }` 声明,原位置替换为等长空白
 /// (保持行列不变,syn 错误定位不漂移)。定位与花括号配平都在掩码文本上做,
 /// 注释/字符串里的 `$props` 不会被误认。
-pub fn extract_props(content: &str) -> Result<(String, Option<PropsDecl>), String> {
+/// `sv_base` = 该 script 内容在 `.sv` 全文里的起始字节;`None` 表示"只要签名,
+/// 不建映射"(build() 的第一遍扫描)。
+pub fn extract_props(
+    content: &str,
+    sv_base: Option<usize>,
+) -> Result<(String, Option<PropsDecl>), String> {
     let masked = mask_rust_source(content);
     // 只有后跟 `{` 的 `$props` 才是声明;`$props.id()` 等 rune 变体留给后续替换
     let mut decl_starts = Vec::new();
@@ -321,11 +327,34 @@ pub fn extract_props(content: &str) -> Result<(String, Option<PropsDecl>), Strin
             })
         }
     }
-    // `$bindable(T)` 在类型位:$ 进不了 syn,先占位替换,借 Fn-sugar 解析
-    let inner_pre = inner.replace("$bindable", "__sv_bindable");
-    let fields =
-        syn::parse::Parser::parse_str(Punctuated::<Field, Token![,]>::parse_terminated, &inner_pre)
-            .map_err(|e| format!("$props 声明解析失败: {e}"))?;
+    // `$bindable(T)` 在类型位:$ 进不了 syn,先占位替换,借 Fn-sugar 解析。
+    // 替换恒 +4 字节,顺手记漂移表——props 的字段类型与默认值是纯用户代码,
+    // 组件库里的类型错误多半就出在这儿,没有映射等于这类组件全靠猜
+    let mut inner_pre = String::with_capacity(inner.len());
+    let mut drift = Vec::new();
+    let mut cursor = 0usize;
+    while let Some(rel) = inner[cursor..].find("$bindable") {
+        let pos = cursor + rel;
+        inner_pre.push_str(&inner[cursor..pos]);
+        drift.push(RuneHit {
+            out_start: inner_pre.len(),
+            out_len: "__sv_bindable".len(),
+            src_start: pos,
+            src_len: "$bindable".len(),
+        });
+        inner_pre.push_str("__sv_bindable");
+        cursor = pos + "$bindable".len();
+    }
+    inner_pre.push_str(&inner[cursor..]);
+    let parser = Punctuated::<Field, Token![,]>::parse_terminated;
+    let fields = match sv_base {
+        // build() 的第一遍扫描只要签名、不建映射,那时 sv_base 是 None
+        Some(base) => {
+            crate::sourcemap::parse_with_drift_at(parser, &inner_pre, base + body_start, drift)
+        }
+        None => syn::parse::Parser::parse_str(parser, &inner_pre),
+    }
+    .map_err(|e| format!("$props 声明解析失败: {e}"))?;
 
     let decl = PropsDecl {
         fields: fields
@@ -359,14 +388,15 @@ pub fn extract_props(content: &str) -> Result<(String, Option<PropsDecl>), Strin
 
 pub fn transform(source: &str, span: &Span) -> Result<ScriptOutput, CompileError> {
     let content = span.text(source);
-    let (content, props) =
-        extract_props(content).map_err(|msg| CompileError::at_offset(source, span.start, msg))?;
+    let (content, props) = extract_props(content, Some(span.start))
+        .map_err(|msg| CompileError::at_offset(source, span.start, msg))?;
     // `$` 不是合法 Rust token,先做占位替换再交给 syn。
     // (`$state.raw` / `$derived.by` / `$effect.pre` 因前缀替换自动变成方法调用形态)
-    let pre = replace_runes(&content);
-    let wrapped = format!("{{\n{pre}\n}}");
-    let block: Block =
-        syn::parse_str(&wrapped).map_err(|e| syn_err(source, span, &e, "script 解析失败"))?;
+    let (pre, rune_hits) = replace_runes(&content);
+    // 垫虚拟行再 parse:整块一次,pad 之外还要减掉 `{\n` 这 2 字节前缀
+    // (source map 的 provenance 原料,见 sourcemap.rs 头部)
+    let block: Block = crate::sourcemap::parse_script_block(&pre, span.start, rune_hits)
+        .map_err(|e| syn_err(source, span, &e, "script 解析失败"))?;
 
     let mut vars = VarTable::default();
     // $bindable props 在 callee 里就是反应式变量:预注册进变量表,
@@ -400,8 +430,12 @@ pub fn transform(source: &str, span: &Span) -> Result<ScriptOutput, CompileError
 }
 
 /// rune 占位替换:只替换掩码文本上命中的位置(注释/字符串免疫),
-/// 且要求 token 后不是标识符字符(`$stateful` 不动)
-fn replace_runes(content: &str) -> String {
+/// 且要求 token 后不是标识符字符(`$stateful` 不动)。
+///
+/// 第二个返回值是**字节漂移表**:6 个 rune 全是 `$xxx` → `__sv_xxx`,每处恒 +4,
+/// source map 反查 script 块里的字节位置时要把它减回去。
+/// (`extract_props` 做的是字节等长空白替换,不漂,不需要建表。)
+fn replace_runes(content: &str) -> (String, Vec<RuneHit>) {
     const RUNES: &[(&str, &str)] = &[
         ("$state", "__sv_state"),
         ("$derived", "__sv_derived"),
@@ -428,14 +462,21 @@ fn replace_runes(content: &str) -> String {
     }
     hits.sort_by_key(|(pos, ..)| *pos);
     let mut out = String::with_capacity(content.len());
+    let mut drift = Vec::with_capacity(hits.len());
     let mut cursor = 0usize;
     for (pos, from, to) in hits {
         out.push_str(&content[cursor..pos]);
+        drift.push(RuneHit {
+            out_start: out.len(),
+            out_len: to.len(),
+            src_start: pos,
+            src_len: from.len(),
+        });
         out.push_str(to);
         cursor = pos + from.len();
     }
     out.push_str(&content[cursor..]);
-    out
+    (out, drift)
 }
 
 fn is_rune_init(e: &Expr) -> bool {
@@ -453,12 +494,13 @@ fn is_rune_init(e: &Expr) -> bool {
 
 fn syn_err(source: &str, span: &Span, e: &syn::Error, ctx: &str) -> CompileError {
     // proc-macro2 span-locations:行/列相对于被解析的 wrapped 字符串。
-    // wrapped 第 2 行 = script 内容第 1 行 = 源文件第 line_col(span.start) 行
+    // wrapped 第 2 行 = script 内容第 1 行 = 源文件第 line_col(span.start) 行;
+    // 建 source map 时前面还垫了 script_pad 个虚拟换行,一并减掉
     let lc = e.span().start();
     let script_line = line_col(source, span.start).0;
     CompileError {
         message: format!("{ctx}: {e}"),
-        line: script_line + lc.line.saturating_sub(2),
+        line: script_line + lc.line.saturating_sub(2 + crate::sourcemap::script_pad()),
         col: lc.column + 1,
     }
 }
@@ -774,13 +816,25 @@ pub fn rewrite_template_expr(
 }
 
 fn path_single_ident(e: &Expr) -> Option<String> {
+    path_single_ident_spanned(e).map(|(name, _)| name)
+}
+
+/// 同上,但顺带把原 Ident 的 span 带出来。
+///
+/// 为什么需要:下面三处改写(`.set` / `.update` / `.get`)会**重造**用户变量名,
+/// 用 `format_ident!` 造出来的是 `Span::call_site()`,在 fallback 下就是
+/// `line=1 / byte_range=0..0` —— 恰好等于 source map 判定"胶水"的那个值。
+/// 于是每一次对反应式变量的读/写(`.sv` 里最常见、也最常出类型错误的 token)
+/// provenance 都会被无声丢弃(全示例实测 98 处)。用原 span 重造即可保住。
+fn path_single_ident_spanned(e: &Expr) -> Option<(String, proc_macro2::Span)> {
     if let Expr::Path(p) = e
         && p.qself.is_none()
         && p.path.leading_colon.is_none()
         && p.path.segments.len() == 1
         && p.path.segments[0].arguments.is_none()
     {
-        Some(p.path.segments[0].ident.to_string())
+        let id = &p.path.segments[0].ident;
+        Some((id.to_string(), id.span()))
     } else {
         None
     }
@@ -875,11 +929,12 @@ impl VisitMut for Rewriter<'_> {
             }
             // x = v  →  x.set(v)
             Expr::Assign(assign) => {
-                if let Some(name) = path_single_ident(&assign.left)
+                if let Some((name, sp)) = path_single_ident_spanned(&assign.left)
                     && self.is_reactive(&name)
                 {
                     self.visit_expr_mut(&mut assign.right);
-                    let ident = format_ident!("{name}");
+                    // 用原 span 重造,别用 format_ident!(会丢 provenance,见函数注释)
+                    let ident = syn::Ident::new(&name, sp);
                     let rhs = &assign.right;
                     *e = parse_quote!( #ident.set(#rhs) );
                     return;
@@ -889,11 +944,11 @@ impl VisitMut for Rewriter<'_> {
             // RHS 必须在 update 闭包外预求值:否则 `count += count` 这类
             // RHS 读同一 signal 的写法会在闭包内重入读取而 panic(调研 08 §2.3)
             Expr::Binary(b) if is_assign_op(&b.op) => {
-                if let Some(name) = path_single_ident(&b.left)
+                if let Some((name, sp)) = path_single_ident_spanned(&b.left)
                     && self.is_reactive(&name)
                 {
                     self.visit_expr_mut(&mut b.right);
-                    let ident = format_ident!("{name}");
+                    let ident = syn::Ident::new(&name, sp);
                     let op = &b.op;
                     let rhs = &b.right;
                     *e = parse_quote!( { let __sv_rhs = #rhs; #ident.update(|__v| *__v #op __sv_rhs) } );
@@ -1031,10 +1086,10 @@ impl VisitMut for Rewriter<'_> {
             }
             // 裸读:x → x.get()
             Expr::Path(_) => {
-                if let Some(name) = path_single_ident(e)
+                if let Some((name, sp)) = path_single_ident_spanned(e)
                     && self.is_reactive(&name)
                 {
-                    let ident = format_ident!("{name}");
+                    let ident = syn::Ident::new(&name, sp);
                     *e = parse_quote!( #ident.get() );
                     return;
                 }

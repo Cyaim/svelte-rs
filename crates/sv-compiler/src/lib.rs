@@ -27,12 +27,15 @@
 //!
 //! 构建集成:build.rs 里调用 [`build`],生成代码进 OUT_DIR,`include!` 引入。
 
+pub mod check;
 mod codegen;
 /// 绑定原语调用词汇表:**双前端共享的 codegen 内核**
 /// (`view!` 宏从这里发射同一套调用;见 emit.rs 头部说明)
 pub mod emit;
 mod script;
 mod sfc;
+/// 生成 `.rs` ↔ `.sv` 的位置映射(`sv check` 把 rustc 的诊断搬回 `.sv` 靠它)
+pub mod sourcemap;
 mod style;
 mod template;
 
@@ -122,6 +125,41 @@ pub fn compile_sv_with(
     fn_name: &str,
     registry: &PropsRegistry,
 ) -> Result<String, CompileError> {
+    compile_inner(source, fn_name, registry).map(|(code, _)| code)
+}
+
+/// 编译产物 + 位置映射
+pub struct Compiled {
+    pub code: String,
+    pub map: sourcemap::SourceMap,
+}
+
+/// 编译并同时产出 source map。
+///
+/// `sv_path` 会**原样**写进 map 的 `sv` 字段,请传绝对路径:build.rs 的 cwd 是
+/// 包根,`sv check` 的 cwd 是 workspace 根,写相对路径两边对不上。
+pub fn compile_sv_mapped(
+    source: &str,
+    fn_name: &str,
+    registry: &PropsRegistry,
+    sv_path: &str,
+) -> Result<Compiled, CompileError> {
+    sourcemap::begin(source);
+    let r = compile_inner(source, fn_name, registry);
+    let out = r.map(|(code, anchors)| {
+        let map = sourcemap::finish_map(sv_path.to_string(), source, &code, anchors);
+        Compiled { code, map }
+    });
+    // 记录器是 thread_local 且持有整段 provenance,失败路径也必须收干净
+    sourcemap::end();
+    out
+}
+
+fn compile_inner(
+    source: &str,
+    fn_name: &str,
+    registry: &PropsRegistry,
+) -> Result<(String, sourcemap::Anchors), CompileError> {
     let sfc = sfc::split(source)?;
     let script = match &sfc.script {
         Some(block) => script::transform(source, block)?,
@@ -202,18 +240,52 @@ pub fn build(src_dir: impl AsRef<Path>) {
     // 第二遍:编译
     for path in files {
         println!("cargo::rerun-if-changed={}", path.display());
-        let code = match compile_file_with(&path, &registry) {
-            Ok(c) => c,
-            Err(e) => panic!("\n\n.sv 编译失败\n  --> {e}\n"),
+        // 报错一律用绝对路径:build.rs 的 cwd 是包根,而看这条错误的
+        // (`sv check` / VS Code 的 problemMatcher)cwd 是 workspace 根
+        let abs = abs_path(&path);
+        let source = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(e) => panic!("\n\n.sv 读取失败\n  --> {abs}: {e}\n"),
         };
         let stem = path
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("component");
-        let out = Path::new(&out_dir).join(format!("{}.rs", sanitize_fn_name(stem)));
-        std::fs::write(&out, code).expect("写入生成代码失败");
+        let fn_name = sanitize_fn_name(stem);
+        let compiled = match compile_sv_mapped(&source, &fn_name, &registry, &abs) {
+            Ok(c) => c,
+            Err(e) => panic!("\n\n.sv 编译失败\n  --> {abs}:{e}\n"),
+        };
+        // 保险丝熔断 = 这个文件的诊断全都回不到 .sv。它不该只在 .svmap 里留个
+        // 字段等人去读:烧了必须有指示灯,否则用户只会看到一片"落在胶水上"
+        if let Some(why) = &compiled.map.blown {
+            println!(
+                "cargo::warning={abs}: source map 锚点并行走失配({why}),该文件的 rustc 诊断将无法回映射到 .sv,请上报"
+            );
+        }
+        let out = Path::new(&out_dir).join(format!("{fn_name}.rs"));
+        write_if_changed(&out, &compiled.code);
+        // map 与 .rs **同一次写盘**:分两次生成必然漂移,`sv check` 会靠
+        // sv_hash 拒绝用过期的 map
+        write_if_changed(&out.with_extension("rs.svmap"), &compiled.map.to_text());
     }
     println!("cargo::rerun-if-changed={}", src_dir.as_ref().display());
+}
+
+/// 内容不变就不写盘:build.rs 与编辑器/rust-analyzer 的 watcher 同时盯着
+/// OUT_DIR,无谓的 mtime 变化会引发整类"重编译抖动"的玄学问题
+fn write_if_changed(path: &Path, content: &str) {
+    if std::fs::read_to_string(path).is_ok_and(|old| old == content) {
+        return;
+    }
+    std::fs::write(path, content).expect("写入生成代码失败");
+}
+
+/// 绝对路径,并剥掉 Windows 的 `\\?\` UNC 前缀(它进不了 problemMatcher 的正则)
+fn abs_path(path: &Path) -> String {
+    let p = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let s = p.display().to_string();
+    s.strip_prefix(r"\\?\").unwrap_or(&s).to_string()
 }
 
 /// 轻量提取一份 .sv 源码的 $props 签名(build 第一遍用);
@@ -221,7 +293,7 @@ pub fn build(src_dir: impl AsRef<Path>) {
 fn props_signature(source: &str) -> Option<Vec<PropsSigField>> {
     let sfc = sfc::split(source).ok()?;
     let span = sfc.script.as_ref()?;
-    let (_, decl) = script::extract_props(span.text(source)).ok()?;
+    let (_, decl) = script::extract_props(span.text(source), None).ok()?;
     let decl = decl?;
     Some(
         decl.fields
