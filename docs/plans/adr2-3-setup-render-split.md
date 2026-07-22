@@ -751,11 +751,11 @@ S3 的验收里已经放了 `--timings` 这一项。
 | 1 | `Binder` 至少能表达 §2.2 的六语义(名字可以不同) | 少了 `Sub` 则 each 行结构进不了数据面;少了 `Wire` 则 20 个属性分支要全搬进 TNode | **部分**:② 是 `Text/Style/Click/Wire` 四变体(tmpl.rs:315–324),`Cond`/`Sub`/`Opaque` 需补;`Click` 建议按附录 A 保留 |
 | 2 | 槽位 id 是**不透明类型**,不是裸 `u16` | §4.1 的类型级不变量 | **不满足且不该强求**:② 数据面存 `u16`(`Bind::Text(u16)` 等)。附录 A 的裁决("codegen 侧不透明 / 数据面裸 u16")成立,理由是 `static` 里放 newtype 要导出构造函数 |
 | 3 | `Template` 带 `sig: &[SlotSig]`,`SlotSig = (kind, u64 hash)` | §5 判据的全部输入 | **已满足**(tmpl.rs:59–92),字段名与本文一致 |
-| 4 | `stamp(&Doc, ViewId, &Template, &Binders)`,可**重复调用**且不持有状态 | 热重载重放 = 清子树 + 再 stamp 一次 | **要改**:② 是 `stamp(&Doc, ViewId, &Template, &[Binder])`(tmpl.rs:359),而 §0.11 已实测证明 If/Sub 落地后必须换成 `Rc<[Binder]>`(E0521) |
+| 4 | `stamp(&Doc, ViewId, &Template, &Binders)`,可**重复调用**且不持有状态 | 热重载重放 = 清子树 + 再 stamp 一次 | **✅ 已改**(2026-07-22):签名换成 `stamp(&Doc, ViewId, &Template, Rc<[Binder]>)`。提前改是为了不在 S2/S3 落地时回头改所有调用方 |
 | 5 | `TNode::If/Key` **内联子节点数组**(不是独立 Template) | §4.3 的槽位空间规则,直接决定热重载能力面 | **要改**:② 只有 `TNode::Block{slot}`(tmpl.rs:110)。改动代价见 §0.11 |
 | 6 | `StyleDecl` 是**值**,能表达 `Style` 的全部字段 + 类的 base/hover/active/focus 四态 | 静态样式与伪类进数据面(§5.3 第二行) | **一半**:`StyleDecl` 覆盖 `Style` 全部 26 个字段且用解构防漏(tmpl.rs:184–305,做得比本文要求好);**但四态与类索引都没有**——伪类今天在 codegen 侧展开进 `bind_style` 闭包,见 §7.6 |
 | 7 | dev 下 `Template` 可以不是 `'static` | 热注册表里的模板不是 static | **以另一种方式满足**:② 明文裁决用 `Box::leak` 泄漏成 `'static`(tmpl.rs 模块头裁决 1),换 `Copy` + 零分支的热路径。本文 §2.1 的代码骨架已按此改正 |
-| 8(复核新增) | `Template::hot_swappable_with` 要能表达 §5.2 的**子集 + 多对一重映射** | 判据是 ③ 的最终产物 | **不满足**:② 现在是 `self.sig == next.sig`(tmpl.rs:73–75),**逐位全等**,连"少一个槽位""换个位置"都判不能热换。附录 A 说"§5.2 的判据算法在 ② 里已有可运行实现"——**这句话不成立**,S5 要整个重写 `hot_swappable_with` 并重写它那条测试(`hot_swap_judged_by_slot_signature`) |
+| 8(复核新增) | `Template::hot_swappable_with` 要能表达 §5.2 的**子集 + 多对一重映射** | 判据是 ③ 的最终产物 | **✅ 已满足**(2026-07-22,= S5 的主体):新增 `Template::hot_swap_verdict` 返回 `Verdict::{DataOnly{remap}, NeedsRustc{..}}`,实现子集 / 重排 / 多对一;`hot_swappable_with` 降级为它的一个 bit。新增 `remap_slots` 做槽位改写(Dioxus 卡住的那一步),配 `hot_remap_to_old_slot_ids` 端到端测试。**复核对附录 A 那句"判据算法已有可运行实现"的指控成立**——旧实现是逐位全等,而且它那条测试断言的方向是**错的**(fixture `D` 其实是少了一个槽位、注释却写成"新增插值",于是把合法的子集判成了要 rustc),已一并改正 |
 
 **③ 反过来欠 ② 之外的一件事**:`crates/sv-compiler/src/style.rs` 今天产 `TokenStream` setter
 (style.rs:24–29、377),必须改成产 `StyleDecl` 值。这是 S3 的硬前置,

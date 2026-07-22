@@ -64,15 +64,145 @@ pub struct Template {
     pub sig: &'static [SlotSig],
 }
 
+/// 热重载判据的结论。
+///
+/// 语义只有两种,但 `DataOnly` 里那张重映射表是全部的难点所在。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Verdict {
+    /// 只推数据面即可。`remap[新槽位] = 旧槽位下标` ——
+    /// **推过去之前必须按它把新数据里的槽位号改写成旧表下标**,见 [`remap_slots`]。
+    DataOnly { remap: Vec<u16> },
+    /// 必须走 rustc。带上原因,给热通道打日志用(不给原因的话现场只能看到"又全量重编了")
+    NeedsRustc(NeedsRustc),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NeedsRustc {
+    /// 模板 id 变了(新增/改名的模板,旧二进制里没有它的任何闭包)
+    NewTemplate,
+    /// 新模板引用了旧表里找不到的签名 —— 即"写了一个旧二进制没编译过的表达式"
+    NewExpr { slot: u16, sig: SlotSig },
+}
+
 impl Template {
-    /// 新旧模板能否**只换数据面**(不经 rustc)。
+    /// 新旧模板能否**只换数据面**(不经 rustc),以及新槽位号要怎么改写成旧的。
     ///
-    /// 判据是槽位签名逐位相同:槽位的种类与表达式源码 hash 都没变,说明新结构引用的
-    /// 全是旧二进制里已编译的表达式——这正是调研 09 §5.1 里 Dioxus 那条边界的形式化。
-    /// 结构、静态文本、静态样式随便改都不影响它。
-    pub fn hot_swappable_with(&self, next: &Template) -> bool {
-        self.id == next.id && self.sig == next.sig
+    /// # 判据(调研 09 §5.2 / `docs/plans/adr2-3-setup-render-split.md` §5.2)
+    ///
+    /// 新模板引用到的每个槽位签名,都能在旧签名表里找到**一个**同签名的槽位。
+    /// 也就是说新表是旧表的**子集**,而且:
+    /// - **可以少**:旧表里多出来的槽位闲置着,没人引用就没关系;
+    /// - **可以重排**:匹配靠签名不靠下标;
+    /// - **可以多对一**:新模板把 `{count}` 复制成两处,两处都映射到旧表同一个 binder。
+    ///   这是合法的 —— 同一模板里同一个表达式两次出现在词法上完全等价,共用同一个
+    ///   函数体作用域,绑同一个闭包不会错。
+    ///
+    /// # 为什么不能只写 `self.sig == next.sig`
+    ///
+    /// 本函数**之前就是那么写的**,而且它的方案文档里被记成"§5.2 的判据算法已有可
+    /// 运行实现" —— 那句话不成立。逐位全等会把"新增一个静态节点导致后面槽位整体后移"
+    /// 判成需要 rustc,而那恰恰是热重载最常见、最该免 rustc 的一类改动
+    /// (改标记结构)。它连"少一个槽位"都判不过。
+    ///
+    /// # 重映射才是真正的难点
+    ///
+    /// 热通道推过去的数据面是**新编译的**,槽位编号是新编的;而运行中的 app 手里
+    /// 只有**旧的** binders 表。所以推送前必须把新数据里的每个槽位号改写成旧表下标。
+    /// Dioxus 也是卡在这一步。
+    pub fn hot_swap_verdict(&self, next: &Template) -> Verdict {
+        if self.id != next.id {
+            return Verdict::NeedsRustc(NeedsRustc::NewTemplate);
+        }
+        // 旧表的签名索引:同签名多次出现时取**第一个**下标,让多对一映射有确定落点
+        let mut idx: Vec<(SlotSig, u16)> = Vec::with_capacity(self.sig.len());
+        for (i, s) in self.sig.iter().enumerate() {
+            if !idx.iter().any(|(k, _)| k == s) {
+                idx.push((*s, i as u16));
+            }
+        }
+        let mut remap = Vec::with_capacity(next.sig.len());
+        for (i, need) in next.sig.iter().enumerate() {
+            match idx.iter().find(|(k, _)| k == need) {
+                Some((_, old)) => remap.push(*old),
+                None => {
+                    return Verdict::NeedsRustc(NeedsRustc::NewExpr {
+                        slot: i as u16,
+                        sig: *need,
+                    });
+                }
+            }
+        }
+        Verdict::DataOnly { remap }
     }
+
+    /// 旧接口:只回答"能不能免 rustc"。保留是因为大量调用方只关心这一个 bit
+    pub fn hot_swappable_with(&self, next: &Template) -> bool {
+        matches!(self.hot_swap_verdict(next), Verdict::DataOnly { .. })
+    }
+}
+
+/// 按 [`Verdict::DataOnly`] 的重映射表改写一棵新模板节点树里的槽位号。
+///
+/// **这一步漏了就是静默绑错闭包**:新数据面的槽位号是新编的,而运行中的 app
+/// 手里是旧 binders 表 —— 不改写就会拿新号去索引旧表,取到的是别的表达式。
+///
+/// # ⚠️ 本函数**会泄漏内存**,而且是有意的
+///
+/// `TNode` 的 `binds`/`children` 是 `&'static [_]`(见本模块头的裁决 1:
+/// 数据面用 `&'static` 换 `Copy` + 热路径零分支,dev 下靠 `Box::leak` 造出来)。
+/// 改写后的数组必须也是 `'static`,所以这里**每调一次就 leak 一批小数组**。
+///
+/// 量级:一次热重载泄漏"这棵模板树的 binds + children 数组",一个中等组件
+/// 在几 KB 量级 —— 开发时按分钟计的重载频率下可以忽略。
+/// **但它只该出现在 dev 热通道里**;release 的数据面直接来自 `static`,
+/// 根本不需要重映射(槽位号编译期就是对的)。
+///
+/// 之所以不做成"调用方负责 leak":外层返回的 `Vec<TNode>` 可以由调用方处置,
+/// 但内层的 `binds`/`children` 在构造 `TNode` 的那一刻就必须已经是 `'static` 了,
+/// 这个选择躲不掉。要躲只能把 `TNode` 改成 `Cow`,而那正是裁决 1 拒绝的方案。
+pub fn remap_slots(nodes: &[TNode], remap: &[u16]) -> Vec<TNode> {
+    fn map1(slot: u16, remap: &[u16]) -> u16 {
+        match remap.get(slot as usize) {
+            Some(new) => *new,
+            None => {
+                debug_assert!(
+                    false,
+                    "sv-ui::tmpl: 槽位 {slot} 不在重映射表里(表长 {})——                     判据与数据面对不上,保持原号(stamp 时会再逮一次)",
+                    remap.len()
+                );
+                slot
+            }
+        }
+    }
+    nodes
+        .iter()
+        .map(|n| match n {
+            TNode::Elem {
+                kind,
+                label,
+                style,
+                binds,
+                children,
+            } => TNode::Elem {
+                kind: *kind,
+                label,
+                style,
+                // binds/children 要跟着改写,而它们是 &'static —— 只能新建 + leak。
+                // 这是本函数会泄漏的原因,见上面的 ⚠️ 段
+                binds: Box::leak(
+                    binds
+                        .iter()
+                        .map(|b| b.with_slot(map1(b.slot(), remap)))
+                        .collect::<Vec<_>>()
+                        .into_boxed_slice(),
+                ),
+                children: Box::leak(remap_slots(children, remap).into_boxed_slice()),
+            },
+            TNode::Block { slot } => TNode::Block {
+                slot: map1(*slot, remap),
+            },
+        })
+        .collect()
 }
 
 /// 槽位签名:种类 + 表达式源码 hash。由 codegen 产出(现阶段手写于测试)
@@ -138,6 +268,16 @@ impl Bind {
     pub fn slot(self) -> u16 {
         match self {
             Bind::Text(i) | Bind::Style(i) | Bind::Click(i) | Bind::Wire(i) => i,
+        }
+    }
+
+    /// 换个槽位号,种类不变(热重载重映射用,见 [`remap_slots`])
+    pub fn with_slot(self, slot: u16) -> Self {
+        match self {
+            Bind::Text(_) => Bind::Text(slot),
+            Bind::Style(_) => Bind::Style(slot),
+            Bind::Click(_) => Bind::Click(slot),
+            Bind::Wire(_) => Bind::Wire(slot),
         }
     }
 }
@@ -356,9 +496,21 @@ impl Binder {
 ///
 /// 与 codegen 现在直接发射的命令式代码**语义等价**:同一份 UI 两条路建出的
 /// `dump()` 必须逐字节相同(`stamp_matches_imperative` 钉死)。
-pub fn stamp(doc: &Doc, parent: ViewId, tpl: &Template, binders: &[Binder]) {
+/// 按模板数据建树并接线。可**重复调用**、不持有任何状态 ——
+/// 热重载重放 = 清子树 + 再 stamp 一次。
+///
+/// # 为什么是 `Rc<[Binder]>` 而不是 `&[Binder]`
+///
+/// 块槽位(`{#if}`/`{#each}`)的闭包必须是 `'static`:它们进 effect,
+/// 而 effect 活得比这次调用长。闭包内部要对分支体再 stamp 一次子模板,
+/// 于是**它得把 binders 表一起捕获**。借用做不到(E0521:借用的数据逃出了
+/// 它该在的函数),而 `Rc` 克隆一次只是加一个引用计数。
+///
+/// 今天的 `Binder::Wire` 还没走到这一步,但把签名先定成 `Rc<[Binder]>`
+/// 是为了不在 S2/S3 落地时回头改所有调用方 —— 那时表已经在闭包里了。
+pub fn stamp(doc: &Doc, parent: ViewId, tpl: &Template, binders: std::rc::Rc<[Binder]>) {
     for node in tpl.roots {
-        stamp_node(doc, parent, node, binders);
+        stamp_node(doc, parent, node, &binders);
     }
 }
 
@@ -512,7 +664,7 @@ mod tests {
         };
 
         let b = Doc::new();
-        let (_, _sb) = create_root(|| stamp(&b, b.root(), &TPL, &[]));
+        let (_, _sb) = create_root(|| stamp(&b, b.root(), &TPL, std::rc::Rc::from(vec![])));
 
         // dump() **不含样式/回调/focusable**(只有种类+文本+checked+层级),
         // 单靠它对拍会把"样式没设上"这类错放过去 —— 所以再逐节点比 Style
@@ -596,7 +748,7 @@ mod tests {
                     n.update(|v| *v += 1);
                 }),
             ];
-            stamp(&doc, doc.root(), &TPL, &binders);
+            stamp(&doc, doc.root(), &TPL, std::rc::Rc::from(binders.to_vec()));
         });
 
         assert!(doc.dump().contains("计数 0"), "\n{}", doc.dump());
@@ -655,11 +807,11 @@ mod tests {
                     parent,
                     move || open.get(),
                     // 分支体 = 子模板;真实 codegen 里这里是 stamp(子模板)
-                    |d, p| stamp(d, p, &INNER_TPL, &[]),
+                    |d, p| stamp(d, p, &INNER_TPL, std::rc::Rc::from(vec![])),
                     |_, _| {},
                 );
             })];
-            stamp(&doc, doc.root(), &TPL, &binders);
+            stamp(&doc, doc.root(), &TPL, std::rc::Rc::from(binders.to_vec()));
         });
 
         assert!(!doc.dump().contains("展开了"));
@@ -703,11 +855,16 @@ mod tests {
                     move || items.get(),
                     |d, p, item: &String, _i| {
                         let text = item.clone();
-                        stamp(d, p, &ROW_TPL, &[Binder::text(move || text.clone())]);
+                        stamp(
+                            d,
+                            p,
+                            &ROW_TPL,
+                            std::rc::Rc::from(vec![Binder::text(move || text.clone())]),
+                        );
                     },
                 );
             })];
-            stamp(&doc, doc.root(), &TPL, &binders);
+            stamp(&doc, doc.root(), &TPL, std::rc::Rc::from(binders.to_vec()));
         });
 
         let dump = doc.dump();
@@ -789,8 +946,15 @@ mod tests {
             ],
         };
         assert!(!A.hot_swappable_with(&C), "表达式改了不能只推数据");
+        assert!(matches!(
+            A.hot_swap_verdict(&C),
+            Verdict::NeedsRustc(NeedsRustc::NewExpr { slot: 0, .. })
+        ));
 
-        // 槽位数量变了(新增插值)→ 必须重编译
+        // 删掉一个插值(新表是旧表的**子集**)→ **能热换**。
+        // 【这条以前断言的是反的】旧实现写的是 sig 逐位全等,于是这里断言
+        // "不能热换",注释还写成"新增插值" —— 而这个 fixture 其实是**少了**一个槽位。
+        // 判据(方案 §5.2)明说子集合法:旧表里多出来的 binder 闲置着,没人引用就没关系
         static D: Template = Template {
             id: "src/counter.sv#0",
             roots: &[],
@@ -799,7 +963,11 @@ mod tests {
                 hash: 0xabc,
             }],
         };
-        assert!(!A.hot_swappable_with(&D));
+        assert_eq!(
+            A.hot_swap_verdict(&D),
+            Verdict::DataOnly { remap: vec![0] },
+            "删一个插值是纯数据面改动"
+        );
 
         // 不同模板 id 之间不谈热换
         static E: Template = Template {
@@ -808,6 +976,206 @@ mod tests {
             sig: SIG,
         };
         assert!(!A.hot_swappable_with(&E));
+        assert_eq!(
+            A.hot_swap_verdict(&E),
+            Verdict::NeedsRustc(NeedsRustc::NewTemplate)
+        );
+    }
+
+    /// 槽位**重排**与**多对一**都合法 —— 匹配靠签名,不靠下标
+    #[test]
+    fn hot_swap_allows_reorder_and_many_to_one() {
+        static SIG: &[SlotSig] = &[
+            SlotSig {
+                kind: SlotKind::Text,
+                hash: 0xaaa,
+            },
+            SlotSig {
+                kind: SlotKind::Click,
+                hash: 0xbbb,
+            },
+        ];
+        static OLD: Template = Template {
+            id: "t#0",
+            roots: &[],
+            sig: SIG,
+        };
+
+        // 换个顺序
+        static REORDERED: Template = Template {
+            id: "t#0",
+            roots: &[],
+            sig: &[
+                SlotSig {
+                    kind: SlotKind::Click,
+                    hash: 0xbbb,
+                },
+                SlotSig {
+                    kind: SlotKind::Text,
+                    hash: 0xaaa,
+                },
+            ],
+        };
+        assert_eq!(
+            OLD.hot_swap_verdict(&REORDERED),
+            Verdict::DataOnly { remap: vec![1, 0] },
+            "重排要映射回旧下标"
+        );
+
+        // 把 {count} 复制成两份:两个新槽位映射到同一个旧 binder。
+        // 合法的理由是词法等价 —— 同一模板里同一个表达式两次出现,
+        // 共用同一个函数体作用域,绑同一个闭包不会错
+        static DUPLICATED: Template = Template {
+            id: "t#0",
+            roots: &[],
+            sig: &[
+                SlotSig {
+                    kind: SlotKind::Text,
+                    hash: 0xaaa,
+                },
+                SlotSig {
+                    kind: SlotKind::Text,
+                    hash: 0xaaa,
+                },
+                SlotSig {
+                    kind: SlotKind::Click,
+                    hash: 0xbbb,
+                },
+            ],
+        };
+        assert_eq!(
+            OLD.hot_swap_verdict(&DUPLICATED),
+            Verdict::DataOnly {
+                remap: vec![0, 0, 1]
+            },
+            "多对一映射合法:复制一份 {{count}} 不该触发 rustc"
+        );
+
+        // 同种类但 hash 不同 = 不同表达式,不能混
+        static SAME_KIND_NEW_EXPR: Template = Template {
+            id: "t#0",
+            roots: &[],
+            sig: &[SlotSig {
+                kind: SlotKind::Text,
+                hash: 0xccc,
+            }],
+        };
+        assert!(matches!(
+            OLD.hot_swap_verdict(&SAME_KIND_NEW_EXPR),
+            Verdict::NeedsRustc(NeedsRustc::NewExpr { .. })
+        ));
+
+        // hash 相同但种类不同 = 不能混(否则会拿 Click 闭包去当 Text 用)
+        static SAME_HASH_NEW_KIND: Template = Template {
+            id: "t#0",
+            roots: &[],
+            sig: &[SlotSig {
+                kind: SlotKind::Style,
+                hash: 0xaaa,
+            }],
+        };
+        assert!(matches!(
+            OLD.hot_swap_verdict(&SAME_HASH_NEW_KIND),
+            Verdict::NeedsRustc(NeedsRustc::NewExpr { .. })
+        ));
+    }
+
+    /// **重映射才是真正的难点**:新增一个静态节点会让后面的槽位整体后移,
+    /// 而运行中的 app 手里只有旧 binders 表。不改写就会拿新号索引旧表 ——
+    /// 取到的是别的表达式,界面显示错东西且**不 panic**。Dioxus 卡的就是这一步
+    #[test]
+    fn hot_remap_to_old_slot_ids() {
+        static OLD: Template = Template {
+            id: "t#0",
+            roots: &[],
+            sig: &[
+                SlotSig {
+                    kind: SlotKind::Text,
+                    hash: 0x111,
+                },
+                SlotSig {
+                    kind: SlotKind::Click,
+                    hash: 0x222,
+                },
+            ],
+        };
+        // 新版在最前面插了一个**新的**静态节点不会改签名表;真正让槽位后移的是
+        // 在前面插了一个引用**已有表达式**的插值。这里模拟后者:
+        // 新表 = [Click(0x222), Text(0x111)] —— 新号 0/1,旧号 1/0
+        static NEW: Template = Template {
+            id: "t#0",
+            roots: &[
+                TNode::Elem {
+                    kind: ElementKind::Button,
+                    label: "",
+                    style: &[],
+                    // 新数据面用的是**新编的**槽位号
+                    binds: &[Bind::Click(0)],
+                    children: &[],
+                },
+                TNode::Elem {
+                    kind: ElementKind::Text,
+                    label: "",
+                    style: &[],
+                    binds: &[Bind::Text(1)],
+                    children: &[],
+                },
+            ],
+            sig: &[
+                SlotSig {
+                    kind: SlotKind::Click,
+                    hash: 0x222,
+                },
+                SlotSig {
+                    kind: SlotKind::Text,
+                    hash: 0x111,
+                },
+            ],
+        };
+
+        let Verdict::DataOnly { remap } = OLD.hot_swap_verdict(&NEW) else {
+            panic!("应判为可热换");
+        };
+        assert_eq!(remap, vec![1, 0]);
+
+        let remapped = remap_slots(NEW.roots, &remap);
+        // 改写后:Click 用旧号 1、Text 用旧号 0 —— 正好接回旧 binders 表
+        let slots: Vec<Bind> = remapped
+            .iter()
+            .flat_map(|n| match n {
+                TNode::Elem { binds, .. } => binds.to_vec(),
+                TNode::Block { .. } => vec![],
+            })
+            .collect();
+        assert_eq!(slots, vec![Bind::Click(1), Bind::Text(0)]);
+
+        // 真正跑一遍:用**旧顺序**的 binders 表 stamp 改写后的数据面,
+        // 文本必须是旧表 0 号那个闭包的产物。不改写的话这里会取到 Click,
+        // 种类不符 → 静默跳过 → 文本是空的
+        let hits = std::rc::Rc::new(std::cell::Cell::new(0));
+        let h = hits.clone();
+        let binders: std::rc::Rc<[Binder]> = std::rc::Rc::from(vec![
+            Binder::Text(std::rc::Rc::new(|| "来自旧 0 号".to_string())),
+            Binder::Click(std::rc::Rc::new(move || h.set(h.get() + 1))),
+        ]);
+        let doc = Doc::new();
+        let (_, _scope) = sv_reactive::create_root(|| {
+            stamp(
+                &doc,
+                doc.root(),
+                &Template {
+                    id: NEW.id,
+                    roots: Box::leak(remapped.into_boxed_slice()),
+                    sig: OLD.sig,
+                },
+                binders,
+            );
+        });
+        assert!(
+            doc.dump().contains("来自旧 0 号"),
+            "重映射后旧 binder 必须接在正确的位置上;实际:{}",
+            doc.dump()
+        );
     }
 
     /// 槽位对不上时**跳过而不是崩**(release 语义)。
@@ -829,7 +1197,7 @@ mod tests {
             sig: &[],
         };
         let doc = Doc::new();
-        let (_, _s) = create_root(|| stamp(&doc, doc.root(), &TPL, &[]));
+        let (_, _s) = create_root(|| stamp(&doc, doc.root(), &TPL, std::rc::Rc::from(vec![])));
         assert!(
             doc.dump().contains("静态文本还在"),
             "越界槽位应只跳过该位,其余照常建树"
