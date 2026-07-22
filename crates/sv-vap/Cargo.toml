@@ -1,0 +1,15 @@
+[package]
+name = "sv-vap"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+authors.workspace = true
+description = "VAP(Tencent Video Animation Player)素材解析与 RGB+alpha 合成 —— 纯 Rust,零依赖"
+readme = "README.md"
+
+[dependencies]

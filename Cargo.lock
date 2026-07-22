@@ -2890,6 +2890,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "sv-vap"
+version = "0.0.1"
+
+[[package]]
 name = "svg_fmt"
 version = "0.4.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3173,6 +3177,16 @@ dependencies = [
  "js-sys",
  "serde_core",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "vap-gift"
+version = "0.0.1"
+dependencies = [
+ "sv-reactive",
+ "sv-shell",
+ "sv-ui",
+ "sv-vap",
 ]
 
 [[package]]
