@@ -27,11 +27,10 @@ let note = $state(String::from("第一行\n第二行(Enter 换行)"));
   <text font-size="13" fg="#999999">note 长度:{note.chars().count()}</text>
 
   <view style="direction:row; gap:8">
-    <button style="padding:8; radius:6; bg:#3c78ff; fg:#fff"
-            onclick={|| name = "预填文本(外部写入)".to_string()}>外部写入</button>
-    <button style="padding:8; radius:6; bg:#ff3e00; fg:#fff"
-            onclick={|| name = String::new()}>清空</button>
+    <button class="act" onclick={|| name = "预填文本(外部写入)".to_string()}>外部写入</button>
+    <button class="danger" onclick={|| name = String::new()}>清空</button>
   </view>
+  <text font-size="13" fg="#666677">上面两个按钮带 :focus 样式 —— Tab 过去看边框(键盘用户的位置反馈)</text>
 
   {#if !last_submit.is_empty()}
     <text fg="#0a7d32">上次提交:{last_submit}</text>
@@ -43,3 +42,22 @@ let note = $state(String::from("第一行\n第二行(Enter 换行)"));
     <text font-size="14" fg="#999999">提交历史为空,Enter 试试</text>
   {/each}
 </view>
+
+<style>
+.act {
+  padding: 8;
+  border-radius: 6;
+  background: #3c78ff;
+  color: #fff;
+  &:hover { background: #2f66e6; }
+  &:focus { border: 2 solid #0a2f8f; }
+}
+.danger {
+  padding: 8;
+  border-radius: 6;
+  background: #ff3e00;
+  color: #fff;
+  &:hover { background: #e63700; }
+  &:focus { border: 2 solid #7a1d00; }
+}
+</style>

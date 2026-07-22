@@ -142,20 +142,26 @@ pub fn on_key(el: &Ident, handler: TokenStream) -> TokenStream {
     }
 }
 
-/// focus/blur 合成进单一 `set_on_focus_change`(sv-ui 只有一个回调槽)。
-/// 缺席的一侧补空闭包
+/// focus/blur 合成进单一 `set_on_focus_change`(sv-ui 只有一个回调槽 ——
+/// 分开设会互相覆盖,这也是本函数存在的理由)。缺席的一侧补空闭包;
+/// `pseudo_state` 是 `:focus` 伪类的状态信号(有则先写它再调用户回调)
 pub fn focus_change(
     el: &Ident,
     on_focus: Option<TokenStream>,
     on_blur: Option<TokenStream>,
+    pseudo_state: Option<TokenStream>,
 ) -> TokenStream {
     let f = on_focus.map_or(quote! { let __uf = || {}; }, |e| quote! { let __uf = #e; });
     let b = on_blur.map_or(quote! { let __ub = || {}; }, |e| quote! { let __ub = #e; });
+    let set_state = pseudo_state.map_or(TokenStream::new(), |s| quote! { #s.set(__f); });
     quote! {
         {
             #f
             #b
-            __doc.set_on_focus_change(#el, move |__f| if __f { __uf(); } else { __ub(); });
+            __doc.set_on_focus_change(#el, move |__f| {
+                #set_state
+                if __f { __uf(); } else { __ub(); }
+            });
         }
     }
 }
@@ -255,6 +261,10 @@ mod tests {
         // bind:value 是"effect 写 + on_input 读"一对,缺一边就是单向
         let bv = s(bind_value(&el, quote! { sig }));
         assert!(bv.contains("set_input_value") && bv.contains("set_on_input"));
+
+        // focus_change 带伪类状态时先写状态再调用户回调
+        let with_state = s(focus_change(&el, None, None, Some(quote! { __fc })));
+        assert!(with_state.contains("__fc . set (__f)"));
 
         // aria-label 静态/响应式两种形态
         assert!(!s(aria_label(&el, quote! { "x" }, false)).contains("effect"));

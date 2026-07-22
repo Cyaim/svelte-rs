@@ -1087,24 +1087,71 @@ pub fn scrollbar_thumb(track: f32, viewport: f32, content: f32, offset: f32) -> 
 /// 滚动条绘制:shell 合成,不入场景树(egui 同构;调研 22 §2.4)。
 /// v0 纵向 thumb only(横向 API 留通道);宽 6 逻辑 px、右缘内贴 2px
 pub fn paint_scrollbars(doc: &Doc, areas: &[ScrollArea], painter: &mut dyn Painter, scale: f32) {
-    const BAR_W: f32 = 6.0;
-    const MARGIN: f32 = 2.0;
     for a in areas {
-        let track = a.viewport.h - MARGIN * 2.0;
-        let inner_h = a.viewport.h; // 近似:track 按 border-box 高(视觉够用)
         let (_, sy) = doc.scroll_of(a.id);
-        let Some((pos, len)) = scrollbar_thumb(track, inner_h, a.content.1, sy) else {
+        let Some((pos, len)) = vbar_thumb(a, sy) else {
             continue;
         };
+        let (bx, bw) = vbar_x(a);
         painter.fill_rounded_rect(
-            (a.viewport.x + a.viewport.w - BAR_W - MARGIN) * scale,
-            (a.viewport.y + MARGIN + pos) * scale,
-            BAR_W * scale,
+            bx * scale,
+            (a.viewport.y + SCROLLBAR_MARGIN + pos) * scale,
+            bw * scale,
             len * scale,
-            BAR_W / 2.0 * scale,
+            bw / 2.0 * scale,
             Color::rgba(120, 120, 134, 140),
         );
     }
+}
+
+/// 滚动条几何常量(绘制与命中共用一套,拖起来才不会偏)
+const SCROLLBAR_W: f32 = 6.0;
+const SCROLLBAR_MARGIN: f32 = 2.0;
+/// 命中容差:6px 的条太细,指针差一两像素就抓空(Fitts 定律,业界普遍加宽)
+const SCROLLBAR_GRAB_PAD: f32 = 4.0;
+
+/// 纵向滚动条的 x 与宽(逻辑 px)
+fn vbar_x(a: &ScrollArea) -> (f32, f32) {
+    (
+        a.viewport.x + a.viewport.w - SCROLLBAR_W - SCROLLBAR_MARGIN,
+        SCROLLBAR_W,
+    )
+}
+
+/// 纵向 thumb 的 (轨内偏移, 长度);内容未溢出返回 None
+fn vbar_thumb(a: &ScrollArea, sy: f32) -> Option<(f32, f32)> {
+    let track = a.viewport.h - SCROLLBAR_MARGIN * 2.0;
+    // 近似:track 按 border-box 高(视觉够用)
+    scrollbar_thumb(track, a.viewport.h, a.content.1, sy)
+}
+
+/// 点(逻辑坐标)命中了哪个纵向 thumb —— 返回 (滚动容器, 指针在 thumb 内的偏移)。
+/// 抓住 thumb 的**哪一点**要记住,否则拖动时 thumb 会跳到指针中心(S4)
+pub fn scrollbar_grab(doc: &Doc, areas: &[ScrollArea], x: f32, y: f32) -> Option<(ViewId, f32)> {
+    // 后画的在上层:与绘制顺序一致地反向找
+    areas.iter().rev().find_map(|a| {
+        let (_, sy) = doc.scroll_of(a.id);
+        let (pos, len) = vbar_thumb(a, sy)?;
+        let (bx, bw) = vbar_x(a);
+        let top = a.viewport.y + SCROLLBAR_MARGIN + pos;
+        let in_x = x >= bx - SCROLLBAR_GRAB_PAD && x <= bx + bw + SCROLLBAR_GRAB_PAD;
+        let in_y = y >= top && y <= top + len;
+        (in_x && in_y).then_some((a.id, y - top))
+    })
+}
+
+/// 拖动中:指针 y → 新的纵向 offset(按轨道/内容比例反算,并钳到范围内)。
+/// `grab` 是按下时记住的"指针在 thumb 内的偏移"
+pub fn scrollbar_drag_offset(areas: &[ScrollArea], id: ViewId, y: f32, grab: f32) -> Option<f32> {
+    let a = areas.iter().find(|a| a.id == id)?;
+    let track = a.viewport.h - SCROLLBAR_MARGIN * 2.0;
+    let (_, len) = scrollbar_thumb(track, a.viewport.h, a.content.1, 0.0)?;
+    let travel = track - len;
+    if travel <= 0.0 {
+        return Some(0.0);
+    }
+    let top = (y - grab - (a.viewport.y + SCROLLBAR_MARGIN)).clamp(0.0, travel);
+    Some((top / travel * a.max.1).clamp(0.0, a.max.1))
 }
 
 /// 滚轮路由(纯函数,离屏可测;调研 22 §2.4):命中最上层可滚容器,

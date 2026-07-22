@@ -976,6 +976,56 @@ let count = $state(0i32);
 
     /// `<textarea>`:与 `<input>` 共用全部输入属性,额外认 rows;
     /// rows 用错地方要报错(而不是静默忽略)
+    /// `:focus` 伪类(R1 档 B):走焦点链而不是指针;与 onfocus/onblur
+    /// **合成一次**设入(sv-ui 只有一个回调槽,分开设会互相覆盖);
+    /// 元素自动设为可获焦,否则样式永远不生效
+    #[test]
+    fn focus_pseudo_class_compiles() {
+        let src = r#"<script></script>
+<view>
+  <view class="card" onfocus={|| {}} />
+</view>
+<style>
+.card { padding: 8; }
+.card:focus { background: #eef; }
+</style>
+"#;
+        let code = compile_sv(src, "c").expect("应编译成功");
+        assert!(
+            code.contains("set_focusable"),
+            ":focus 应自动设可获焦:
+{code}"
+        );
+        assert_eq!(
+            code.matches("set_on_focus_change").count(),
+            1,
+            ":focus 与 onfocus 必须合成一次设入(否则互相覆盖):
+{code}"
+        );
+        assert!(
+            code.contains("__fc"),
+            "应有 :focus 状态信号:
+{code}"
+        );
+        syn::parse_file(&code).unwrap();
+
+        // 嵌套形态 &:focus 同样认
+        let nested = compile_sv(
+            "<script></script><view class=\"b\" /><style>.b { gap: 2; &:focus { gap: 4; } }</style>",
+            "c",
+        )
+        .expect("嵌套 &:focus 应编译成功");
+        assert!(nested.contains("__fc"));
+
+        // 未知伪类仍然硬报错(错误信息要提到现在支持哪些)
+        let err = compile_sv(
+            "<script></script><view class=\"b\" /><style>.b:disabled { gap: 1; }</style>",
+            "c",
+        )
+        .expect_err(":disabled 尚未支持");
+        assert!(err.message.contains(":focus"), "{}", err.message);
+    }
+
     #[test]
     fn textarea_compiles() {
         let src = r#"<script>

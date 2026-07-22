@@ -523,6 +523,7 @@ impl Cg<'_> {
         let mut hover_static: Vec<TokenStream> = Vec::new();
         let mut hover_conds: Vec<(TokenStream, TokenStream)> = Vec::new();
         let mut active_static: Vec<TokenStream> = Vec::new();
+        let mut focus_static: Vec<TokenStream> = Vec::new();
         // 元素类型规则打底(specificity 直觉:元素 < 类)
         let tag_name = match tag {
             Tag::View => "view",
@@ -542,6 +543,9 @@ impl Cg<'_> {
             if let Some(a) = &entry.active {
                 active_static.push(a.clone());
             }
+            if let Some(f) = &entry.focus {
+                focus_static.push(f.clone());
+            }
         }
         for attr in attrs.iter().filter(|a| a.name == "class") {
             match &attr.value {
@@ -560,6 +564,9 @@ impl Cg<'_> {
                         }
                         if let Some(a) = &entry.active {
                             active_static.push(a.clone());
+                        }
+                        if let Some(f) = &entry.focus {
+                            focus_static.push(f.clone());
                         }
                     }
                 }
@@ -679,10 +686,31 @@ impl Cg<'_> {
 
         let has_hover = !hover_static.is_empty() || !hover_conds.is_empty();
         let has_active = !active_static.is_empty();
-        let has_state = has_hover || has_active;
+        let has_focus = !focus_static.is_empty();
+        let has_state = has_hover || has_active || has_focus;
         // 用户自己的指针回调(有 :hover 时与内部状态接线合成,避免互相覆盖)
         let user_enter = attrs.iter().find(|a| a.name == "onpointerenter");
         let user_leave = attrs.iter().find(|a| a.name == "onpointerleave");
+        // 焦点回调同理:sv-ui 只有一个 focus_change 槽,`:focus` 与
+        // onfocus/onblur 必须合成一次设入
+        let user_focus_attr = attrs.iter().find(|a| a.name == "onfocus");
+        let user_blur_attr = attrs.iter().find(|a| a.name == "onblur");
+        let focus_expr = |attr: Option<&Attr>| -> Result<Option<TokenStream>, CompileError> {
+            let Some(a) = attr else { return Ok(None) };
+            let AttrValue::Expr(e) = &a.value else {
+                return Err(CompileError::at_offset(
+                    self.source,
+                    a.offset,
+                    "事件处理器应为 {闭包表达式}",
+                ));
+            };
+            Ok(Some(self.expr(e, scope, true)?.to_token_stream()))
+        };
+        let (user_focus_expr, user_blur_expr) = if has_focus {
+            (focus_expr(user_focus_attr)?, focus_expr(user_blur_attr)?)
+        } else {
+            (None, None)
+        };
         if class_conds.is_empty() && !has_state {
             if !style_setters.is_empty() {
                 // 静态样式:创建时设置一次,零 effect
@@ -702,6 +730,12 @@ impl Cg<'_> {
                 .map(|(c, h)| quote! { if #c && __hv.get() { #h } });
             let hover_block = if has_hover {
                 quote! { if __hv.get() { #(#hover_static)* } #(#hover_arms)* }
+            } else {
+                TokenStream::new()
+            };
+            // 声明序按 CSS 惯例 L-V-F-H-A::focus 垫底,悬停/按压可以盖它
+            let focus_block = if has_focus {
+                quote! { if __fc.get() { #(#focus_static)* } }
             } else {
                 TokenStream::new()
             };
@@ -759,6 +793,24 @@ impl Cg<'_> {
             } else {
                 TokenStream::new()
             };
+            let fc_decl = if has_focus {
+                quote! { let __fc = ::sv_reactive::state(false); }
+            } else {
+                TokenStream::new()
+            };
+            // `:focus` 要能触发,元素必须可获焦 —— 与 onkeydown 自动设位同理
+            // (floem 教训:不自动设位,样式永远不生效,而且查不出原因)
+            let fc_wiring = if has_focus {
+                let f = user_focus_expr.clone();
+                let b = user_blur_expr.clone();
+                let change = emit::focus_change(&el, f, b, Some(quote! { __fc }));
+                quote! {
+                    __doc.set_focusable(#el, true);
+                    #change
+                }
+            } else {
+                TokenStream::new()
+            };
             let ac_wiring = if has_active {
                 quote! {
                     __doc.set_on_pointer_down(#el, move || __ac.set(true));
@@ -771,15 +823,18 @@ impl Cg<'_> {
                 {
                     #hv_decl
                     #ac_decl
+                    #fc_decl
                     ::sv_ui::bind_style(&__doc, #el, move |s| {
                         #style_setters
                         #(#arms)*
+                        #focus_block
                         #hover_block
                         #active_block
                         #(#style_directives)*
                     });
                     #wiring
                     #ac_wiring
+                    #fc_wiring
                 }
             });
         }
@@ -788,7 +843,7 @@ impl Cg<'_> {
         //      与 :hover 的 __ue/__ul 合成同款,避免互相覆盖)----
         let user_focus = attrs.iter().find(|a| a.name == "onfocus");
         let user_blur = attrs.iter().find(|a| a.name == "onblur");
-        if user_focus.is_some() || user_blur.is_some() {
+        if !has_focus && (user_focus.is_some() || user_blur.is_some()) {
             // 词汇表按"有没有用户闭包"收参(缺席的一侧它补空闭包);
             // `.sv` 侧的表达式先过 runes 改写
             let handler = |attr: Option<&Attr>| -> Result<Option<TokenStream>, CompileError> {
@@ -804,7 +859,7 @@ impl Cg<'_> {
             };
             let f = handler(user_focus)?;
             let b = handler(user_blur)?;
-            ts.extend(emit::focus_change(&el, f, b));
+            ts.extend(emit::focus_change(&el, f, b, None));
         }
 
         // ---- 事件 / 绑定 / 附着 / 过渡 ----

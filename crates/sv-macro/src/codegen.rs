@@ -189,7 +189,8 @@ fn gen_attrs(attrs: &[Attr], var: &Ident) -> TokenStream {
     };
     let (focus, blur) = (find(AttrKind::OnFocus), find(AttrKind::OnBlur));
     if focus.is_some() || blur.is_some() {
-        ts.extend(emit::focus_change(var, focus, blur));
+        // 宏前端没有 `<style>` 块,因而没有 `:focus` 伪类状态要写
+        ts.extend(emit::focus_change(var, focus, blur, None));
     }
     ts
 }

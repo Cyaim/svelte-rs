@@ -100,7 +100,7 @@ Alpha accepts a number (`0.5`) or a percentage (`50%`).
 
 ## Nesting and state pseudo-classes
 
-CSS nesting is supported in exactly one form: `&:hover` / `&:active` inside a rule. The standalone forms `.btn:hover { }` / `.btn:active { }` work too. Other pseudo-classes (`:focus`, `:disabled`) are a compile error, scheduled for C2 with the keyboard focus chain.
+CSS nesting is supported in exactly one form: `&:hover` / `&:active` / `&:focus` inside a rule. The standalone forms `.btn:hover { }` and friends work too. Other pseudo-classes (e.g. `:disabled`) are a compile error, scheduled with the disabled state.
 
 ```svelte
 <style>
@@ -109,11 +109,14 @@ CSS nesting is supported in exactly one form: `&:hover` / `&:active` inside a ru
   cursor: pointer;
   &:hover  { background-color: orange; }
   &:active { opacity: 0.7; }
+  &:focus  { border: 2 solid #0a2f8f; }
 }
 </style>
 ```
 
-There is no selector matching at runtime. For each element that has a `:hover` rule, the compiler generates a private boolean signal and wires it to the element's pointer-enter/leave callbacks; `:active` gets a second bit wired to pointer-down/up. The element's whole style becomes one reactive closure (`bind_style`) that reapplies base declarations, then hover, then active — so the pressed state wins, matching CSS LVHA ordering. Your own `onpointerenter`/`onpointerleave` handlers are merged with the internal wiring, not overwritten.
+There is no selector matching at runtime. For each element that has a `:hover` rule, the compiler generates a private boolean signal and wires it to the element's pointer-enter/leave callbacks; `:active` gets a second bit wired to pointer-down/up; `:focus` gets a third, wired to the **focus chain** rather than the pointer. The element's whole style becomes one reactive closure (`bind_style`) reapplying base, then focus, then hover, then active — matching CSS L-V-F-H-A ordering, so the pressed state wins. Your own `onpointerenter`/`onpointerleave` and `onfocus`/`onblur` handlers are **merged** with the internal wiring, never overwritten — sv-ui has exactly one slot per callback, so setting them separately would clobber each other.
+
+An element with a `:focus` rule is made **focusable automatically** (same reasoning as `onkeydown`): without that, the style would silently never apply.
 
 ## Inheritance
 
@@ -131,7 +134,7 @@ view { color: #223344; }  /* every text below inherits this unless overridden */
 **This is a deliberate difference from the web.** There is no specificity counting and no `!important` — within a component, what wins is declaration order plus a fixed channel priority:
 
 ```
-element rule < class (in class="a b" order) < inline style="" < class: conditional < :hover < :active < style: directive
+element rule < class (in class="a b" order) < inline style="" < class: conditional < :focus < :hover < :active < style: directive
 ```
 
 This matches CSS's own tiebreak *within* equal specificity, and Svelte itself flattens specificity with `:where()` — the mental model transfers. The ultimate override is the `style:` directive. Rationale in ADR-8, [../DESIGN.md](../DESIGN.md) (Chinese).

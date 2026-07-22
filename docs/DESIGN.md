@@ -351,7 +351,13 @@ sv-compiler / sv-macro / sv-build)**空闲**;`runa`、`sylph` 被占。
   双后端(CPU 矩形交集弃 Mask、vello push_layer 绕 issue #1198)、
   `Style.overflow` + 节点内 scroll 真源 + content_override、place 平移/clip
   传播/Placed.clip + ScrollArea 旁路、滚轮 + 最近可滚祖先滚动链(route_wheel
-  纯函数离屏可测)、滚动条合成绘制(只绘不拖,thumb 几何纯函数)、
+  纯函数离屏可测)、滚动条合成绘制(thumb 几何纯函数)
+  ——**✅ 2026-07-22 S4 拖拽落地**:`scrollbar_grab`(命中带 4px 容差,
+  6px 的条抓不住是 Fitts 定律的老问题)+ `scrollbar_drag_offset`(按轨道/
+  内容比例反算并钳制,**记住抓点偏移**所以 thumb 不跳到指针中心);
+  thumb 是 shell 合成绘制、不在场景树里,故命中要在树命中之前拦一道,
+  否则会穿透去点底下的内容;桌面无显式指针捕获,按住期间一直跟指针、
+  松开即止,与原生一致、
   `onscroll`/`bind:scrolly`(链式保留)双前端、virtual_scroll 桥(100k 行
   虚拟高度接真实滚轮);**留档 B**:S4 thumb 拖拽 + 指针捕获、S6 平滑/惯性、
   触摸滚动、overflow-x/y 按轴拆分;

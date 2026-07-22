@@ -23,7 +23,8 @@ pub use paint::{
 pub use render::{
     Layout, OverlayRegion, Placed, Rect, ScrollArea, hit_click_target, ime_caret_rect,
     input_caret_at, input_caret_line_move, layout_full_cached, layout_tree, layout_tree_full,
-    overlay_click_gate, paint_scrollbars, paint_tree, render_frame, route_wheel, scrollbar_thumb,
+    overlay_click_gate, paint_scrollbars, paint_tree, render_frame, route_wheel,
+    scrollbar_drag_offset, scrollbar_grab, scrollbar_thumb,
 };
 pub use text::{FontHandle, caret_index_at, caret_x, selection_rects};
 // ShellError 定义在下方(与窗口/呈现代码同处),此处不重复导出
@@ -172,6 +173,10 @@ struct App {
     pressed: Option<ViewId>,
     /// 文本拖选中的输入框(按下时记,松开清;Placed 是 Copy 快照)
     drag_input: Option<(ViewId, Placed)>,
+    /// 滚动条拖动中的容器 + 按下时指针在 thumb 内的偏移(S4)。
+    /// 桌面没有显式指针捕获:按住期间一直跟指针,松开即止 —— 与拖出控件
+    /// 外仍继续滚的原生行为一致
+    drag_scroll: Option<(ViewId, f32)>,
     /// 连击串:(上次按下时刻, 物理坐标, 第几击)——双击选词/三击全选。
     /// winit 不给点击计数,阈值自持:500ms + 4 物理 px(平台惯例中值)
     last_click: Option<(std::time::Instant, (f64, f64), u32)>,
@@ -670,6 +675,19 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = (position.x, position.y);
+                // 滚动条拖动优先于文本拖选(两者不会同时进入)
+                if let Some((id, grab)) = self.drag_scroll
+                    && let Some(ws) = &self.win
+                {
+                    let ly = (position.y / ws.window.scale_factor()) as f32;
+                    if let Some(off) =
+                        scrollbar_drag_offset(&self.layout.scroll_areas, id, ly, grab)
+                    {
+                        let (sx, _) = self.doc.scroll_of(id);
+                        self.doc.set_scroll(id, sx, off);
+                    }
+                    return;
+                }
                 // 拖选:按住左键在输入框上移动 = 扩选(anchor 停在按下处)。
                 // 指针未捕获,拖出控件外仍跟随——与桌面文本框一致
                 if let Some((id, p)) = self.drag_input
@@ -780,6 +798,14 @@ impl ApplicationHandler<UserEvent> for App {
                     self.sync_ime();
                     return;
                 }
+                // 滚动条 thumb 优先(S4):它是 shell 合成绘制的,不在场景树里,
+                // 所以必须在命中树之前拦一道,否则会穿透去点底下的内容
+                if let Some((id, grab)) =
+                    scrollbar_grab(&self.doc, &self.layout.scroll_areas, lx, ly)
+                {
+                    self.drag_scroll = Some((id, grab));
+                    return;
+                }
                 self.pressed = self
                     .layout
                     .placed
@@ -842,6 +868,7 @@ impl ApplicationHandler<UserEvent> for App {
                 ..
             } => {
                 self.drag_input = None;
+                self.drag_scroll = None;
                 if let Some(id) = self.pressed.take()
                     && let Some(h) = self.doc.pointer_up_handler(id)
                 {
@@ -876,6 +903,7 @@ pub fn run_app(
         hovered: None,
         pressed: None,
         drag_input: None,
+        drag_scroll: None,
         last_click: None,
         mods: ModifiersState::empty(),
         ime_allowed: false,
@@ -1824,6 +1852,59 @@ cd",
         // 超长内容:thumb 不小于 24
         let (_, len) = scrollbar_thumb(200.0, 200.0, 100_000.0, 0.0).unwrap();
         assert_eq!(len, 24.0);
+    }
+
+    /// S4 验收:滚动条 thumb 拖动(命中 → 按比例反算 offset → 钳制)。
+    /// thumb 是 shell 合成绘制的,不在场景树里,所以命中要单独一条通道
+    #[test]
+    fn scrollbar_thumb_drag() {
+        let (doc, container, _rows) = scroll_doc();
+        let layout = layout_tree_full(&doc, 480.0, 400.0);
+        let a = *layout
+            .scroll_areas
+            .iter()
+            .find(|a| a.id == container)
+            .expect("应有滚动区");
+
+        // 条在容器右缘内侧;点内容区中间不该抓到 thumb
+        let miss = scrollbar_grab(
+            &doc,
+            &layout.scroll_areas,
+            a.viewport.x + 10.0,
+            a.viewport.y + 10.0,
+        );
+        assert!(miss.is_none(), "内容区不该抓到滚动条");
+
+        // 抓 thumb 顶部附近
+        let bar_x = a.viewport.x + a.viewport.w - 5.0;
+        let (id, grab) = scrollbar_grab(&doc, &layout.scroll_areas, bar_x, a.viewport.y + 4.0)
+            .expect("thumb 顶部应可抓");
+        assert_eq!(id, container);
+        assert!(grab >= 0.0);
+
+        // 往下拖:offset 增大且钳在 max 内
+        let off = scrollbar_drag_offset(&layout.scroll_areas, id, a.viewport.y + 60.0, grab)
+            .expect("拖动应给出 offset");
+        assert!(
+            off > 0.0 && off <= a.max.1,
+            "offset 应在 (0, max]:{off}/{}",
+            a.max.1
+        );
+
+        // 拖过头钳到底;往回拖过头钳到 0
+        let bottom =
+            scrollbar_drag_offset(&layout.scroll_areas, id, a.viewport.y + 9999.0, grab).unwrap();
+        assert_eq!(bottom, a.max.1, "拖过底应钳到 max");
+        let top =
+            scrollbar_drag_offset(&layout.scroll_areas, id, a.viewport.y - 9999.0, grab).unwrap();
+        assert_eq!(top, 0.0, "拖过顶应钳到 0");
+
+        // 抓点偏移被记住:同一指针位置、不同抓点 → 不同 offset
+        let (_, grab_mid) = scrollbar_grab(&doc, &layout.scroll_areas, bar_x, a.viewport.y + 20.0)
+            .expect("thumb 中部应可抓");
+        let off_mid =
+            scrollbar_drag_offset(&layout.scroll_areas, id, a.viewport.y + 60.0, grab_mid).unwrap();
+        assert!(off_mid < off, "抓得靠下,同一指针位置应滚得更少(thumb 不跳)");
     }
 
     /// S5 验收:virtual_list + virtual_scroll 由 route_wheel 真实输入驱动
