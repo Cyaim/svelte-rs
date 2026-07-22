@@ -64,8 +64,9 @@ pub fn scroll_y_to(doc: &Doc, node: ViewId, target: f32) {
             dur_ms: SCROLL_MS,
         });
     });
-    // 立刻 bump:动画尚未起步,但要先请求一帧把循环带起来
-    doc.bump();
+    // 立刻 bump:动画尚未起步,但要先请求一帧把循环带起来。
+    // 平滑滚动逐帧推进走 set_scroll/update_style,各自定级
+    doc.bump(crate::dirty::DirtyItem::Position { id: node });
 }
 
 /// 某容器**正在进行中**的滚动目标(没有则取当前偏移)。

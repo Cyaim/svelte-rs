@@ -17,6 +17,7 @@ use slotmap::{SlotMap, new_key_type};
 use sv_reactive::{RootHandle, create_root, derived, effect, on_cleanup, untrack};
 
 pub mod anim;
+pub mod dirty;
 pub mod focus;
 pub mod input;
 pub mod overlay;
@@ -373,6 +374,9 @@ pub struct DocumentInner {
     pub focused: Option<ViewId>,
     version: u64,
     on_mutate: Option<Box<dyn Fn()>>,
+    /// 本帧的变更日志(见 [`dirty`])。渲染壳 `take_dirty` 走;
+    /// 没人取就靠上限兜底,不会无限涨
+    dirty: dirty::DirtyLog,
 }
 
 /// 场景树句柄。`Clone` 共享同一棵树,可自由塞进事件闭包
@@ -419,13 +423,21 @@ impl Doc {
             focused: None,
             version: 0,
             on_mutate: None,
+            dirty: dirty::DirtyLog::default(),
         })))
     }
 
-    fn bump(&self) {
+    /// 版本 +1 并记一条**分级过的**变更。
+    ///
+    /// 参数不是可选的:漏了分级就编译不过。前一版设计是"事后按写入口查表",
+    /// 数了一遍才发现全仓有 34 个 `bump` 点而人工整理的表只覆盖了 26 个 ——
+    /// 漏一个就画错一帧,且没有任何报错。把它挪进类型系统之后,
+    /// "新增写方法忘了定级"从线上 bug 变成编译错误。
+    fn bump(&self, item: dirty::DirtyItem) {
         let cb = {
             let mut inner = self.0.borrow_mut();
             inner.version += 1;
+            inner.dirty.push(item);
             // 借用释放后再调回调,回调里可以继续操作树
             inner.on_mutate.take()
         };
@@ -437,6 +449,30 @@ impl Doc {
 
     pub fn version(&self) -> u64 {
         self.0.borrow().version
+    }
+
+    /// 取走并清空这一帧的变更日志。渲染壳每帧调一次。
+    ///
+    /// 没有消费者时日志靠 [`dirty::DIRTY_LOG_CAP`] 兜底(丢弃 + 置
+    /// `overflowed`),所以离屏渲染、单测、直调布局这些没有渲染壳的场景
+    /// 不会无限吃内存 —— 代价只是它们始终走全量,而它们本来就走全量。
+    pub fn take_dirty(&self) -> dirty::DirtyLog {
+        std::mem::take(&mut self.0.borrow_mut().dirty)
+    }
+
+    /// 某个节点的 `set_text` 到底是 Measure 还是 Paint —— **取决于 kind**。
+    ///
+    /// 同一个写方法对 Text/Button 进测量,对 TextInput/Checkbox 完全不进:
+    /// 前者的尺寸就是文本尺寸,后者的测量恒定(输入框 `200 × 行高×rows`、
+    /// 复选框 `字号见方`)。**所以分级必须读 kind,不能只看方法名。**
+    /// 而且只能在**记录时**读 —— 节点删掉之后 kind 就查不回来了。
+    fn text_dirty(inner: &DocumentInner, id: ViewId) -> dirty::DirtyItem {
+        match inner.nodes.get(id).map(|n| n.kind) {
+            // 输入框的 value 复用 text 字段;测量与内容无关。
+            // 【做 auto-size input 时这一条要改成 Measure】
+            Some(ElementKind::TextInput) | Some(ElementKind::Checkbox) => dirty::DirtyItem::Paint,
+            _ => dirty::DirtyItem::Measure { id },
+        }
     }
 
     /// 无障碍名称覆盖(`aria-label` 编译目标;空串清除)
@@ -452,7 +488,8 @@ impl Doc {
             }
             n.accessible_label = new;
         }
-        self.bump();
+        // a11y 名称不进布局也不进绘制几何
+        self.bump(dirty::DirtyItem::Paint);
     }
 
     /// 本树的身份标识(布局/绘制缓存键;同一棵树的所有 Doc 克隆同值)
@@ -505,7 +542,10 @@ impl Doc {
             content_override: None,
             accessible_label: None,
         });
-        self.bump();
+        // **游离节点**:还没 append,不在任何父的 children 里,布局上什么都不做。
+        // 显式定为 Paint 而不是漏掉,是因为一次 `{#each}` 建表会 create+append
+        // 各一条 —— 若这里也记结构脏,日志预算白白少一半、且每条都是假的
+        self.bump(dirty::DirtyItem::Paint);
         id
     }
 
@@ -538,21 +578,35 @@ impl Doc {
     }
 
     pub fn append(&self, parent: ViewId, child: ViewId) {
-        {
+        let from = {
             let mut inner = self.0.borrow_mut();
-            if let Some(old_parent) = inner.nodes[child].parent {
-                let op = old_parent;
+            let from = inner.nodes[child].parent;
+            if let Some(op) = from {
                 inner.nodes[op].children.retain(|c| *c != child);
             }
             inner.nodes[child].parent = Some(parent);
             inner.nodes[parent].children.push(child);
-        }
-        self.bump();
+            from
+        };
+        // **旧父必须现在就记下来** —— 日志被消费时 Doc 里只剩新父了,
+        // 消费端无从知道该把节点从哪儿摘走(taffy 的 `add_child` 不摘旧父,
+        // 于是同一个节点会挂在两个父下、被布局两次)
+        self.bump(dirty::DirtyItem::Structure {
+            id: child,
+            from,
+            to: Some(parent),
+        });
+        // 换了父就可能换了继承字号:子树里所有"自己没设字号"的叶子的测量都变了,
+        // 而它们自己一个字段都没动。这条与 `set_style(font_size)` 是同一条路径,
+        // 只记结构会漏掉它
+        self.bump(dirty::DirtyItem::InheritFontSize {
+            subtree_root: child,
+        });
     }
 
     /// 摘除并递归销毁整棵子树
     pub fn remove(&self, id: ViewId) {
-        let blur_cb = {
+        let (blur_cb, parent) = {
             let mut inner = self.0.borrow_mut();
             // 被删子树含焦点节点:清焦点并留住失焦回调(否则 if_block 重建
             // 会留下悬空焦点)。回调在借用释放后再调
@@ -571,7 +625,8 @@ impl Doc {
                     inner.focused = None;
                 }
             }
-            if let Some(p) = inner.nodes.get(id).and_then(|n| n.parent) {
+            let parent = inner.nodes.get(id).and_then(|n| n.parent);
+            if let Some(p) = parent {
                 inner.nodes[p].children.retain(|c| *c != id);
             }
             fn drop_subtree(inner: &mut DocumentInner, id: ViewId) {
@@ -582,12 +637,18 @@ impl Doc {
                 }
             }
             drop_subtree(&mut inner, id);
-            blur_cb
+            (blur_cb, parent)
         };
         if let Some(cb) = blur_cb {
             cb(false);
         }
-        self.bump();
+        // `to: None` = 删除。父在借用块里就取好了(出了那个块节点已从
+        // slotmap 消失,`nodes.get(id)` 只会返回 None)
+        self.bump(dirty::DirtyItem::Structure {
+            id,
+            from: parent,
+            to: None,
+        });
     }
 
     /// 清空容器的所有子节点(if/each 块重建用)
@@ -605,7 +666,7 @@ impl Doc {
     }
 
     pub fn set_text(&self, id: ViewId, text: &str) {
-        {
+        let item = {
             let mut inner = self.0.borrow_mut();
             let Some(n) = inner.nodes.get_mut(id) else {
                 return;
@@ -614,8 +675,9 @@ impl Doc {
                 return;
             }
             n.text = text.to_string();
-        }
-        self.bump();
+            Self::text_dirty(&inner, id)
+        };
+        self.bump(item);
     }
 
     pub fn set_checked(&self, id: ViewId, checked: bool) {
@@ -629,11 +691,12 @@ impl Doc {
             }
             n.checked = checked;
         }
-        self.bump();
+        // 复选框的测量只看字号(方框恒为字号见方),勾不勾是纯绘制
+        self.bump(dirty::DirtyItem::Paint);
     }
 
     pub fn set_style(&self, id: ViewId, style: Style) {
-        {
+        let (relevant, font_size_changed) = {
             let mut inner = self.0.borrow_mut();
             let Some(n) = inner.nodes.get_mut(id) else {
                 return;
@@ -641,21 +704,51 @@ impl Doc {
             if n.style == style {
                 return;
             }
+            let relevant = dirty::layout_relevant(&n.style, &style);
+            let font_size_changed = !dirty::font_size_eq(n.style.font_size, style.font_size);
             n.style = style;
+            (relevant, font_size_changed)
+        };
+        self.bump(if relevant {
+            dirty::DirtyItem::Measure { id }
+        } else {
+            dirty::DirtyItem::Paint
+        });
+        if font_size_changed {
+            // 字号继承在建树时就地解析,taffy 不知道它 —— 改一个 View 的字号,
+            // 子树里所有没设字号的叶子都要重测。**这是整套分级里最容易漏的一条**
+            self.bump(dirty::DirtyItem::InheritFontSize { subtree_root: id });
         }
-        self.bump();
     }
 
     /// 原地修改样式(比整体替换省事)
     pub fn update_style(&self, id: ViewId, f: impl FnOnce(&mut Style)) {
-        {
+        let (relevant, font_size_changed) = {
             let mut inner = self.0.borrow_mut();
             let Some(n) = inner.nodes.get_mut(id) else {
                 return;
             };
+            // 这里以前**无条件 bump**(不像 set_style 比了 PartialEq),
+            // 于是平滑滚动这类"每帧调一次 update_style、多数帧其实没变"的
+            // 用法在制造假脏帧。先留旧值再比,不等才 bump
+            let before = n.style.clone();
             f(&mut n.style);
+            if before == n.style {
+                return;
+            }
+            (
+                dirty::layout_relevant(&before, &n.style),
+                !dirty::font_size_eq(before.font_size, n.style.font_size),
+            )
+        };
+        self.bump(if relevant {
+            dirty::DirtyItem::Measure { id }
+        } else {
+            dirty::DirtyItem::Paint
+        });
+        if font_size_changed {
+            self.bump(dirty::DirtyItem::InheritFontSize { subtree_root: id });
         }
-        self.bump();
     }
 
     pub fn set_on_click(&self, id: ViewId, f: impl Fn() + 'static) {
@@ -666,7 +759,8 @@ impl Doc {
             };
             n.on_click = Some(Rc::new(f));
         }
-        self.bump();
+        // 注册回调不改任何几何
+        self.bump(dirty::DirtyItem::Paint);
     }
 
     /// 取出点击回调(clone 出来调用,避免调用期间持有树的借用)
@@ -686,7 +780,8 @@ impl Doc {
             };
             n.on_pointer_enter = Some(Rc::new(f));
         }
-        self.bump();
+        // 同上
+        self.bump(dirty::DirtyItem::Paint);
     }
 
     pub fn set_on_pointer_leave(&self, id: ViewId, f: impl Fn() + 'static) {
@@ -697,7 +792,8 @@ impl Doc {
             };
             n.on_pointer_leave = Some(Rc::new(f));
         }
-        self.bump();
+        // 同上
+        self.bump(dirty::DirtyItem::Paint);
     }
 
     /// 取出悬停进入回调(同 [`Doc::click_handler`]:clone 出来调用,不持树借用)
@@ -726,7 +822,8 @@ impl Doc {
             };
             n.on_pointer_down = Some(Rc::new(f));
         }
-        self.bump();
+        // 同上
+        self.bump(dirty::DirtyItem::Paint);
     }
 
     pub fn set_on_pointer_up(&self, id: ViewId, f: impl Fn() + 'static) {
@@ -737,7 +834,8 @@ impl Doc {
             };
             n.on_pointer_up = Some(Rc::new(f));
         }
-        self.bump();
+        // 同上
+        self.bump(dirty::DirtyItem::Paint);
     }
 
     pub fn pointer_down_handler(&self, id: ViewId) -> Option<Rc<dyn Fn()>> {
@@ -777,7 +875,8 @@ impl Doc {
             }
             n.focusable = focusable;
         }
-        self.bump();
+        // 可获焦位不进 to_taffy
+        self.bump(dirty::DirtyItem::Paint);
     }
 
     pub fn focusable(&self, id: ViewId) -> bool {
@@ -796,7 +895,8 @@ impl Doc {
             }
             n.accepts_text = accepts;
         }
-        self.bump();
+        // 同上
+        self.bump(dirty::DirtyItem::Paint);
     }
 
     pub fn set_on_key(&self, id: ViewId, f: impl Fn(&KeyEvent) + 'static) {
@@ -807,7 +907,8 @@ impl Doc {
             };
             n.on_key = Some(Rc::new(f));
         }
-        self.bump();
+        // 同上
+        self.bump(dirty::DirtyItem::Paint);
     }
 
     /// 取出键盘回调(同 [`Doc::click_handler`]:clone 出来调用,不持树借用)
@@ -825,7 +926,8 @@ impl Doc {
             };
             n.on_key_capture = Some(Rc::new(f));
         }
-        self.bump();
+        // 同上
+        self.bump(dirty::DirtyItem::Paint);
     }
 
     pub fn key_capture_handler(&self, id: ViewId) -> Option<KeyHandler> {
@@ -844,7 +946,8 @@ impl Doc {
             };
             n.on_focus_change = Some(Rc::new(f));
         }
-        self.bump();
+        // 同上
+        self.bump(dirty::DirtyItem::Paint);
     }
 
     pub fn focus_change_handler(&self, id: ViewId) -> Option<Rc<dyn Fn(bool)>> {
@@ -881,7 +984,8 @@ impl Doc {
         if let Some(cb) = new_cb {
             cb(true);
         }
-        self.bump();
+        // 焦点环是渲染壳合成绘制,不进树
+        self.bump(dirty::DirtyItem::Paint);
     }
 
     /// 清焦点(Esc 的默认行为)
@@ -896,7 +1000,8 @@ impl Doc {
         if let Some(cb) = old_cb {
             cb(false);
         }
-        self.bump();
+        // 同上
+        self.bump(dirty::DirtyItem::Paint);
     }
 
     /// 树 DFS 序收集所有 focusable 节点(与 `Placed` 绘制序同构 → Tab 序
@@ -977,7 +1082,8 @@ impl Doc {
             }
             input.placeholder = placeholder.to_string();
         }
-        self.bump();
+        // 输入框测量恒为 200×行高×rows,与内容/占位符无关
+        self.bump(dirty::DirtyItem::Paint);
     }
 
     /// 多行模式(`<textarea>`):Enter 换行、粘贴保留换行、按内容宽折行。
@@ -994,7 +1100,8 @@ impl Doc {
             input.multiline = multiline;
             input.rows = rows.max(1);
         }
-        self.bump();
+        // rows 进 MeasureCtx:多行输入框的高 = rows × 行高,真布局脏
+        self.bump(dirty::DirtyItem::Measure { id });
     }
 
     /// 输入框当前值(非 TextInput 返回 None)
@@ -1028,7 +1135,8 @@ impl Doc {
                 input.clear_history();
             }
         }
-        self.bump();
+        // 同上 —— 这是打字帧的大红利
+        self.bump(dirty::DirtyItem::Paint);
     }
 
     /// 当前选中文本(无选区返回 Some("");非 TextInput 返回 None)
@@ -1070,7 +1178,8 @@ impl Doc {
             };
             input.on_input = Some(Rc::new(f));
         }
-        self.bump();
+        // 同上
+        self.bump(dirty::DirtyItem::Paint);
     }
 
     pub fn set_on_submit(&self, id: ViewId, f: impl Fn(&str) + 'static) {
@@ -1081,7 +1190,8 @@ impl Doc {
             };
             input.on_submit = Some(Rc::new(f));
         }
-        self.bump();
+        // 同上
+        self.bump(dirty::DirtyItem::Paint);
     }
 
     // -----------------------------------------------------------------------
@@ -1107,7 +1217,9 @@ impl Doc {
         if let Some(cb) = cb {
             cb(x, y);
         }
-        self.bump();
+        // 滚动偏移根本不进 taffy —— 它是产出坐标时对子原点的一次平移。
+        // 布局树整棵可以复用
+        self.bump(dirty::DirtyItem::Position { id });
     }
 
     pub fn scroll_of(&self, id: ViewId) -> (f32, f32) {
@@ -1126,7 +1238,8 @@ impl Doc {
             };
             n.on_scroll = Some(Rc::new(f));
         }
-        self.bump();
+        // 同上
+        self.bump(dirty::DirtyItem::Paint);
     }
 
     pub fn scroll_handler(&self, id: ViewId) -> Option<Rc<dyn Fn(f32, f32)>> {
@@ -1149,7 +1262,8 @@ impl Doc {
             }
             n.content_override = size;
         }
-        self.bump();
+        // 只影响产出坐标时的 ScrollArea content/max 与钳制,不进 taffy
+        self.bump(dirty::DirtyItem::Position { id });
     }
 
     /// 调试:把树 dump 成缩进文本

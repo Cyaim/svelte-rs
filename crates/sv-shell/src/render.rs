@@ -167,6 +167,37 @@ struct MeasureCtx {
     rows: u16,
 }
 
+// ---------------------------------------------------------------------------
+// **不要在这里加"叶内 measure memo"。已经试过了,是负收益。**
+//
+// 动机看着很扎实:taffy 的多趟协议对每个叶子每帧问 **10 次**
+// (实测 180000 次 / 18000 个叶子),而这 10 次只对应约 2.3 个不同的 `wrap_w`,
+// 剩下全是重复询问。它们本该命中 taffy 自己的 9 槽缓存,但那是**直接映射**的:
+// `compute_cache_slot` 让 "definite available space" 与 max-content 共用同一个槽
+// 并无条件覆盖,于是"先问固有宽、再问折行高"这个必然序列每次都自己踩掉自己
+// (所以给上游把槽数调大也没用 —— 是冲突,不是容量)。
+//
+// 于是在 `MeasureCtx` 里加了 4 槽 memo(键 = `wrap_w`),调用次数确实从 18 万
+// 压到 4.2 万。**结果反而慢**,实测(30k 树,release,同机 A/B 各三轮):
+//
+// |            | 共享文本 | 逐行唯一 |
+// |------------|---------|---------|
+// | 有 memo    | 106ms   | 115ms   |
+// | 无 memo    | **82ms**| **89ms**|
+//
+// 原因是 `text.rs` 的全局两代缓存命中一次只要一次哈希 + 一次探测,**本来就便宜**;
+// 而 memo 要线性扫 4 格,还让 `MeasureCtx` 从约 40B 涨到约 112B(30000 个叶子
+// 多摸 2MB)。省下来的比多付出的少。
+//
+// 更值得记的是**中间那次翻车**:memo 刚加上时逐行唯一档从 96ms 劣化到 365ms
+// (3.8 倍)。根因不在 memo 自身,而在当时 `text.rs` 的容量自适应是
+// "装满就降代 + 容量翻倍"的棘轮 —— 它的爬升速度取决于**有多少次查询打到它**。
+// memo 把查询量砍掉四分之三,棘轮就爬不上去,缓存一直在颠簸。
+// 即:**在一层缓存前面加一层缓存,会让后面那层的自适应失效。**
+// 那条已改成"没到内存上限就原地扩容"(见 `text.rs` 的 `CAP`),与查询次数解耦;
+// 记在这里是因为这类耦合极难从代码上看出来 —— 它没有任何错误行为,只是慢。
+// ---------------------------------------------------------------------------
+
 /// sv-ui Style → taffy::Style 纯映射(sv-ui 不依赖 taffy 类型,
 /// 与 Painter 边界同理;调研 23 §2.2 映射表)
 fn to_taffy(s: &sv_ui::Style) -> taffy::Style {
@@ -488,36 +519,136 @@ fn walk_taffy(
 /// 静止帧的 O(n) measure/place 归零(细粒度更新模型下,静止是常态)。
 /// 滚动改 offset → bump 版本 → 键自然失效(滚动帧 = 全树重布局,
 /// 大全量树靠 virtual_list 兜底,ADR-9)
-/// 返回 **`Rc<Layout>`** 而不是 `Layout`:命中时只拷指针。
+/// 建好并算完的布局树 —— **持久但只读**。
 ///
-/// 以前命中返回 `layout.clone()` —— 深拷三个 Vec。而每帧**要调两次**
-/// (`render_frame` 内部一次、事件循环存 `self.layout` 一次;vello 路径同理),
-/// 30k 档一份 Layout ≈1.4MB,于是静止帧也在跑 1.4MB × 2 × 帧率的纯 memcpy。
-/// 这条浪费藏在"缓存命中"这个听起来已经很快的路径里,谁也不会去看它。
+/// 关键性质:它只有两种状态 —— **和 Doc 完全一致,或者已经被整棵扔掉**。
+/// 没有"增量更新"这条路,于是也就不存在"两棵树失同步"这一整类 bug。
+/// taffy 那几条著名的陷阱(`add_child` 不摘旧父、`remove` 不递归删后代、
+/// `get_node_context_mut` 不标脏)一条都碰不到 —— 我们从不调用它们。
+///
+/// 它买到的是:滚动帧、`content_override` 帧不用再重建 30k 个 taffy 节点,
+/// 只重走一遍产出坐标(实测 30k 档 2.6–4.6ms,对照全量 328–361ms)。
+/// 代价是影子树从每帧临时变成常驻(30k 档约 33MB)——所以 [`KEEP_TREE_MIN_NODES`]
+/// 给了闸门,小界面根本不付这笔钱。
+struct LayoutTrees {
+    tree: taffy::TaffyTree<MeasureCtx>,
+    map: HashMap<u64, ViewId>,
+    root: taffy::NodeId,
+    /// 弹层各一棵独立树,**按 walk 顺序存**(Popup 注册序在前、Tooltip 恒最后)。
+    /// 顺序只在"注册表没变"的前提下有效 —— 而注册表一变就是重建,所以恒有效
+    overlays: Vec<OverlayTree>,
+}
+
+struct OverlayTree {
+    entry: sv_ui::overlay::OverlayEntry,
+    tree: taffy::TaffyTree<MeasureCtx>,
+    map: HashMap<u64, ViewId>,
+    root: taffy::NodeId,
+}
+
+/// 小于这个节点数就不留树。
+///
+/// 留树是拿内存换时间,而小界面**两头都不划算**:全量重建本来就只要零点几毫秒,
+/// 留着的树却要一直占着内存。阈值取 512 是因为实测 3k 档全量重建已经 ~19ms
+/// (值得留),而几百个节点的对话框在噪声里。
+const KEEP_TREE_MIN_NODES: usize = 512;
+
+struct LayoutCache {
+    doc_id: usize,
+    w: u32,
+    h: u32,
+    layout: Rc<Layout>,
+    /// 树可能没留(小界面,见 [`KEEP_TREE_MIN_NODES`]);没留就退化成全量重建
+    trees: Option<LayoutTrees>,
+}
+
+thread_local! {
+    static CACHE: std::cell::RefCell<Option<LayoutCache>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// 按 [`sv_ui::Doc::take_dirty`] 的分级决定这一帧到底要做多少事。
+///
+/// 三档,从便宜到贵:
+/// 1. **什么都没脏** → 直接把上一帧的 `Rc<Layout>` 递回去(连 clone 都没有);
+/// 2. **只挪位置**(滚动 / `content_override`)→ 复用布局树,只重走产出坐标;
+/// 3. **真布局脏**(文本 / 布局样式 / 结构 / 弹层注册表)→ 整棵重建。
+///
+/// 返回 **`Rc<Layout>`** 而不是 `Layout`:命中时只拷指针。以前命中返回
+/// `layout.clone()` —— 深拷三个 Vec,而每帧**要调两次**(`render_frame` 内部
+/// 一次、事件循环存 `self.layout` 一次),30k 档一份 Layout ≈1.4MB,
+/// 于是静止帧也在跑 1.4MB × 2 × 帧率的纯 memcpy。
+///
+/// # 关于"日志被取走"这件事
+///
+/// [`sv_ui::Doc::take_dirty`] 是破坏性的。这看起来危险,实际上正好修掉一个旧问题:
+/// 同一帧内第二次调用本函数时日志已空 → 走第 1 档直接复用,
+/// 而以前它靠版本号比较,拿到"命中"之后仍然深拷了一份。
+///
+/// 没有渲染壳的调用方(单测、离屏 PNG、直调 [`layout_tree_full`])不取日志,
+/// 日志会一直涨到上限然后置 `overflowed` —— 那是"退化成全量",方向是安全的。
 pub fn layout_full_cached(doc: &Doc, logical_w: f32, logical_h: f32) -> Rc<Layout> {
-    use std::cell::RefCell;
-    /// (Doc 身份, 版本, 宽位, 高位, 上帧布局)
-    type CacheSlot = Option<(usize, u64, u32, u32, Rc<Layout>)>;
-    thread_local! {
-        static CACHE: RefCell<CacheSlot> = const { RefCell::new(None) };
-    }
-    let key = (
-        doc.identity(),
-        doc.version(),
-        logical_w.to_bits(),
-        logical_h.to_bits(),
-    );
+    let dirty = doc.take_dirty();
+    let (doc_id, w, h) = (doc.identity(), logical_w.to_bits(), logical_h.to_bits());
+
     CACHE.with(|c| {
         let mut slot = c.borrow_mut();
-        if let Some((id, ver, w, h, layout)) = slot.as_ref()
-            && (*id, *ver, *w, *h) == key
-        {
-            return Rc::clone(layout);
+        // Doc 换了或窗口尺寸变了:缓存整个作废。
+        // 【已知局限】缓存是单槽 —— 两个窗口交替渲染会互相顶掉,退化成每帧全量。
+        // 多窗口今天还没有支持,真做的时候这里要改成按 doc_id 分槽
+        let reusable = match slot.as_ref() {
+            Some(cached) => cached.doc_id == doc_id && cached.w == w && cached.h == h,
+            None => false,
+        };
+
+        // 判据是 `needs_rewalk`,**不是 `is_clean`**:一帧里全是 Paint 时日志非空
+        // 但布局产物逐字节不变。第一版写成 `is_clean()`,于是换色帧掉进了下面的
+        // "重走"分支 —— 结果正确、但白跑一遍 walk,而 walk 正是 30k 档空转帧的
+        // 全部成本。`paint_only_change_reuses_layout_verbatim` 就是逮它的
+        if reusable && !dirty.needs_rewalk() {
+            return Rc::clone(&slot.as_ref().expect("reusable 已保证非空").layout);
         }
-        let layout = Rc::new(layout_tree_full(doc, logical_w, logical_h));
-        *slot = Some((key.0, key.1, key.2, key.3, Rc::clone(&layout)));
+
+        if reusable && !dirty.needs_rebuild() {
+            // 只挪位置:布局树整棵复用,重走一遍产出坐标
+            let cached = slot.as_mut().expect("reusable 已保证非空");
+            if let Some(trees) = cached.trees.as_ref() {
+                let layout =
+                    Rc::new(doc.read(|inner| walk_trees(inner, trees, logical_w, logical_h)));
+                cached.layout = Rc::clone(&layout);
+                return layout;
+            }
+            // 树没留(小界面):落到重建,反正它便宜
+        }
+
+        let (layout, trees) = doc.read(|inner| {
+            let trees = build_trees(inner, logical_w, logical_h);
+            let layout = walk_trees(inner, &trees, logical_w, logical_h);
+            let keep = layout.placed.len() >= KEEP_TREE_MIN_NODES;
+            (layout, keep.then_some(trees))
+        });
+        let layout = Rc::new(layout);
+        *slot = Some(LayoutCache {
+            doc_id,
+            w,
+            h,
+            layout: Rc::clone(&layout),
+            trees,
+        });
         layout
     })
+}
+
+/// 测试探针:上一帧的布局树还留着吗。
+/// 用来断言"滚动帧没有重建树",比计时可靠得多
+#[cfg(test)]
+pub(crate) fn cache_has_trees() -> bool {
+    CACHE.with(|c| c.borrow().as_ref().is_some_and(|x| x.trees.is_some()))
+}
+
+#[cfg(test)]
+pub(crate) fn cache_reset() {
+    CACHE.with(|c| *c.borrow_mut() = None);
 }
 
 /// 布局整棵树(完整产物:Placed + 滚动区元数据)。root 强制占满窗口逻辑尺寸。
@@ -525,77 +656,121 @@ pub fn layout_full_cached(doc: &Doc, logical_w: f32, logical_h: f32) -> Rc<Layou
 /// 保逻辑坐标精度,取整留给绘制端——HiDPI 下逻辑取整会放大成整物理像素跳动)
 pub fn layout_tree_full(doc: &Doc, logical_w: f32, logical_h: f32) -> Layout {
     doc.read(|inner| {
-        let mut tree: taffy::TaffyTree<MeasureCtx> = taffy::TaffyTree::new();
-        tree.disable_rounding();
-        let mut map: HashMap<u64, ViewId> = HashMap::new();
-        let root = build_taffy(inner, &mut tree, &mut map, inner.root, ROOT_FONT_SIZE);
-        // root 强制占满窗口
-        let mut rs = to_taffy(&inner.nodes[inner.root].style);
-        rs.size = taffy::Size {
-            width: taffy::Dimension::length(logical_w),
-            height: taffy::Dimension::length(logical_h),
-        };
-        tree.set_style(root, rs)
-            .expect("sv-shell: 设 root 样式失败");
-        tree.compute_layout_with_measure(
-            root,
-            taffy::Size {
-                width: taffy::AvailableSpace::Definite(logical_w),
-                height: taffy::AvailableSpace::Definite(logical_h),
-            },
-            |known, available, _id, ctx, _style| measure_leaf(known, available, ctx),
-        )
-        .expect("sv-shell: taffy 布局失败");
-
-        let mut out = Layout::default();
-        walk_taffy(inner, &tree, &map, root, (0.0, 0.0), None, 0, &mut out);
-
-        // 弹层(调研 25):基础层后追加;Popup 注册序,Tooltip 恒最后。
-        // 每弹层一棵独立 taffy 树(游离子树,尺寸=内容,上限=窗口)
-        for pass_tooltip in [false, true] {
-            for e in &inner.overlays {
-                if (e.layer == sv_ui::OverlayLayer::Tooltip) != pass_tooltip {
-                    continue;
-                }
-                let mut otree: taffy::TaffyTree<MeasureCtx> = taffy::TaffyTree::new();
-                otree.disable_rounding();
-                let mut omap: HashMap<u64, ViewId> = HashMap::new();
-                let oroot = build_taffy(inner, &mut otree, &mut omap, e.root, ROOT_FONT_SIZE);
-                otree
-                    .compute_layout_with_measure(
-                        oroot,
-                        taffy::Size {
-                            width: taffy::AvailableSpace::Definite(logical_w),
-                            height: taffy::AvailableSpace::Definite(logical_h),
-                        },
-                        |known, available, _id, ctx, _style| measure_leaf(known, available, ctx),
-                    )
-                    .expect("sv-shell: 弹层布局失败");
-                let ol = otree.layout(oroot).expect("sv-shell: 弹层根缺布局");
-                let Some(origin) = resolve_anchor(
-                    e.anchor,
-                    ol.size.width,
-                    ol.size.height,
-                    logical_w,
-                    logical_h,
-                    &out.placed,
-                ) else {
-                    continue; // 锚点节点不存在/被裁:本帧不显示
-                };
-                let start = out.placed.len();
-                walk_taffy(inner, &otree, &omap, oroot, origin, None, 0, &mut out);
-                out.overlay_regions.push(OverlayRegion {
-                    root: e.root,
-                    start,
-                    end: out.placed.len(),
-                    layer: e.layer,
-                    modal: e.modal,
-                    close: e.close,
-                });
-            }
-        }
-        out
+        let trees = build_trees(inner, logical_w, logical_h);
+        walk_trees(inner, &trees, logical_w, logical_h)
     })
+}
+
+/// 建树 + 算尺寸。**贵的那一半**:30k 档 300ms 量级,其中绝大部分是叶子测量。
+fn build_trees(inner: &DocumentInner, logical_w: f32, logical_h: f32) -> LayoutTrees {
+    let mut tree: taffy::TaffyTree<MeasureCtx> = taffy::TaffyTree::new();
+    tree.disable_rounding();
+    let mut map: HashMap<u64, ViewId> = HashMap::new();
+    let root = build_taffy(inner, &mut tree, &mut map, inner.root, ROOT_FONT_SIZE);
+    // root 强制占满窗口
+    let mut rs = to_taffy(&inner.nodes[inner.root].style);
+    rs.size = taffy::Size {
+        width: taffy::Dimension::length(logical_w),
+        height: taffy::Dimension::length(logical_h),
+    };
+    tree.set_style(root, rs)
+        .expect("sv-shell: 设 root 样式失败");
+    tree.compute_layout_with_measure(
+        root,
+        taffy::Size {
+            width: taffy::AvailableSpace::Definite(logical_w),
+            height: taffy::AvailableSpace::Definite(logical_h),
+        },
+        |known, available, _id, ctx, _style| measure_leaf(known, available, ctx),
+    )
+    .expect("sv-shell: taffy 布局失败");
+
+    // 弹层(调研 25):基础层后追加;Popup 注册序,Tooltip 恒最后。
+    // 每弹层一棵独立 taffy 树(游离子树,尺寸=内容,上限=窗口)。
+    // **两趟循环在这里就定死顺序**,产出坐标那一半照着存下来的顺序走即可
+    let mut overlays = Vec::new();
+    for pass_tooltip in [false, true] {
+        for e in &inner.overlays {
+            if (e.layer == sv_ui::OverlayLayer::Tooltip) != pass_tooltip {
+                continue;
+            }
+            let mut otree: taffy::TaffyTree<MeasureCtx> = taffy::TaffyTree::new();
+            otree.disable_rounding();
+            let mut omap: HashMap<u64, ViewId> = HashMap::new();
+            let oroot = build_taffy(inner, &mut otree, &mut omap, e.root, ROOT_FONT_SIZE);
+            otree
+                .compute_layout_with_measure(
+                    oroot,
+                    taffy::Size {
+                        width: taffy::AvailableSpace::Definite(logical_w),
+                        height: taffy::AvailableSpace::Definite(logical_h),
+                    },
+                    |known, available, _id, ctx, _style| measure_leaf(known, available, ctx),
+                )
+                .expect("sv-shell: 弹层布局失败");
+            overlays.push(OverlayTree {
+                entry: e.clone(),
+                tree: otree,
+                map: omap,
+                root: oroot,
+            });
+        }
+    }
+
+    LayoutTrees {
+        tree,
+        map,
+        root,
+        overlays,
+    }
+}
+
+/// 算好的树 → 绝对坐标产物。**便宜的那一半**:30k 档 2.6–4.6ms,纯遍历。
+///
+/// 它每次都重读 `inner`,所以滚动偏移、`content_override` 这些"不进 taffy 但
+/// 影响最终坐标"的东西会被如实反映 —— 这正是 Position 档只跑这一半的依据。
+fn walk_trees(
+    inner: &DocumentInner,
+    trees: &LayoutTrees,
+    logical_w: f32,
+    logical_h: f32,
+) -> Layout {
+    let mut out = Layout::default();
+    walk_taffy(
+        inner,
+        &trees.tree,
+        &trees.map,
+        trees.root,
+        (0.0, 0.0),
+        None,
+        0,
+        &mut out,
+    );
+
+    for o in &trees.overlays {
+        let ol = o.tree.layout(o.root).expect("sv-shell: 弹层根缺布局");
+        let Some(origin) = resolve_anchor(
+            o.entry.anchor,
+            ol.size.width,
+            ol.size.height,
+            logical_w,
+            logical_h,
+            &out.placed,
+        ) else {
+            continue; // 锚点节点不存在/被裁:本帧不显示
+        };
+        let start = out.placed.len();
+        walk_taffy(inner, &o.tree, &o.map, o.root, origin, None, 0, &mut out);
+        out.overlay_regions.push(OverlayRegion {
+            root: o.entry.root,
+            start,
+            end: out.placed.len(),
+            layer: o.entry.layer,
+            modal: o.entry.modal,
+            close: o.entry.close,
+        });
+    }
+    out
 }
 
 /// 锚点解析(调研 25 §2.4):Node 锚 → 侧向 + 越界翻转;最后 clamp 进窗口

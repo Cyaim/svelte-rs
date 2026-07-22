@@ -24,7 +24,7 @@ use sv_ui::{Color, Doc};
 use crate::paint::{
     GlyphPos, LineCap, LineJoin, Painter, PainterCaps, PathCmd, PathFill, StrokeStyle,
 };
-use crate::render::{Placed, paint_tree};
+use crate::render::paint_tree;
 
 fn pcolor(c: Color) -> vello::peniko::Color {
     vello::peniko::Color::from_rgba8(c.r, c.g, c.b, c.a)

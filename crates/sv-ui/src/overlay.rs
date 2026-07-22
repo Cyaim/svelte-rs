@@ -88,11 +88,16 @@ impl Doc {
 
     pub(crate) fn add_overlay(&self, entry: OverlayEntry) {
         self.with_inner_mut(|inner| inner.overlays.push(entry));
-        self.bump();
+        // **一个节点都没脏** —— 变的是注册表本身。这条如果漏了,打开弹层的
+        // 那一帧日志是空的,渲染壳按"没变 ⇒ 复用上帧"处理,**弹层永远不出现**
+        self.bump(crate::dirty::DirtyItem::OverlayRegistry);
     }
 
     pub(crate) fn remove_overlay(&self, root: ViewId) {
         self.with_inner_mut(|inner| inner.overlays.retain(|e| e.root != root));
+        // 注册表少了一项。`remove` 只会记"某个子树没了",记不到注册表变化 ——
+        // 与 add_overlay 对称的一条,同样不能靠别的脏项蒙混
+        self.bump(crate::dirty::DirtyItem::OverlayRegistry);
         self.remove(root);
     }
 
@@ -108,7 +113,9 @@ impl Doc {
             true
         });
         if changed {
-            self.bump();
+            // 锚点变 → resolve_anchor 的结果变。弹层的内部布局没变,
+            // 但它整体要挪到新位置:重走一遍产出坐标就够
+            self.bump(crate::dirty::DirtyItem::OverlayRegistry);
         }
     }
 

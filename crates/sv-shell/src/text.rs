@@ -161,19 +161,28 @@ pub fn measure(text: &str, px: f32, wrap_w: Option<f32>) -> (f32, f32) {
         /// 轻松上万;一旦超过 CAP,HOT 每装满一次就整代降冷,而下一轮命中的
         /// 又多半在已被顶掉的那批里 —— 缓存进入颠簸,退化成"每个叶子每帧
         /// 重排一次"。实测(逐行唯一文本的 30k 树,release):
-        /// **2525ms → 92ms,27 倍**,而这只是一个常数的事。
+        /// **2525ms → 约 90ms,约 27 倍**,而这只是一个常数的事。
         ///
-        /// 策略:**容量翻倍棘轮**——每次装满就把下一代容量设成刚满那一代的
-        /// 两倍(向上取 2 的幂),钳在 [4096, 65536]。
+        /// 策略:**没到内存上限就原地扩容,到了才降代**。
+        /// HOT 装满时:CAP 未封顶 → 容量翻倍、**HOT 原封不动**;
+        /// 已封顶 → 整代降冷(这时两代机制才真正开始工作)。
         ///
-        /// 说清两件事,免得被名字误导:
-        /// 1. 它**只涨不落**。工作集缩小后容量不会回收 —— 想回落就得记录
-        ///    每帧的 distinct 键数并加迟滞,那是另一套机制,现在不值得。
-        /// 2. 内存按**桶数**算不是按条数:65536 条在 hashbrown 里会开到
-        ///    114688 桶,每桶 24B 载荷 ≈ 2.75MB,**实测每代约 3.1MB、两代
-        ///    6.3MB**(比"1.6MB/代"的直觉高一倍——桶数与控制字节都要算)。
-        ///    对照 ADR-9 的 28MB 基线仍可接受,但上限必须有:一个每帧生成新串
-        ///    的界面(时钟、日志流)会一路顶到上限。
+        /// 为什么不是"装满就降代、顺手把容量翻倍"(本函数的上一版):
+        /// 那样每涨一档就要**丢掉一整代**,而容量爬到能装下工作集需要好几档。
+        /// 爬升快慢取决于**有多少次查询真的打到这一层** —— 于是它会被上游的
+        /// 任何一层缓存拖慢。实测抓到过一次:给叶子加了一层 memo 之后,
+        /// 打到这里的查询从 18 万降到 4.2 万,棘轮爬不上去,
+        /// **30k 档从 96ms 劣化到 365ms**(加了个缓存,反而慢 3.8 倍)。
+        /// 原地扩容没有这个耦合:容量只跟工作集走,与查询次数无关。
+        ///
+        /// 内存按**桶数**算不是按条数:65536 条在 hashbrown 里会开到
+        /// 114688 桶,每桶 24B 载荷 ≈ 2.75MB,**实测每代约 3.1MB、两代 6.3MB**
+        /// (比"1.6MB/代"的直觉高一倍 —— 桶数与控制字节都要算)。
+        /// 对照 ADR-9 的 28MB 基线可接受,但上限必须有:一个每帧生成新串的
+        /// 界面(时钟、日志流)会一路顶到上限。
+        ///
+        /// 它**只涨不落**:工作集缩小后容量不回收。想回落要记每帧 distinct
+        /// 键数并加迟滞,是另一套机制,现在不值得。
         static CAP: std::cell::Cell<usize> = const { std::cell::Cell::new(4096) };
     }
     let key = {
@@ -198,27 +207,34 @@ pub fn measure(text: &str, px: f32, wrap_w: Option<f32>) -> (f32, f32) {
     });
     HOT.with(|c| {
         let mut hot = c.borrow_mut();
-        if hot.len() >= CAP.with(Cell::get) {
-            // 降代的同时按"刚装满的那一代有多大"调容量:这一代装满说明
-            // 工作集至少这么大,下一代给两倍余量,免得刚降完又立刻装满
-            let demoted = std::mem::take(&mut *hot);
-            CAP.with(|c| c.set(next_cap(demoted.len())));
-            COLD.with(|cold| *cold.borrow_mut() = demoted);
+        let cap = CAP.with(Cell::get);
+        if hot.len() >= cap {
+            if cap < CAP_MAX {
+                // 没顶到内存上限:原地扩容,一条也不丢。容量因此在**同一帧内**
+                // 就能追上工作集,而不是每涨一档丢一整代、慢慢爬好几帧
+                CAP.with(|c| c.set(next_cap(cap)));
+            } else {
+                // 顶到上限了,两代淘汰机制这时才真正开始工作
+                let demoted = std::mem::take(&mut *hot);
+                COLD.with(|cold| *cold.borrow_mut() = demoted);
+            }
         }
         hot.insert(key, result);
     });
     result
 }
 
-/// 下一代容量:工作集的 2 倍向上取 2 的幂,钳在 [4096, 65536]
-fn next_cap(working_set: usize) -> usize {
+/// 容量上限。到了它才开始"降代淘汰",在此之前一律原地扩容
+const CAP_MAX: usize = 65536;
+
+/// 下一档容量:翻倍向上取 2 的幂,钳在 [4096, 65536]
+fn next_cap(cur: usize) -> usize {
     const MIN: usize = 4096;
-    const MAX: usize = 65536;
-    let want = working_set.saturating_mul(2).max(MIN);
-    if want >= MAX {
-        return MAX;
+    let want = cur.saturating_mul(2).max(MIN);
+    if want >= CAP_MAX {
+        return CAP_MAX;
     }
-    want.next_power_of_two().clamp(MIN, MAX)
+    want.next_power_of_two().clamp(MIN, CAP_MAX)
 }
 
 /// 单行行高(逻辑 px):空文本节点与 TextInput 的固有高。

@@ -239,12 +239,11 @@ impl App {
         self.last_frame_key = Some(frame_key);
         match &mut ws.presenter {
             Presenter::Cpu { surface, .. } => {
-                let (pixmap, _) = render_frame(&self.doc, size.width, size.height, scale);
-                self.layout = layout_full_cached(
-                    &self.doc,
-                    size.width as f32 / scale,
-                    size.height as f32 / scale,
-                );
+                // 直接用 render_frame 算好的那一份。以前这里又调了一次
+                // layout_full_cached —— 版本号相同、缓存命中,却仍然深拷了一整份
+                // Layout(30k 档 1.5MB)。**每帧两次白拷,藏在"命中"路径里**
+                let (pixmap, layout) = render_frame(&self.doc, size.width, size.height, scale);
+                self.layout = layout;
 
                 let (Some(w), Some(h)) =
                     (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
@@ -282,12 +281,8 @@ impl App {
             Presenter::Vello(vw) => {
                 vw.resize(size.width, size.height);
                 // 静止帧(FPS 模式下仍在跑):跳过场景重编码,只重呈现
-                let (_, presented) = vw.render_cached(&self.doc, scale, unchanged);
-                self.layout = layout_full_cached(
-                    &self.doc,
-                    size.width as f32 / scale,
-                    size.height as f32 / scale,
-                );
+                let (layout, presented) = vw.render_cached(&self.doc, scale, unchanged);
+                self.layout = layout;
                 if !presented {
                     // surface 过期/被遮挡等:下一帧重试(与 vello 官方示例一致)
                     ws.window.request_redraw();
@@ -2453,6 +2448,282 @@ cd",
         // 60+10+60 > 110 → 换行;第二项 y = 20(首行高)+ 10(交叉轴 gap)
         assert_eq!(r(items[1]).y, 30.0, "wrap 后交叉轴 gap 应生效(双轴语义)");
         assert_eq!(r(items[1]).x, 0.0);
+    }
+
+    // ======================================================================
+    // 变更分级(增量布局 2a/2b)的验收。
+    //
+    // 全部用**结构性断言**,不用毫秒数:`Rc::ptr_eq` 判"整份复用"、
+    // `cache_has_trees` 判"树没被扔掉"、比值判"数量级没退化"。
+    // 绝对毫秒门槛在这台机器上跑间抖动能到 2 倍,只会变成随机红的测试。
+    // ======================================================================
+
+    /// 够大的一棵树,让 KEEP_TREE_MIN_NODES 闸门放行(小界面不留树是设计,
+    /// 拿小树测"树被复用了"会假绿)
+    fn big_doc(rows: usize) -> (Doc, RootHandle, ViewId) {
+        let doc = Doc::new();
+        let (scroller, scope) = create_root(|| {
+            let scroller = doc.create_view();
+            doc.update_style(scroller, |s| s.overflow = sv_ui::Overflow::Scroll);
+            doc.update_style(scroller, |s| s.height = Some(200.0));
+            doc.append(doc.root(), scroller);
+            for i in 0..rows {
+                let row = doc.create_view();
+                doc.update_style(row, |s| s.direction = sv_ui::Direction::Row);
+                doc.append(scroller, row);
+                for j in 0..3 {
+                    let t = doc.create_text(&format!("行 {i} 列 {j}"));
+                    doc.append(row, t);
+                }
+            }
+            scroller
+        });
+        (doc, scope, scroller)
+    }
+
+    #[test]
+    fn paint_only_change_reuses_layout_verbatim() {
+        crate::render::cache_reset();
+        let (doc, _scope, _) = big_doc(300);
+        let first = crate::render::layout_full_cached(&doc, 800.0, 600.0);
+        assert!(first.placed.len() >= 512, "树要够大才会被留下");
+
+        // 换前景色 —— 不进 taffy 也不进 measure
+        doc.update_style(doc.root(), |s| s.fg = Some(sv_ui::Color::rgb(1, 2, 3)));
+        let second = crate::render::layout_full_cached(&doc, 800.0, 600.0);
+        assert!(
+            std::rc::Rc::ptr_eq(&first, &second),
+            "换色必须整份复用上一帧的布局产物,连重走都不该有"
+        );
+
+        // 勾选 / 聚焦 / 打字同理
+        let input = doc.create_text_input();
+        doc.append(doc.root(), input);
+        let _ = crate::render::layout_full_cached(&doc, 800.0, 600.0); // 结构变了,重建
+        let before_typing = crate::render::layout_full_cached(&doc, 800.0, 600.0);
+        sv_ui::input::apply_edit(&doc, input, sv_ui::input::EditOp::InsertStr("你好".into()));
+        let after_typing = crate::render::layout_full_cached(&doc, 800.0, 600.0);
+        assert!(
+            std::rc::Rc::ptr_eq(&before_typing, &after_typing),
+            "在输入框里打字是纯绘制帧:输入框测量恒为 200×行高×rows,与内容无关"
+        );
+    }
+
+    #[test]
+    fn scroll_reuses_the_tree_but_moves_the_pixels() {
+        crate::render::cache_reset();
+        let (doc, _scope, scroller) = big_doc(300);
+        let first = crate::render::layout_full_cached(&doc, 800.0, 600.0);
+        assert!(crate::render::cache_has_trees(), "大树应被留下");
+
+        // 找一个滚动区内的节点,记下它的 y
+        let y_of = |layout: &crate::render::Layout, id: ViewId| {
+            layout.placed.iter().find(|p| p.id == id).map(|p| p.rect.y)
+        };
+        let probe = doc.read(|inner| inner.nodes[scroller].children[5]);
+        let y_before = y_of(&first, probe).expect("探针节点应在布局里");
+
+        doc.set_scroll(scroller, 0.0, 40.0);
+        let after = crate::render::layout_full_cached(&doc, 800.0, 600.0);
+
+        assert!(
+            !std::rc::Rc::ptr_eq(&first, &after),
+            "滚动必须产出新坐标 —— 复用上一份就是画不动"
+        );
+        assert!(
+            crate::render::cache_has_trees(),
+            "但布局树必须原地留着:滚动偏移根本不进 taffy"
+        );
+        let y_after = y_of(&after, probe).expect("探针节点应在布局里");
+        assert!(
+            (y_before - y_after - 40.0).abs() < 0.01,
+            "滚 40px 后内容应上移 40px:{y_before} → {y_after}"
+        );
+        // 和全量重算的结果逐条对齐 —— 复用树不能改变答案
+        let full = crate::render::layout_tree_full(&doc, 800.0, 600.0);
+        assert_eq!(full.placed.len(), after.placed.len());
+        for (a, b) in full.placed.iter().zip(after.placed.iter()) {
+            assert_eq!(a.id, b.id);
+            assert!((a.rect.y - b.rect.y).abs() < 0.001 && (a.rect.x - b.rect.x).abs() < 0.001);
+        }
+    }
+
+    #[test]
+    fn text_change_rebuilds_and_is_correct() {
+        crate::render::cache_reset();
+        let doc = Doc::new();
+        let (label, _scope) = create_root(|| {
+            let wrap = doc.create_view();
+            doc.append(doc.root(), wrap);
+            let label = doc.create_text("短");
+            doc.append(wrap, label);
+            // 撑到闸门之上,确保走的是"留树"分支
+            for i in 0..600 {
+                let t = doc.create_text(&format!("填充 {i}"));
+                doc.append(wrap, t);
+            }
+            label
+        });
+        let before = crate::render::layout_full_cached(&doc, 800.0, 600.0);
+        let w_before = before
+            .placed
+            .iter()
+            .find(|p| p.id == label)
+            .expect("标签应在布局里")
+            .rect
+            .w;
+
+        doc.set_text(label, "这是一段明显更长的文本用来把宽度撑开");
+        let after = crate::render::layout_full_cached(&doc, 800.0, 600.0);
+        let w_after = after
+            .placed
+            .iter()
+            .find(|p| p.id == label)
+            .expect("标签应在布局里")
+            .rect
+            .w;
+        assert!(
+            w_after > w_before * 1.5,
+            "Text 的 set_text 必须真的重排:{w_before} → {w_after}"
+        );
+    }
+
+    #[test]
+    fn overlay_open_is_not_paint_only() {
+        // 整套分级里最容易漏的一条:`add_overlay` **一个节点都不脏**,
+        // 它只往注册表 push。若日志表达不了这种变更,弹层永远不出现
+        crate::render::cache_reset();
+        let (doc, _scope, _) = big_doc(300);
+        let base = crate::render::layout_full_cached(&doc, 800.0, 600.0);
+        assert!(base.overlay_regions.is_empty());
+
+        let open = sv_reactive::state(false);
+        let d2 = doc.clone();
+        let (_, _s2) = create_root(move || {
+            sv_ui::overlay_block(
+                &d2,
+                move || open.get(),
+                move || sv_ui::Anchor::WindowCenter,
+                sv_ui::OverlayOpts::default(),
+                |d, root| {
+                    let t = d.create_text("弹层内容");
+                    d.append(root, t);
+                },
+            );
+        });
+        // 关着的时候什么都不该多出来
+        let still_closed = crate::render::layout_full_cached(&doc, 800.0, 600.0);
+        assert!(still_closed.overlay_regions.is_empty());
+
+        open.set(true);
+        let with_overlay = crate::render::layout_full_cached(&doc, 800.0, 600.0);
+        assert_eq!(
+            with_overlay.overlay_regions.len(),
+            1,
+            "打开弹层的那一帧布局产物必须多出一个 OverlayRegion ——              add_overlay 一个节点都不脏,靠 OverlayRegistry 这一档才没被漏掉"
+        );
+        assert!(!std::rc::Rc::ptr_eq(&base, &with_overlay));
+
+        // 关回去也要对称
+        open.set(false);
+        let closed_again = crate::render::layout_full_cached(&doc, 800.0, 600.0);
+        assert!(
+            closed_again.overlay_regions.is_empty(),
+            "关闭弹层同样要重建 —— 注册表少一项也是结构变更"
+        );
+    }
+
+    #[test]
+    fn reparent_keeps_node_placed_exactly_once() {
+        // taffy 的 add_child 既不摘旧父也不标脏旧父,而 Doc::append 是 reparent
+        // 语义。持久只读树靠"结构变了就整棵扔掉"绕开了这条,但要有测试钉住:
+        // 一旦哪天真做了增量更新,这条会第一个红
+        crate::render::cache_reset();
+        let doc = Doc::new();
+        let (ids, _scope) = create_root(|| {
+            let a = doc.create_view();
+            let b = doc.create_view();
+            let child = doc.create_text("搬来搬去");
+            doc.append(doc.root(), a);
+            doc.append(doc.root(), b);
+            doc.append(a, child);
+            (a, b, child)
+        });
+        let (a, b, child) = ids;
+        let _ = crate::render::layout_full_cached(&doc, 800.0, 600.0);
+        doc.append(b, child); // reparent
+        let after = crate::render::layout_full_cached(&doc, 800.0, 600.0);
+        let n = after.placed.iter().filter(|p| p.id == child).count();
+        assert_eq!(n, 1, "被搬走的节点只能出现一次,出现两次说明旧父没摘干净");
+        assert_eq!(doc.read(|i| i.nodes[a].children.len()), 0);
+        assert_eq!(doc.read(|i| i.nodes[b].children.len()), 1);
+        assert_eq!(
+            after.placed.len(),
+            crate::render::layout_tree_full(&doc, 800.0, 600.0)
+                .placed
+                .len()
+        );
+    }
+
+    #[test]
+    fn idle_and_scroll_frames_are_orders_of_magnitude_cheaper() {
+        // **比值断言,不是毫秒门槛**:这台机器上同一条命令前后能差 2–2.5 倍,
+        // 绝对值门槛没有信息量,只会随机红。比值对机器速度免疫,
+        // 拦的仍然是"分级失效退化回全量"这种数量级回归
+        crate::render::cache_reset();
+        let (doc, _scope, scroller) = big_doc(2000);
+        let _ = crate::render::layout_full_cached(&doc, 800.0, 600.0);
+
+        let t = std::time::Instant::now();
+        let full = crate::render::layout_tree_full(&doc, 800.0, 600.0);
+        let full_ns = t.elapsed().as_nanos().max(1);
+        assert!(full.placed.len() > 6000);
+
+        // 空转帧:什么都没脏
+        let t = std::time::Instant::now();
+        let _ = crate::render::layout_full_cached(&doc, 800.0, 600.0);
+        let idle_ns = t.elapsed().as_nanos().max(1);
+
+        // 滚动帧:复用树,只重走
+        doc.set_scroll(scroller, 0.0, 10.0);
+        let t = std::time::Instant::now();
+        let _ = crate::render::layout_full_cached(&doc, 800.0, 600.0);
+        let scroll_ns = t.elapsed().as_nanos().max(1);
+
+        println!(
+            "[probe] 全量 {:.2}ms / 空转 {:.4}ms / 滚动 {:.2}ms",
+            full_ns as f64 / 1e6,
+            idle_ns as f64 / 1e6,
+            scroll_ns as f64 / 1e6
+        );
+        if cfg!(not(debug_assertions)) {
+            assert!(
+                idle_ns * 100 < full_ns,
+                "空转帧应比全量便宜两个数量级以上:{idle_ns}ns vs {full_ns}ns"
+            );
+            assert!(
+                scroll_ns * 5 < full_ns,
+                "滚动帧应至少便宜 5 倍:{scroll_ns}ns vs {full_ns}ns"
+            );
+        }
+    }
+
+    #[test]
+    fn dirty_log_does_not_grow_without_a_consumer() {
+        // 没有渲染壳的场景(单测、离屏 PNG、直调 layout_tree_full)不取日志。
+        // 上限兜底之后行为是"退化成全量",方向安全 —— 但内存不能涨
+        let doc = Doc::new();
+        let (_, _scope) = create_root(|| {
+            let v = doc.create_view();
+            doc.append(doc.root(), v);
+            for i in 0..(sv_ui::dirty::DIRTY_LOG_CAP * 3) {
+                doc.set_text(v, &format!("{i}"));
+            }
+        });
+        let log = doc.take_dirty();
+        assert!(log.overflowed);
+        assert!(log.items.is_empty());
+        assert!(log.needs_rebuild(), "溢出必须退化成全量,不能被当成'没变'");
     }
 
     /// 调研 23 §2.6 触发线探针:30k 节点全量档 build+layout 的 2ms 触发线
