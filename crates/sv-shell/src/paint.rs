@@ -463,7 +463,7 @@ pub struct PainterCaps {
     /// 那节裁决"运行期只保留可查询,不做静默跳过",并点名要加 `image: bool`。
     /// 不加那个位的理由如上(`draw_image` 没有默认实现,谁都得实现,位恒
     /// true);但裁决**要解决的问题**没有被驳回 —— 它的替代品是
-    /// [`warn_dropped_image`]:凡是后端自己决定不画的分支都留一行痕。
+    /// `warn_dropped_image`:凡是后端自己决定不画的分支都留一行痕。
     /// 真到了有后端**画不了**位图的那天(候选:鸿蒙早期无 GPU 档),
     /// 这个位应当补上,那时它才不恒 true。
     pub external_texture: bool,
@@ -541,7 +541,7 @@ pub trait Painter {
     ///
     /// # 缩放质量
     ///
-    /// 见 [`image_filter_nearest`]:整数倍(含 1:1)最近邻,其余双线性。
+    /// 见 `image_filter_nearest`:整数倍(含 1:1)最近邻,其余双线性。
     ///
     /// **没有默认实现是刻意的**,与 `fill_path` / `stroke_path` 同一纪律:
     /// 位图是"画不出来就整块内容消失"的动词,静默 no-op 的默认实现会让新

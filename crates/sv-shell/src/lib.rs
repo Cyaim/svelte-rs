@@ -1214,6 +1214,46 @@ mod tests {
         assert_eq!(blurred.cmds, plain.cmds, "失焦后命令流应回到无环原样");
     }
 
+    /// 把命令流压成"形状":连续的 `Glyphs` **合并成一项**,并返回字形总数。
+    ///
+    /// # 为什么金样不能写死 glyph run 的条数
+    ///
+    /// **run 的条数是字体 fallback 的产物,不是渲染契约。** 同一段文本在字体
+    /// 覆盖不同的机器上会被拆成不同数量的 run —— 这正是 `mixed_cjk_fallback_no_notdef`
+    /// 在测的那件事,也是 P0"run 级带字体身份"载体存在的理由。
+    ///
+    /// 踩过:`input_paint_golden` 原来断言 placeholder "请输入" 恰好一条 `Glyphs`。
+    /// 本机(Windows)一条,**CI 的 Windows 跑道上是两条**(2 字形 + 1 字形,
+    /// 两个不同 font_key)—— 于是这条金样在别人的机器上必然红,而它想守的
+    /// "底/边 → 裁剪 → 字形 → 收剪"这个结构其实一点没变。
+    ///
+    /// 同一个测试里的预编辑那一段本来就是**求和**写的(`glyphs == 5`),
+    /// 这里只是把前两段拉齐到同一种写法。
+    fn cmd_shape(cmds: &[PaintCmd]) -> (Vec<&'static str>, usize) {
+        let mut shape: Vec<&'static str> = Vec::new();
+        let mut glyphs = 0usize;
+        for c in cmds {
+            let tag = match c {
+                PaintCmd::FillRect { .. } => "fill",
+                PaintCmd::StrokeRect { .. } => "stroke",
+                PaintCmd::PushClip { .. } => "clip",
+                PaintCmd::PopClip => "unclip",
+                PaintCmd::Glyphs { count, .. } => {
+                    glyphs += *count;
+                    "glyphs"
+                }
+                PaintCmd::Path { .. } => "path",
+                PaintCmd::StrokePath { .. } => "strokepath",
+                PaintCmd::Image { .. } => "image",
+            };
+            // 连续的 glyphs 只记一次:条数由 fallback 决定,不进形状
+            if !(tag == "glyphs" && shape.last() == Some(&"glyphs")) {
+                shape.push(tag);
+            }
+        }
+        (shape, glyphs)
+    }
+
     /// TextInput 金样:焦点框命令流 = 默认底/边 → PushClip → Glyphs(值)→
     /// 光标矩形 → PopClip;失焦无光标;选区时多一条高亮矩形
     #[test]
@@ -1231,20 +1271,14 @@ mod tests {
         // 未获焦 + 空值:底/边 + 裁剪内 placeholder 字形,无光标
         let mut rec = RecordingPainter::default();
         paint_tree(&doc, &placed, &mut rec, 1.0);
-        assert!(
-            matches!(
-                rec.cmds.as_slice(),
-                [
-                    PaintCmd::FillRect { .. },   // 默认底
-                    PaintCmd::StrokeRect { .. }, // 默认边
-                    PaintCmd::PushClip { .. },
-                    PaintCmd::Glyphs { .. }, // placeholder
-                    PaintCmd::PopClip,
-                ]
-            ),
+        let (shape, glyphs) = cmd_shape(&rec.cmds);
+        assert_eq!(
+            shape,
+            ["fill", "stroke", "clip", "glyphs", "unclip"],
             "未获焦空值命令流:{:?}",
             rec.cmds
         );
+        assert_eq!(glyphs, 3, "placeholder「请输入」三个字形:{:?}", rec.cmds);
 
         // 获焦 + 键入 + 选区:多出选区矩形与光标,外加默认焦点环
         doc.focus(input);
@@ -1252,21 +1286,24 @@ mod tests {
         apply_edit(&doc, input, EditOp::Move(Caret::Left, true)); // Shift+Left 选"好"
         let mut rec = RecordingPainter::default();
         paint_tree(&doc, &placed, &mut rec, 1.0);
-        assert!(
-            matches!(
-                rec.cmds.as_slice(),
-                [
-                    PaintCmd::FillRect { .. },   // 默认底
-                    PaintCmd::StrokeRect { .. }, // 默认边
-                    PaintCmd::PushClip { .. },
-                    PaintCmd::FillRect { .. }, // 选区高亮
-                    PaintCmd::Glyphs { count: 2, .. },
-                    PaintCmd::FillRect { .. }, // 光标
-                    PaintCmd::PopClip,
-                    PaintCmd::StrokeRect { width: 2, .. }, // 默认焦点环
-                ]
-            ),
+        let (shape, glyphs) = cmd_shape(&rec.cmds);
+        assert_eq!(
+            shape,
+            [
+                "fill",   // 默认底
+                "stroke", // 默认边
+                "clip", "fill", // 选区高亮
+                "glyphs", "fill", // 光标
+                "unclip", "stroke", // 默认焦点环
+            ],
             "获焦选区命令流:{:?}",
+            rec.cmds
+        );
+        assert_eq!(glyphs, 2, "值「你好」两个字形:{:?}", rec.cmds);
+        // 焦点环的宽度是契约的一部分,单独钉住(形状比对看不见它)
+        assert!(
+            matches!(rec.cmds.last(), Some(PaintCmd::StrokeRect { width: 2, .. })),
+            "最后一条应是宽 2 的焦点环:{:?}",
             rec.cmds
         );
 

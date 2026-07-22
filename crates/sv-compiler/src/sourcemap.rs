@@ -26,7 +26,7 @@
 //! - **包络不是真嵌套的**。`lsp-spike.md` §3.2 第三步要求 codegen 进出
 //!   `emit_element`/`emit_if`/`emit_each`/… 时压一个节点栈,让包络天然嵌套;
 //!   本版**没有做**(§6 显式批准第一版降级)。这里的 region 粒度是
-//!   "一个 parse 入口的**一行**"(见 [`Seg::region`]),所以 `MapKind::Envelope`
+//!   "一个 parse 入口的**一行**"(见 `Seg::region`),所以 `MapKind::Envelope`
 //!   给的是"某一行的跨度",不是"某个模板节点的跨度"。加节点栈之前,
 //!   `Envelope` 这一档的措辞必须继续说"近似"。
 //!
@@ -526,7 +526,7 @@ impl Recorder {
     /// token 的 (line, 字节区间) → (.sv 起, .sv 止, region);`None` = 胶水
     ///
     /// region 直接取**虚拟行号**:虚拟行全局单调、site 之间不重叠,所以行号
-    /// 天然是"某个 parse 入口的某一行"的唯一编号。见 [`Seg::region`] 里为什么
+    /// 天然是"某个 parse 入口的某一行"的唯一编号。见 `Seg::region` 里为什么
     /// 粒度必须细到行。
     fn resolve(&self, line: usize, bs: usize, be: usize) -> Option<(usize, usize, u32)> {
         if line <= 1 {

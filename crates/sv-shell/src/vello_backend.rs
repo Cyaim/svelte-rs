@@ -96,7 +96,7 @@ pub struct VelloPainter {
     /// `write_texture` 进图集。一张 1080p 就是 8.29 MB/帧。
     ///
     /// **同时它必须会淘汰**,由 [`VelloPainter::begin_frame`] 按
-    /// [`IMAGE_EVICT_AFTER_FRAMES`] 清扫。一条条目钉住的是**整张解码后的
+    /// `IMAGE_EVICT_AFTER_FRAMES` 清扫。一条条目钉住的是**整张解码后的
     /// RGBA**(`ImageData.data` → `Blob` → `Arc<dyn AsRef<[u8]>>` →
     /// 载体的 `Arc<[u8]>`),而 `VelloPainter` 与窗口同寿命
     /// (`VelloWin::painter`)—— 逐帧换图正是这个动词的动机场景
@@ -124,12 +124,12 @@ impl VelloPainter {
         }
     }
 
-    /// 帧边界:清场景 + 推进帧代 + 淘汰连续 [`IMAGE_EVICT_AFTER_FRAMES`] 帧
+    /// 帧边界:清场景 + 推进帧代 + 淘汰连续 `IMAGE_EVICT_AFTER_FRAMES` 帧
     /// 没被画到的图片。
     ///
     /// **复用 painter 的调用方必须用它,而不是直接 `painter.scene.reset()`**
     /// —— `reset` 只清编码好的命令,不动图片缓存,那正是"每秒钉住 60 张
-    /// 1080p"的那条路径(见 [`VelloPainter::images`])
+    /// 1080p"的那条路径(见 `VelloPainter::images`)
     pub fn begin_frame(&mut self) {
         self.scene.reset();
         self.frame = self.frame.wrapping_add(1);
