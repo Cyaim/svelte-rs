@@ -588,7 +588,7 @@ impl ApplicationHandler<UserEvent> for App {
             Backend::Vello => {
                 let size = window.inner_size();
                 match vello_backend::VelloWin::new(window.clone(), size.width, size.height) {
-                    Ok(vw) => Presenter::Vello(vw),
+                    Ok(vw) => Ok(Presenter::Vello(vw)),
                     Err(e) => {
                         eprintln!("sv-shell: vello 初始化失败({e}),回退 CPU 渲染后端");
                         self.backend = Backend::Cpu;
