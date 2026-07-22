@@ -28,8 +28,10 @@ fn fixtures_dir() -> PathBuf {
 
 /// 逐字节比对;`SV_UPDATE_GOLDEN=1` 时重写金样
 fn assert_golden(name: &str, actual: &str) {
-    let path = fixtures_dir().join(// 后缀刻意不是 `.rs`:免得 cargo fmt / clippy 把金样当成源码去处理
-        format!("{name}.rs.expected"));
+    let path = fixtures_dir().join(
+        // 后缀刻意不是 `.rs`:免得 cargo fmt / clippy 把金样当成源码去处理
+        format!("{name}.rs.expected"),
+    );
     if std::env::var("SV_UPDATE_GOLDEN").is_ok_and(|v| v == "1") {
         std::fs::write(&path, actual).expect("写金样失败");
         return;
@@ -123,7 +125,8 @@ fn component_fixture_codegen_is_stable() {
         },
     );
 
-    let child_code = sv_compiler::compile_sv_with(&child, "child", &registry).expect("child 应编译");
+    let child_code =
+        sv_compiler::compile_sv_with(&child, "child", &registry).expect("child 应编译");
     syn::parse_file(&child_code).expect("child 生成代码应合法");
     assert_golden("child", &child_code);
 
