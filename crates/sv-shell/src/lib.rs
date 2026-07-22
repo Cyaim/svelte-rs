@@ -2726,6 +2726,316 @@ cd",
         assert!(log.needs_rebuild(), "溢出必须退化成全量,不能被当成'没变'");
     }
 
+    /// 分级漏项的差分 fuzz —— **这是变更分级唯一真正的安全网**。
+    ///
+    /// 分级机制的失败模式是最难查的那种:**不报错、不 panic、别的测试全绿,
+    /// 只是画的是上一帧**。定级写错一个(比如把 `set_multiline` 当成纯绘制),
+    /// 表现是"多行输入框改了行数但没变高",只在那一个属性上复现 ——
+    /// 靠人写用例覆盖不过来(计划里那张人工分级表被对抗性复核补过一轮,仍漏了 8 项)。
+    ///
+    /// 所以这里不写用例,写**对拍**:随机敲写操作,每敲一下就把"走分级的增量路径"
+    /// 与"无条件全量重算"两份布局逐字段比。分级判轻了,下一次比对就红。
+    ///
+    /// # 这个测试自己被验证过能红
+    ///
+    /// 第一版**是假绿的**,而且看不出来:树只有 142 个节点、在
+    /// `KEEP_TREE_MIN_NODES`(512)之下,于是持久树那条路径根本没被走到;
+    /// 随机 op 又用 match guard 选目标,选不中就落到默认分支,
+    /// `set_multiline` 在 480 步里期望只跑 1.7 次、还有一半是空操作。
+    /// 把 `set_multiline` 故意错判成 `Paint`,它照样绿。
+    ///
+    /// 现在:①树够大,持久树与"只重走"路径都真的走到(开头断言);
+    /// ②按节点 kind 选操作,不再落默认分支;③滚动类操作打在**真的会滚**的容器上
+    /// (第一版对 161 个 view 随机取,只有 1 个是滚动容器,36 次 `set_scroll`
+    /// 期望只有 0.2 次真的滚了);④**结尾断言每种操作都至少跑过** ——
+    /// 否则它会随着代码演化悄悄退化回假绿,而没人会发现。
+    ///
+    /// # 变异测试结果(2026-07-22,逐条把分级改低再跑本测试)
+    ///
+    /// | 变异 | 结果 |
+    /// |---|---|
+    /// | `set_multiline` → Paint | 🔴 抓到 |
+    /// | `set_scroll` → Paint | 🔴 抓到 |
+    /// | `set_text` 不看 kind、恒 Paint | 🔴 抓到 |
+    /// | `update_style` 恒 Paint | 🔴 抓到 |
+    /// | `remove` → Paint | 🔴 抓到 |
+    /// | `set_content_override` → Paint | 🔴 抓到 |
+    /// | `append` 的 Structure → Paint | 🟢 **没抓到** |
+    /// | `update_style` 去掉 `InheritFontSize` | 🟢 **没抓到** |
+    ///
+    /// 后两条**不是本测试的洞,是分级本身有冗余**:`append` 同时记 `Structure`
+    /// 与 `InheritFontSize`,`update_style(font_size)` 同时记 `Measure` 与
+    /// `InheritFontSize` —— 任一条都会触发重建。追加实验:把 `append` 的**两条**
+    /// 一起拿掉,立刻 🔴。这层冗余今天是白拿的保险,做增量 `mark_dirty` 之后
+    /// 会变成真正的信息(见 `sv_ui::dirty` 顶部那段说明)。
+    ///
+    /// 复验方式(改完分级请照做一遍):把任意一条 `bump` 的级别改低,本测试必须红。
+    #[test]
+    fn dirty_classification_matches_full_recompute_under_fuzz() {
+        // xorshift64:不引依赖,序列固定 —— 随机测试必须可复现,否则红了也查不了
+        struct Rng(u64);
+        impl Rng {
+            fn next(&mut self) -> u64 {
+                self.0 ^= self.0 << 13;
+                self.0 ^= self.0 >> 7;
+                self.0 ^= self.0 << 17;
+                self.0
+            }
+            fn below(&mut self, n: usize) -> usize {
+                (self.next() % n as u64) as usize
+            }
+        }
+
+        // 每种操作至少要被跑到过,否则测试是假绿的
+        let mut coverage: std::collections::BTreeMap<&'static str, u32> = Default::default();
+
+        for seed in [0x5EED_1234_u64, 0xDEAD_BEEF, 0x0F0F_A1A1] {
+            crate::render::cache_reset();
+            let mut rng = Rng(seed);
+            let doc = Doc::new();
+            // 混合树:每种 kind 都有、有滚动容器与多行输入,
+            // **且节点数必须过 KEEP_TREE_MIN_NODES** —— 否则持久树路径根本不走
+            let (state, _scope) = create_root(|| {
+                let mut views: Vec<ViewId> = Vec::new();
+                let mut texts: Vec<ViewId> = Vec::new();
+                let mut inputs: Vec<ViewId> = Vec::new();
+                let mut checks: Vec<ViewId> = Vec::new();
+                let scroller = doc.create_view();
+                doc.update_style(scroller, |s| {
+                    s.overflow = sv_ui::Overflow::Scroll;
+                    s.height = Some(120.0);
+                });
+                doc.append(doc.root(), scroller);
+                views.push(scroller);
+                let mut scrollers: Vec<ViewId> = vec![scroller];
+                for i in 0..160 {
+                    let row = doc.create_view();
+                    doc.append(scroller, row);
+                    views.push(row);
+                    // 每 16 行再造一个真滚动容器:滚动类操作必须打在**真的会滚**
+                    // 的节点上。第一版对 views 随机取,161 个里只有 1 个是滚动容器,
+                    // 于是 36 次 set_scroll 期望只有 0.2 次真的滚了 —— 假绿
+                    if i % 16 == 0 {
+                        doc.update_style(row, |s| {
+                            s.overflow = sv_ui::Overflow::Scroll;
+                            s.height = Some(60.0);
+                        });
+                        scrollers.push(row);
+                    }
+                    let t = doc.create_text(&format!("文本 {i}"));
+                    doc.append(row, t);
+                    texts.push(t);
+                    let b = doc.create_button(&format!("按钮 {i}"));
+                    doc.append(row, b);
+                    texts.push(b);
+                    if i % 4 == 0 {
+                        let c = doc.create_checkbox();
+                        doc.append(row, c);
+                        checks.push(c);
+                        let inp = doc.create_text_input();
+                        doc.append(row, inp);
+                        inputs.push(inp);
+                    }
+                }
+                (views, texts, inputs, checks, scrollers)
+            });
+            let (mut views, mut texts, inputs, checks, scrollers) = state;
+
+            let compare = |step: usize, op: &str| {
+                // 顺序要紧:先走分级路径(它会取走脏日志),再全量重算当基准
+                let incremental = crate::render::layout_full_cached(&doc, 640.0, 480.0);
+                let full = crate::render::layout_tree_full(&doc, 640.0, 480.0);
+                assert_eq!(
+                    incremental.placed.len(),
+                    full.placed.len(),
+                    "步 {step}({op}):增量与全量的节点数对不上"
+                );
+                for (i, (a, b)) in incremental
+                    .placed
+                    .iter()
+                    .zip(full.placed.iter())
+                    .enumerate()
+                {
+                    assert_eq!(a.id, b.id, "步 {step}({op}):第 {i} 个 Placed 的节点不同");
+                    let same = (a.rect.x - b.rect.x).abs() < 0.01
+                        && (a.rect.y - b.rect.y).abs() < 0.01
+                        && (a.rect.w - b.rect.w).abs() < 0.01
+                        && (a.rect.h - b.rect.h).abs() < 0.01
+                        && a.clip_depth == b.clip_depth;
+                    assert!(
+                        same,
+                        "步 {step}({op}):节点 {i} 几何不一致 —— 某次变更被分级判轻了。\
+                         增量 {:?} vs 全量 {:?}",
+                        a.rect, b.rect
+                    );
+                }
+                assert_eq!(
+                    incremental.scroll_areas.len(),
+                    full.scroll_areas.len(),
+                    "步 {step}({op}):滚动区数量不一致"
+                );
+                assert_eq!(
+                    incremental.overlay_regions.len(),
+                    full.overlay_regions.len(),
+                    "步 {step}({op}):弹层区间数量不一致"
+                );
+            };
+
+            compare(0, "初始");
+            assert!(
+                crate::render::cache_has_trees(),
+                "树没被留下,持久树那条路径根本没走到 —— 这个 fuzz 会变成假绿"
+            );
+
+            for step in 1..=240 {
+                // 按 kind 选操作,不再"选不中就落默认分支"
+                let op: &str = match rng.below(15) {
+                    0 if !texts.is_empty() => {
+                        let id = texts[rng.below(texts.len())];
+                        doc.set_text(id, &format!("改过的文本 {step}"));
+                        "set_text(Text/Button)"
+                    }
+                    1 if !checks.is_empty() => {
+                        let id = checks[rng.below(checks.len())];
+                        doc.set_checked(id, step % 2 == 0);
+                        "set_checked"
+                    }
+                    2 if !checks.is_empty() => {
+                        let id = checks[rng.below(checks.len())];
+                        doc.set_text(id, &format!("勾选项 {step}"));
+                        "set_text(Checkbox)"
+                    }
+                    3 if !inputs.is_empty() => {
+                        let id = inputs[rng.below(inputs.len())];
+                        // 恒 multiline=true:否则 rows 被忽略,操作变空转
+                        doc.set_multiline(id, true, (step % 4 + 1) as u16);
+                        "set_multiline"
+                    }
+                    4 if !inputs.is_empty() => {
+                        let id = inputs[rng.below(inputs.len())];
+                        sv_ui::input::apply_edit(
+                            &doc,
+                            id,
+                            sv_ui::input::EditOp::InsertStr(format!("{step}")),
+                        );
+                        "apply_edit"
+                    }
+                    5 if !inputs.is_empty() => {
+                        let id = inputs[rng.below(inputs.len())];
+                        doc.set_placeholder(id, &format!("占位 {step}"));
+                        "set_placeholder"
+                    }
+                    6 => {
+                        let id = views[rng.below(views.len())];
+                        doc.update_style(id, |s| s.fg = Some(sv_ui::Color::rgb(9, 9, 9)));
+                        "update_style(fg)"
+                    }
+                    7 => {
+                        let id = views[rng.below(views.len())];
+                        doc.update_style(id, |s| s.gap = (step % 7) as f32);
+                        "update_style(gap)"
+                    }
+                    8 => {
+                        let id = views[rng.below(views.len())];
+                        doc.update_style(id, |s| s.width = Some(20.0 + (step % 50) as f32));
+                        "update_style(width)"
+                    }
+                    9 => {
+                        // 改中间层字号:继承要沿子树下传,是最容易漏的一条
+                        let id = views[rng.below(views.len())];
+                        doc.update_style(id, |s| s.font_size = 12.0 + (step % 9) as f32);
+                        "update_style(font_size)"
+                    }
+                    10 => {
+                        let id = scrollers[rng.below(scrollers.len())];
+                        doc.set_scroll(id, 0.0, (step % 60) as f32);
+                        "set_scroll"
+                    }
+                    11 => {
+                        let id = scrollers[rng.below(scrollers.len())];
+                        doc.set_content_override(id, Some((300.0, 40.0 * (step % 20) as f32)));
+                        "set_content_override"
+                    }
+                    12 => {
+                        let id = views[rng.below(views.len())];
+                        // RootHandle 不实现 Drop —— 丢掉它不会销毁作用域,
+                        // 新节点会一直活着,正是这里要的
+                        let (n, _) = create_root(|| {
+                            let n = doc.create_text(&format!("新增 {step}"));
+                            doc.append(id, n);
+                            n
+                        });
+                        texts.push(n);
+                        "append(new)"
+                    }
+                    13 if views.len() > 4 => {
+                        // reparent:把一个已有子树搬到另一个父下。
+                        // 搬到自己的后代下会成环(Doc 不防),跳过
+                        let a = views[rng.below(views.len())];
+                        let b = views[rng.below(views.len())];
+                        let cyclic = doc.read(|i| {
+                            let mut cur = Some(b);
+                            while let Some(c) = cur {
+                                if c == a {
+                                    return true;
+                                }
+                                cur = i.nodes.get(c).and_then(|n| n.parent);
+                            }
+                            false
+                        });
+                        if a != b && !cyclic && a != doc.root() {
+                            doc.append(b, a);
+                            "append(reparent)"
+                        } else {
+                            continue;
+                        }
+                    }
+                    _ => {
+                        let id = views[rng.below(views.len())];
+                        doc.update_style(id, |s| s.padding = sv_ui::Edges::all((step % 5) as f32));
+                        "update_style(padding)"
+                    }
+                };
+                *coverage.entry(op).or_default() += 1;
+                compare(step, op);
+            }
+            // 删一棵子树:结构变更里唯一会让节点消失的那种
+            if views.len() > 10 {
+                let victim = views.remove(5);
+                if victim != doc.root() {
+                    doc.remove(victim);
+                    *coverage.entry("remove(subtree)").or_default() += 1;
+                    compare(999, "remove(subtree)");
+                }
+            }
+        }
+
+        println!("[fuzz] 操作覆盖:{coverage:?}");
+        for op in [
+            "set_text(Text/Button)",
+            "set_text(Checkbox)",
+            "set_checked",
+            "set_multiline",
+            "apply_edit",
+            "set_placeholder",
+            "update_style(fg)",
+            "update_style(gap)",
+            "update_style(width)",
+            "update_style(font_size)",
+            "update_style(padding)",
+            "set_scroll",
+            "set_content_override",
+            "append(new)",
+            "append(reparent)",
+            "remove(subtree)",
+        ] {
+            assert!(
+                coverage.get(op).copied().unwrap_or(0) > 0,
+                "操作 {op} 一次都没跑到 —— fuzz 已经退化成假绿,覆盖表:{coverage:?}"
+            );
+        }
+    }
+
     /// 调研 23 §2.6 触发线探针:30k 节点全量档 build+layout 的 2ms 触发线
     /// **已确认越线**(2026-07-18 实测 release ≈130–160ms:taffy 裸 compute
     /// ~45ms + 叶子 measure ~70ms + build ~30ms)→ 按预案启动"Blitz 式低层
