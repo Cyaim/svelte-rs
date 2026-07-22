@@ -17,8 +17,13 @@ mod text;
 mod vello_backend;
 
 pub use a11y::{A11yCache, build_tree_update, dispatch_action, incremental_tree_update};
+// `mod paint` 是私有的,所以这里没列出的类型就是**公开但不可命名** ——
+// 外部 crate 既写不出类型名也构造不出值。路径那五个类型漏了整整一轮:
+// `Painter::fill_path` 明明是 pub trait 的 pub 方法,外面却根本调不动,
+// 因为它的参数类型 `&[PathCmd]` 叫不出名字。`tests/public_api.rs` 现在守着这条
 pub use paint::{
-    GlyphKey, GlyphPos, PaintCmd, Painter, PainterCaps, RecordingPainter, TinySkiaPainter,
+    GlyphKey, GlyphPos, LineCap, LineJoin, PaintCmd, Painter, PainterCaps, PathCmd, PathFill,
+    RecordingPainter, StrokeStyle, TinySkiaPainter,
 };
 pub use render::{
     Layout, OverlayRegion, Placed, Rect, ScrollArea, hit_click_target, ime_caret_rect,
