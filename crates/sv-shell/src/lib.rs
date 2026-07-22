@@ -16,7 +16,7 @@ mod text;
 #[cfg(feature = "backend-vello")]
 mod vello_backend;
 
-pub use a11y::{build_tree_update, dispatch_action};
+pub use a11y::{A11yCache, build_tree_update, dispatch_action, incremental_tree_update};
 pub use paint::{
     GlyphKey, GlyphPos, PaintCmd, Painter, PainterCaps, RecordingPainter, TinySkiaPainter,
 };
@@ -189,6 +189,8 @@ struct App {
     proxy: winit::event_loop::EventLoopProxy<UserEvent>,
     /// 累计丢帧次数(present/resize 失败;仅用于限流日志)
     frame_drops: u32,
+    /// 语义树增量推送的记忆(上次交给平台的节点内容)
+    a11y: a11y::A11yCache,
     /// 致命错误:记下并退事件循环,由 [`run_app`] 返给调用方
     fatal: Option<ShellError>,
 }
@@ -308,14 +310,16 @@ impl App {
         self.push_access_tree();
     }
 
-    /// 语义树推送:全量 TreeUpdate(v1;增量列档 B,调研 24 §4.2)
+    /// 语义树推送(调研 24 §4.2 + P6):按版本节拍触发,**只推变动节点**。
+    /// 懒激活未开时 `update_if_active` 里的闭包根本不跑 —— 零成本
     fn push_access_tree(&mut self) {
         let Some(ws) = &mut self.win else { return };
         let scale = ws.window.scale_factor() as f32;
         let doc = self.doc.clone();
         let placed = &self.layout.placed;
+        let cache = &mut self.a11y;
         ws.access
-            .update_if_active(|| a11y::build_tree_update(&doc, placed, scale));
+            .update_if_active(|| a11y::incremental_tree_update(cache, &doc, placed, scale));
     }
 
     /// 本次按下是第几击(1/2/3 循环)。窗口 500ms、位移 4 物理 px 内算连击
@@ -853,6 +857,7 @@ pub fn run_app(
         fps_t0: std::time::Instant::now(),
         proxy,
         frame_drops: 0,
+        a11y: a11y::A11yCache::default(),
         fatal: None,
     };
     event_loop
@@ -1273,6 +1278,69 @@ mod tests {
         assert!(
             x0 <= 0.5 && (w - tw).abs() < 1.0,
             "全选矩形应覆盖整串:{rects:?}"
+        );
+    }
+
+    /// P6 增量语义树(调研 24 §5 验收名 `a11y_update_only_dirty_nodes`):
+    /// 首次全量,之后**只推内容真变了的节点**。全量推会让屏幕阅读器把整棵树
+    /// 重扫一遍——一次键入本该只动一个节点
+    #[test]
+    fn a11y_update_only_dirty_nodes() {
+        let doc = Doc::new();
+        let (_, _scope) = create_root(|| {
+            for label in ["甲", "乙", "丙"] {
+                let t = doc.create_text(label);
+                doc.append(doc.root(), t);
+            }
+            let b = doc.create_button("确定");
+            doc.append(doc.root(), b);
+            doc.set_on_click(b, || {});
+        });
+        let placed = layout_tree(&doc, 480.0, 400.0);
+        let ids: Vec<sv_ui::ViewId> = doc.read(|inner| inner.nodes[inner.root].children.clone());
+        let nid = |v: sv_ui::ViewId| accesskit::NodeId(sv_ui::view_id_ffi(v));
+
+        let mut cache = A11yCache::default();
+        let first = incremental_tree_update(&mut cache, &doc, &placed, 1.0);
+        assert_eq!(first.nodes.len(), 5, "首次应全量(root + 4 子)");
+        assert!(first.tree.is_some(), "首次必须带 Tree");
+
+        // 没变:零节点(focus 仍必填)
+        let idle = incremental_tree_update(&mut cache, &doc, &placed, 1.0);
+        assert!(
+            idle.nodes.is_empty(),
+            "无变化不该推任何节点:{:?}",
+            idle.nodes.len()
+        );
+        assert!(idle.tree.is_none(), "Tree 只在首次带");
+        assert_eq!(idle.focus, nid(doc.read(|i| i.root)));
+
+        // 改一个文本 → 只推那一个
+        doc.set_text(ids[1], "乙乙");
+        let one = incremental_tree_update(&mut cache, &doc, &placed, 1.0);
+        assert_eq!(one.nodes.len(), 1, "只该推改动的那个节点");
+        assert_eq!(one.nodes[0].0, nid(ids[1]));
+        assert_eq!(one.nodes[0].1.label(), Some("乙乙"));
+
+        // 焦点变化不改节点内容 → 零节点,但 focus 字段跟上
+        doc.focus(ids[3]);
+        let f = incremental_tree_update(&mut cache, &doc, &placed, 1.0);
+        assert!(f.nodes.is_empty(), "只改焦点不该重推节点");
+        assert_eq!(f.focus, nid(ids[3]));
+
+        // 删一个节点:父的 children 变了 → 推父(被删的不必显式上报)
+        doc.remove(ids[0]);
+        let placed2 = layout_tree(&doc, 480.0, 400.0);
+        let del = incremental_tree_update(&mut cache, &doc, &placed2, 1.0);
+        let root_id = nid(doc.read(|i| i.root));
+        assert!(
+            del.nodes.iter().any(|(id, _)| *id == root_id),
+            "父节点 children 变了应被推:{:?}",
+            del.nodes.len()
+        );
+        assert!(
+            !del.nodes.iter().any(|(id, _)| *id == nid(ids[0])),
+            "被删节点不该出现在更新里"
         );
     }
 

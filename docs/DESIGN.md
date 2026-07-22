@@ -418,9 +418,16 @@ sv-compiler / sv-macro / sv-build)**空闲**;`runa`、`sylph` 被占。
   含响应式形态)+ accesskit_winit 0.33 适配器(窗口先隐身建 adapter、
   每事件 process_event、懒激活 InitialTreeRequested、版本节拍
   update_if_active 全量推送、Click/Focus/Blur 动作回派纯函数);
-  金样与动作往返测试零窗口零平台;**待办**:NVDA/VoiceOver/Orca 真机朗读
-  冒烟(bounds 坐标空间平台实测校准,调研 24 风险 5)、增量 TreeUpdate
-  与列表/滚动语义(档 B 打磨);弹层体系(8–13 人周;裁决:离散层
+  金样与动作往返测试零窗口零平台;
+  **✅ 2026-07-22 P6 增量 TreeUpdate 落地**:`A11yCache` 记住上次交给平台的
+  节点内容,推送只带**内容真变了**的节点(accesskit `Node: PartialEq` 直接
+  比对);`focus` 协议要求每次必填故恒带,`Tree` 只首帧带;删除的节点不必
+  显式上报——父的 children 变了会被带上,AccessKit 按可达性回收。映射本身
+  仍全量算(纯函数、便宜),省的是屏幕阅读器侧的重扫与 IPC:一次键入本该
+  只动一个节点。验收 `a11y_update_only_dirty_nodes`(无变化零节点、改一个
+  文本只推一个、只改焦点零节点、删节点推父);**待办**:NVDA/VoiceOver/Orca
+  真机朗读冒烟(bounds 坐标空间平台实测校准,调研 24 风险 5)、列表/滚动
+  语义(档 B 打磨);弹层体系(8–13 人周;裁决:离散层
   Base→Popup→Tooltip + `overlay_block` 原语 + `<overlay>` 内建元素,不做通用
   z-index、不发明 {#teleport})
   ——**✅ 2026-07-18 O1/O2/O3/O5 落地**:游离弹层子树 + 注册表(注册序即

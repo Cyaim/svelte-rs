@@ -20,6 +20,8 @@ sv-shell),按依赖序推送;`examples/` 不发布。
 
 ### 新增
 
+- **无障碍增量推送(调研 24 P6)**:语义树只推内容变动的节点,不再每次全量。
+
 - **R3 弹层体系**:离散层(Base→Popup→Tooltip)+ `overlay_block` 原语 +
   `.sv` 的 `<overlay>` 内建元素;锚定四侧 + 越界翻转、关闭策略三值 + Esc LIFO、
   模态区间阻断与焦点陷阱、tooltip 悬停延时、Popup 内方向键导航。
