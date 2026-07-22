@@ -93,6 +93,42 @@ jobs:
         with:
           command: check advisories bans licenses sources
 
+  bench:
+    name: 性能基准(帧预算护栏)
+    # PR 上不跑:release 构建 + 两个场景要几分钟,而门槛只为拦数量级回归
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install fonts
+        run: sudo apt-get update && sudo apt-get install -y fonts-noto-cjk
+
+      # 门槛**故意宽**:CI 跑道的绝对数字没有可比性(共享 vCPU,同一提交能差
+      # 两三倍),硬卡本地数字只会制造 flaky。这里拦的是**数量级回归**——
+      # 比如虚拟化失效导致 100k 走全量布局(会是几秒而不是几十毫秒)。
+      # 参考值(本地 2026-07-22):3k 全量 p99≈23ms、100k 虚拟 p99≈6.6ms。
+      - name: 跑基准并检查帧预算
+        run: |
+          set -euo pipefail
+          cargo build -q --release -p membench
+          check() {
+            name="$1"; budget="$2"; shift 2
+            line=$(./target/release/membench "$@" --frames 30 --hold-secs 0 | grep '^READY')
+            p99=$(echo "$line" | sed -n 's/.*p99_ms=\([0-9.]*\).*/\1/p')
+            echo "| $name | ${p99} ms | < ${budget} ms |" >> "$GITHUB_STEP_SUMMARY"
+            echo "$name: p99=${p99}ms (预算 ${budget}ms)"
+            awk -v p="$p99" -v b="$budget" 'BEGIN { exit !(p < b) }' || {
+              echo "::error::$name p99=${p99}ms 超出预算 ${budget}ms —— 数量级回归,请查 ADR-9"
+              exit 1
+            }
+          }
+          echo "| 场景 | p99 | 预算 |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          check "3k 控件全量树" 120 --controls 3000
+          check "100k 控件虚拟化" 60 --controls 100000 --virtual
+
   publish-readiness:
     name: 发布体检(元数据 + 叶子打包)
     runs-on: ubuntu-latest

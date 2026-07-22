@@ -29,6 +29,7 @@ sv-shell),按依赖序推送;`examples/` 不发布。
   发现与 script fallback(CJK/Latin 混排不再出方框)。
 - **文本输入编辑手势**:词跳与删词(Ctrl/⌥+←/→、Ctrl+Backspace/Delete)、
   拖拽选择、双击选词、三击全选、撤销重做(Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z)。
+- **性能基准 CI 化**:membench 两场景(3k 全量 / 100k 虚拟化)p99 帧预算护栏。
 - **发布工程**:`ShellError` 类型化错误、cargo-deny 依赖审计、MSRV 1.88 构建道、
   clippy `-D warnings` 阻塞门禁、发布演练(依赖序 `cargo package`)。
 
