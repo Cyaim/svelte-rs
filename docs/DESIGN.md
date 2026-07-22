@@ -203,6 +203,18 @@ N 次重绘请求,现在是一帧一轮。
 **未做**:与 vsync 的深度对齐(mailbox 呈现模式,见 ADR-9 后续阶梯)、
 鸿蒙 `OH_NativeVSync` 接线(R5)。
 
+**已知约束(2026-07-22 记录,做常驻动画前必须先解决)**:静止帧短路写作
+`if unchanged && !animating && ... { return; }` —— `animating` 在这里**否决**
+版本键短路。今天无害:两条动画通道(opacity 走 `update_style`、scrollY 走
+`set_scroll`)每帧都 bump 版本,`unchanged` 本来就是 false,`!animating` 只是
+一道保险,顶多在缓动平台期白画一两帧,而既有动画都短(fade ≤400ms、
+平滑滚动 140ms),从没暴露过。
+**但凡引入"每帧推进时间却不 bump 版本"的通道**(lottie/PAG 这类常驻动画的
+自然设计,见 `docs/plans/pag-2-integration.md` §4 与其复核记录),这条短路就
+彻底失效:动画一跑就满 vsync 全量重绘,拿不到"24fps 素材在 144Hz 屏上每 6 个
+vsync 才真重绘一次"的省电。届时要么让那类通道也 bump(放弃跳帧),要么把
+短路条件改成"内容脏 或 到了该动画的下一个采样点"。**别指望它自动成立**。
+
 ### ADR-7(2026-07-22 落地)each 块:keyed 行持有 `Signal<Item>`,reconcile 只管 key
 > 原文记为"未实现,现状整块重建"。实际 keyed 复用早已存在,但**行只在构建时
 > 读一次 `T`** ——同 key 换内容的行会永远显示旧数据。更隐蔽的是:行作用域用

@@ -57,9 +57,31 @@ rustc 1.88.0 + cargo 1.88.0(x86_64-pc-windows-msvc)。所有耗时都是 `--rele
 > 也就是说 **lottie 不是"GPU 特性",CPU 默认后端可以原生支持它。**
 > 这一条直接推翻了"lottie 要等 vello 成为默认后端"的隐含前提。
 
+> ⚠️ **复核:这不是"意外发现",它已经是本仓库的既有结论。**
+> `lottie-1-ecology.md` §1.3 的标题就叫「`RenderSink` —— 不必绑 vello 的那扇门」,
+> 正文引了 velato 0.9.0 的 CHANGELOG 原文("The `vello` dependency is now optional"),
+> §6.1 贴了同一棵 `default-features = false` 的依赖树;`lottie-2-architecture.md`
+> §5.1 已据此裁决 `sv-shell` 加
+> `velato = { version = "0.11", default-features = false, optional = true }`。
+> 本节把它写成"改变了 lottie 在路线图里的位置"是**重复记账**——路线图上的位置
+> 在本文写之前就已经改过了。
+>
+> **本节仍有的价值**:lottie-1 的依赖树是文字誊录,本文是四个真项目的 `cargo tree`
+> 实跑,并且额外验了 `velato + vello_cpu` 的共存(§2.4)。这一层"实跑复核"的价值
+> 是真的,但它是**证实**,不是发现。
+
 **真正的卡点只有一条,而且不是依赖问题,是健壮性问题**(§6.1):velato 在**合法
 Lottie 输入**上 `todo!()` panic 而不是返回 `Err`。我独立复现了三种触发方式。
 好消息:`catch_unwind` 能接住(实测),仓库也没开 `panic = "abort"`。
+
+> ⚠️ **复核:这条同样已经在 lottie-1 §1.4 + §6.4 里。**
+> 那份文档的 §0 就把它列为"死穴之一",给了同一张 6 行 `todo!()` 位置表、同一个
+> "删掉 `r` 键即炸"的复现、同一条"仓库没设 `panic = "abort"` 所以 catch_unwind 可用"
+> 的前提核实,还多一条本文没有的判读:**`:213` 是纯 bug**(schema 把 rotation
+> 声明成 `Option`,却在 `None` 分支写 `todo!()`),因此
+> **"给 velato 提一个 20 行的 PR 把 `todo!()` 改成 `Error` 变体,性价比高于
+> catch_unwind"**。本文 §8.3 把 `catch_unwind` 排在第 1 位却完全没提上游修复,
+> 是把创可贴当成了治疗(lottie-1 §6.4 原话)。
 
 ---
 
@@ -92,6 +114,30 @@ Lottie 输入**上 `todo!()` panic 而不是返回 `Err`。我独立复现了三
 | `bad-*.json` | **我构造的畸形/边界输入**(见 §6.1) | —— |
 
 选 Noto emoji 不是随便选的:那批就是"UI 里的小动画图标",与 sv-arco 的实际用法同构。
+
+> ⚠️ **复核:「velato CI 用的同一批」是错的,而且漏了许可证。**
+> 逐项查过:
+> - `gh api repos/linebender/velato/contents/.github/workflows` 只有 `ci.yml` 与
+>   `pages-release.yml` 两个 workflow,**两个文件里 grep `download|gstatic|noto`
+>   零命中**——velato 的 CI **从不下载也从不使用**这批资产。
+> - 这份名单的真实出处是 **`examples/scenes/src/download/default_downloads.rs`**
+>   (`with_winit` 示例的按需下载器,`gh api search/code` 全仓唯一命中 gstatic 的文件),
+>   里面是 `google_noto_asset!(名字, id, expected_size)` 宏展开的一张表,URL 模板
+>   `https://fonts.gstatic.com/s/e/notoemoji/latest/{id}/lottie.json`。
+> - **该文件逐字写着 `license: "CC BY 4.0"`**,`info` 指向
+>   <https://googlefonts.github.io/noto-emoji-animation/>。
+>   本文全篇没有提过任何资产/依赖的许可证。
+>   顺带补齐另外两条(复核者查的):velato 0.11.0 crates.io 与仓库内
+>   `LICENSE-APACHE`/`LICENSE-MIT` 均为 **Apache-2.0 OR MIT**,与本仓库
+>   `license.workspace = "MIT OR Apache-2.0"` 相容;`velato_imaging` 0.0.1 同。
+> - `expected_size` 表里 `1f602 = 59124` 字节,与本地 `assets/noto/1f602.json` 的
+>   59124 字节逐字节相等——**同一来源可以确认,"CI 用的"不能**。
+>
+> **为什么要较这个真**:这批文件只留在 `%TEMP%` 就没问题;一旦有人照本文的
+> "velato CI 同款"这句话把它们当测试固件 vendor 进仓库,进来的就是一批
+> **CC BY 4.0(要求署名)** 的第三方素材,而仓库的 `deny.toml` 管不到
+> `assets/*.json`。**要用就得在 `assets/LICENSE` 里写明出处与署名。**
+> 另外 `2764_fe0f.json` 在下文若干表里被写成 `2764`,是同一个文件。
 
 ---
 
@@ -219,6 +265,25 @@ implement the `RenderSink` trait to bring your own renderer."* —— 我这个 
 **这一条改变了 lottie 在路线图里的位置**:它不再是"vello 专属能力",CPU 默认后端
 可以原生吃下。
 
+> ⚠️ **复核:签名转述有一处失真,以及漏了一个现成实现。**
+>
+> 1. **`draw` 的真实签名是 `Option<&fixed::Stroke>` / `&fixed::Brush`**,不是本节写的
+>    `Option<&kurbo::Stroke>` / `&peniko::Brush`。二者在 0.11 里等价
+>    (`runtime/model/fixed.rs` 逐字:`pub type Stroke = kurbo::Stroke;`
+>    `pub type Brush = peniko::Brush;` `pub type Transform = kurbo::Affine;`),
+>    所以结论不受影响 ——**但那是别名,不是同名**,而别名是 velato 保留的换实现口子。
+>    照本文的签名去写适配器编译得过,照本文去推断"velato 永远给 kurbo/peniko 类型"
+>    则没有依据。
+> 2. **`vello::Scene` 不是唯一实现,还有 `velato_imaging` 0.0.1**
+>    (crates.io API 实查:2026-05-21 发布,Apache-2.0 OR MIT,仓库
+>    `github.com/forest-rs/imaging`,作者 waywardmonkeys = Bruce Mitchener,
+>    Linebender 的人)。lottie-1 §1.3 已经把它点名为**"我们要写的东西的模板"**,
+>    并指出它最值得抄的一点:**把图层栈失衡收成
+>    `Error::UnbalancedLayerStack` 而不是 panic,出错后整体转 no-op。**
+>    本文从零写了 395 行 `TinySkiaSink`(§1 说"约 280 行",实测 `wc -l` = 395)
+>    却**通篇没提这个包**。这是本次复核认定的最大一处"20% 力气拿 80% 收益被漏掉"
+>    ——详见 §10.5。
+
 ### 2.4 附带核实:velato + vello_cpu 也不冲突
 
 ADR-3b 写了"兜底从 tiny-skia 迁 vello_cpu"。顺手验证这条路不会被 lottie 堵死:
@@ -289,6 +354,27 @@ $ ./lottie-spike cpu assets/Tiger.json 60 out/cpu-tiger.png
 ```
 
 产物 1024×1024 / 113 KB,是一只完整正确的老虎(渐变、多层、47 个填充全在)。
+
+> ⚠️ **复核:本节这些数字产生于 §6.2 的 compose bug 修好之前,而本文没有说。**
+> 用当前 `%TEMP%` 里的二进制(即修好之后的)重跑同一条命令:
+>
+> ```
+> $ ./lottie-spike cpu assets/Tiger.json 60 out/verify-tiger.png
+> [cpu] frame=60 1024x1024  34.73ms  fills=47 strokes=0 peak_layers=4  非白像素=345594
+> ```
+>
+> **345 594,不是本文写的 351 051。** 把两张 PNG 逐像素比:
+> `out/cpu-tiger.png`(10:16 产,本节引用的那张)与新产物有 **7 456 个像素不同
+> (0.71%),最大通道差 224**——那不是舍入,那是"有东西画错了"。
+> 时间线可以对上:`src/tsk_sink.rs` 的 mtime 是 10:36,compose 修复后的
+> `cpu-1f525-fixed.png` 是 10:29,而本节引用的 PNG 全部生成于 10:16—10:18。
+>
+> 所以:**"是一只完整正确的老虎"这句话描述的是 §6.2 亲口承认画错了的那版代码的输出。**
+> 修复确实让 Tiger 也变了(它有 4 组 track matte,见 lottie-1 §6.3),
+> 说明这个 bug 的影响面比 §6.2 描述的"火焰那一张"更大。
+>
+> **§3.4 的 `p-cpu-*` 那批(10:30 产)是修好之后的,复核逐条重跑,数字一模一样**
+> (Tiger 352139 / 1f525 425825 / 1f600 665513)。要引用 CPU 侧数字,引 §3.4,别引本节。
 
 **12 个 Noto emoji 全部渲染成功,零 skipped brush**:
 

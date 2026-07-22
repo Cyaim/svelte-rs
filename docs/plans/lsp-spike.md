@@ -17,17 +17,39 @@
 
 ## 0. 裁决先行
 
-1. **调研 07 里最大的一处未核实假设,实测结果是好消息**:rust-analyzer **今天就已经**
-   索引 `OUT_DIR` 里由 build.rs 生成的 `.rs`,并且把诊断经 LSP `publishDiagnostics`
-   发布到**生成文件自己的 `file://` URI**、位置正确(实测 M8)。也就是说
-   "生成文件是 r-a 眼中的一等公民"这一步**已经免费到手**,不需要落盘、不需要
-   `rust-project.json`、不需要虚拟文档。剩下的全部问题收敛成一件事:**位置映射**。
-2. **调研 07 里最大的一处乐观假设,实测结果是坏消息**:它的 codegen 纪律建立在
-   "script 块逐字搬运(连续 1:1 映射区间)+ 模板表达式逐字出现"之上(调研 07 §3.1/§3.3
-   的 `script` 段与 `expr` 段)。**本仓库两者都不成立**——runes 源变换会改写 script 与
-   模板表达式(`count` → `count.get()`、`count += 1` → 两条语句),而且在 parse 之前还有
-   两次纯文本改写(`extract_props`、`replace_runes`,`script.rs:404`)。所以
-   **不存在"连续偏移差恒定的逐字区"**,映射只能做到 **token 级散点 + 节点级包络**。
+1. **rust-analyzer 对 `OUT_DIR` 生成文件的支持,比调研 07 的措辞好,但好在的地方与
+   本方案初稿写的不是同一处**(见 §10 复核记录 R1/R2,已按实测改写):
+   - **真·好消息(复核新增实测)**:对 `include!(concat!(env!("OUT_DIR"), …))` 进来的
+     生成文件,r-a 的 **hover / goto definition 直接可用**——`didOpen` 生成文件后
+     hover 返回 `let count: i32`,goto 正常跳转,**不需要落盘**。这一条 M10 没测到
+     (M10 用的是落盘文件),是 a1 成本的关键下修项。
+   - **必须修正的一条**:M8 观察到的"发布到生成文件 URI 的诊断",实测 `source` 字段
+     是 **`"rustc"`**,且与 `rust-analyzer/flycheck/0` 的 progress end 同时到达;
+     把 `check.enable=false` 后,生成文件 URI 上的诊断**一条都不剩**(而 `src/main.rs`
+     上 r-a 自己的 `source="rust-analyzer"` 诊断照常在 1.0 s 内到达)。
+     **即:那是 r-a 代跑的 `cargo check` 的输出,不是 r-a 自己的语义分析。**
+     调研 07 §4 本来就写了"r-a 的语义诊断与它代跑的 flycheck 都发布到生成文件 URI",
+     所以 M8 是**证实**而不是推翻;真正被推翻的是它的另一半("r-a 原生诊断也会来,
+     注意去重")——实测生成文件上**没有** r-a 原生诊断。
+   - 因此:**a0 的数据源 = `cargo check` 的 JSON = P1 已经在解析的同一份东西**,
+     只是由 r-a 代跑、在保存时触发。这不改变推荐路线,但把 a0 的边际价值从
+     "IDE 支持观感的 80%" 下调,见 §5 与 §6 的修订。
+2. **调研 07 §3.1/§3.3 提出的是一套 codegen 纪律("script 逐字搬运 + 模板表达式逐字
+   出现"),本仓库当前 codegen 没有遵守它**——这不是调研 07 的"乐观假设",是我们的
+   实现选择与它的建议分岔了。runes 源变换会改写 script 与模板表达式
+   (`count` → `count.get()`、`count += 1` → 两条语句)。所以**不存在"连续偏移差恒定
+   的逐字区"**,映射只能做到 **token 级散点 + 节点级包络**。
+   **但初稿在这里搞错了两件事,已按实测改正**:
+   - `extract_props`(`script.rs:237`)**不制造偏移漂移**:它做的是**字节等长空白替换**
+     (`script.rs:347-357`,注释原文"字节等长空白替换(保留换行;多字节字符按字节数填,
+     行列不漂移)")。只有 `replace_runes` 漂,而且每处恒定 **+4 字节**(6 个 rune 全是
+     `$xxx` → `__sv_xxx`)。漂移表因此是一张 +4 计数表,不是通用编辑表。
+   - **真正的坏消息在别处、而且更致命**:`script.rs` 的 `Rewriter` 用
+     `format_ident!("{name}")` 重造用户变量名(`:884` `.set()`、`:899` `.update()`、
+     `:1038` `.get()`),重造出来的 Ident 是 **`Span::call_site()`**,即
+     `line=1, byte_range=0..0` —— **恰好等于本方案自己定义的"胶水"判据**。
+     也就是说:**每一次对反应式变量的读/写(`.sv` 里最常见、也最常出类型错误的
+     那个 token),provenance 会被无声丢弃**。全示例实测 98 处。详见 §3.2 第零步。
 3. **`prettyplease 重排版之后行号还对不对得上` 这个真问题,答案是:不要在格式化之前建
    映射。** 做法:格式化后把输出文本**重新 parse 一遍**,拿到每个 token 在**输出文本**里的
    精确字节区间,再与格式化前的 token 流做**锚点并行走**(实测 M1/M2/M5:CJK 长行被
@@ -55,14 +77,17 @@
 | 事实 | 位置 | 对映射的含义 |
 |---|---|---|
 | 模板表达式带 .sv 字节偏移 | `template.rs:36` `ExprSrc { src, offset }` | **provenance 的原料已经在了** |
-| 全部 30 处模板表达式走**同一个**入口 | `codegen.rs:200` `parse_expr` / `:207` `expr`(`grep -c "self.expr("` = 30) | 插桩只改一个函数 |
-| `proc-macro2` 已开 `span-locations` | `crates/sv-compiler/Cargo.toml` | 不用加依赖;`script.rs:454` `syn_err` 已经在用它反算行列(**既有先例**) |
-| script 块**整块一次** parse | `script.rs:367` `format!("{{\n{pre}\n}}")` + `parse_str` | script 侧 provenance 是"一次 parse + 一张偏移漂移表"的问题 |
-| parse 前有两次纯文本改写 | `script.rs:404` `replace_runes`(`$state`→`__sv_state`,+4 字节/处)、`script.rs:237` `extract_props`(把 `$props { … }` 整块删掉) | **偏移会漂**,必须记录编辑表,不能假设恒等 |
+| 30 处模板表达式走 `self.expr(` 这一个入口 | `codegen.rs:200` `parse_expr` / `:207` `expr`(`grep -c "self.expr("` = 30) | 但**它不是唯一的用户文本 parse 入口**,见下一行 |
+| **还有 6 处 `parse_str` 直接吃用户文本** | `codegen.rs:267`(`$props` 类型)、`:1021/:1081/:1112/:1388/:1403`(`bind:` 目标)、`:1688`(`{#each}` 模式 `Pat::parse_single`) | 「插桩只改一个函数」**不成立**;这些走的是无 pad 的裸 `parse_str`,其 token 的 `line` 恒为 1 → 会被本方案的判据**误判为胶水而静默丢弃** |
+| `proc-macro2` 已开 `span-locations` | `crates/sv-compiler/Cargo.toml`(锁定 1.0.106) | 不用加依赖;`script.rs:454` `syn_err` 已经在用它反算行列(**既有先例**) |
+| script 块**整块一次** parse | `script.rs:367` `format!("{{\n{pre}\n}}")` + `parse_str` | 注意 wrapped 前缀是 `{\n` = **2 字节**,pad 之外还要减这 2 |
+| parse 前的两次纯文本改写里,**只有一次会漂** | `script.rs:404` `replace_runes`(6 个 rune 一律 `$xxx`→`__sv_xxx`,**恒 +4 字节/处**);`script.rs:237` `extract_props` **字节等长空白替换**(`:347-357`) | 漂移表 = 一张 "+4 计数表";`extract_props` 可当恒等处理(**初稿此处写错,已改**) |
+| **`Rewriter` 用 `format_ident!` 重造用户变量名** | `script.rs:884` `.set()`、`:899` `.update()`、`:1038` `.get()` | **provenance 在这里被丢掉**(call_site);全示例 98 处。这是本方案最大的实现缺口 |
 | 生成代码经 `syn::parse2` + `prettyplease::unparse` | `codegen.rs:126-134` | 格式化前的 token 流可拿到;格式化后位置要靠重解析 |
-| 节点用递增唯一名 `__{prefix}{n}` | `codegen.rs:195` `fresh` | 现成的"哨兵",节点级包络免费 |
+| **元素与文本节点**用递增唯一名 `__{prefix}{n}` | `codegen.rs:195` `fresh`,只有两个调用点:`:318` `fresh("t")`、`:503` `fresh("el")` | 哨兵**只覆盖元素/文本节点**;`{#if}`/`{#each}`/`{#key}`/组件调用/script 语句**没有哨兵**(初稿写"每个节点"是错的) |
 | 生成文件唯一注释是文件头一行 | `codegen.rs:132` | 没有任何锚点注释,"跳进生成文件看" 目前靠猜 |
-| 编译错误只在**编译器域**自报 .sv 行列 | `lib.rs:44` `CompileError`、`:69` `line_col` | 模板/CSS/runes 错误已经是好体验;rustc 错误是零体验 |
+| 编译错误只在**编译器域**自报 .sv 行列 | `lib.rs:44` `CompileError`、`:69` `line_col`(**列是字符数,不是字节**) | 模板/CSS/runes 错误已经是好体验;rustc 错误是零体验 |
+| 编译器域错误经 **`panic!`** 冒出来 | `lib.rs:207` `panic!("\n\n.sv 编译失败\n  --> {e}\n")` | 它**不进 cargo 的 JSON 流**,只在 cargo stderr 的 panic dump 里,`sv check` 必须单独处理(§4.1 已补) |
 
 **结论:现在没有任何 span 映射(生成代码 → .sv),这一条与任务描述一致,已核实。**
 
@@ -78,10 +103,21 @@
 | InputDemo.sv | 63 | 394 | 14 530 | 5.06 ms |
 | Settings.sv | 57 | 476 | 18 906 | 5.25 ms |
 
-两个可直接用于决策的数:**生成放大 6–8×(行)**;**单文件编译 0.5–5.2 ms**。
-后者意味着**编译器不是 IDE 路径上的瓶颈**——keystroke 级重新生成完全负担得起
-(防抖 200ms 的预算里编译只占 3%),瓶颈只会在 r-a 侧。这一条推翻了
-"要不要做增量编译器"这个可能的分心项:**第一年不需要**。
+两个可直接用于决策的数:**生成放大 5.6–8.4×(行)**;**单文件编译 0.4–5.2 ms**
+(复核独立复现:0.44 / 1.65 / 1.56 / 3.35 / 3.67 ms,同量级、系统性偏低约 30%;
+token 与锚点数完全一致:Counter 生成 180 行 / 1017 token / 425 锚点)。
+
+后者意味着**编译器不是 IDE 路径上的瓶颈**,"要不要做增量编译器"这个分心项
+**第一年不需要**。但这句话的适用范围要收窄(复核修订):
+
+- 真正决定"保存 → 看到诊断"的不是 sv-compiler,是 **build.rs 重跑之后 cargo 必须重编
+  整个叶子 crate**。复核实测(TEMP 里 counter-sfc 的等价工程,依赖只有 sv-reactive +
+  sv-ui):改一次 `.sv` → `cargo check` 墙钟 **242–261 ms**;空跑 129 ms;
+  只改 `main.rs` 204 ms。**真实 app 带上 sv-shell(vello/parley/taffy/winit)会更慢,
+  未核实**。
+- 而且**诊断这条路根本吃不到 keystroke 新鲜度**:r-a 在生成文件上只转发 flycheck
+  (§1.3 修订),flycheck 是**保存触发**的。keystroke 级新鲜度只对 hover/goto 有意义
+  (那两个走 r-a 自己的分析,didChange 即时生效)。
 
 ### 1.3 rustc 与 rust-analyzer 今天怎么看待生成文件(实测,最重要的一节)
 
