@@ -26,7 +26,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
-      # 渲染测试要真实字体:Linux 走 Noto CJK(候选路径见 sv-shell/src/font.rs);
+      # 渲染测试要真实字体:Linux 装 Noto CJK 供 fontique 发现(sv-shell/src/text.rs);
       # mesa-vulkan-drivers 提供 lavapipe 软件 Vulkan,让 vello 测试在无 GPU 跑道上也能跑
       - name: Install fonts & software Vulkan (Linux)
         if: runner.os == 'Linux'
@@ -62,7 +62,60 @@ jobs:
       - name: rustfmt
         run: cargo fmt --check
 
-      # 现存告警在清理排期上,先不阻塞合并;失败会在 annotations 里可见
-      - name: clippy (informational)
-        run: cargo clippy --workspace --all-targets
-        continue-on-error: true
+      # R4 门禁(调研 25 §3.2):告警清零后转阻塞。生成代码在 codegen 里
+      # 自带 allow,不会把 .sv 用户拖下水
+      - name: clippy (blocking)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  msrv:
+    name: MSRV (${{ env.MSRV }})
+    runs-on: ubuntu-latest
+    env:
+      # 由 let-chains 决定(见 Cargo.toml 注释);与 rust-version 保持一致
+      MSRV: "1.88.0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.MSRV }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Install fonts
+        run: sudo apt-get update && sudo apt-get install -y fonts-noto-cjk
+      - name: Build on MSRV
+        run: cargo build --workspace
+
+  audit:
+    name: 依赖审计(advisories + 许可证)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories bans licenses sources
+
+  publish-readiness:
+    name: 发布体检(元数据 + 叶子打包)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # 首发前的体检。注意:**依赖序打包在首发前跑不通**——sv-ui 打包时
+      # cargo 会去 registry 找 sv-reactive,而它还没发布(先有鸡先有蛋)。
+      # 所以这里只对无内部依赖的叶子 crate 真打包,其余查元数据齐不齐。
+      - name: cargo package(叶子 crate)
+        run: cargo package -p sv-reactive --allow-dirty
+
+      - name: 元数据完整性(description/license/repository/readme/…)
+        run: |
+          missing=$(cargo metadata --no-deps --format-version 1 | jq -r '
+            .packages[]
+            | select(.publish != [])
+            | . as $p
+            | ["description","license","repository","readme","rust_version"]
+            | map(select($p[.] == null))
+            | select(length > 0)
+            | "\($p.name): 缺 \(join(", "))"')
+          if [ -n "$missing" ]; then echo "$missing"; exit 1; fi
+          echo "全部待发布 crate 元数据齐全"

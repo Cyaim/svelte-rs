@@ -26,11 +26,15 @@ use crate::{Doc, ViewId};
 pub struct TaskId(u64);
 
 type DoneMsg = (u64, Box<dyn Any + Send>);
+/// 任务完成回调(拿回 worker 线程的返回值,在 UI 线程跑)
+type DoneCallback = Box<dyn FnOnce(Box<dyn Any + Send>)>;
+/// 事件循环唤醒闭包(跨线程调用,故 Send + Sync)
+type WakeFn = Box<dyn Fn() + Send + Sync>;
 
 struct Bridge {
     tx: Sender<DoneMsg>,
     rx: Receiver<DoneMsg>,
-    callbacks: RefCell<HashMap<u64, Box<dyn FnOnce(Box<dyn Any + Send>)>>>,
+    callbacks: RefCell<HashMap<u64, DoneCallback>>,
     next: Cell<u64>,
     /// 在途任务数(反应式)
     pending: Signal<usize>,
@@ -48,7 +52,7 @@ thread_local! {
 
 /// 事件循环唤醒器(worker 线程完成任务后调用,把 UI 事件循环拍醒)。
 /// 进程级全局:多窗口共用一个事件循环
-static WAKER: OnceLock<Mutex<Option<Box<dyn Fn() + Send + Sync>>>> = OnceLock::new();
+static WAKER: OnceLock<Mutex<Option<WakeFn>>> = OnceLock::new();
 
 pub fn set_waker(f: impl Fn() + Send + Sync + 'static) {
     *WAKER.get_or_init(|| Mutex::new(None)).lock().unwrap() = Some(Box::new(f));

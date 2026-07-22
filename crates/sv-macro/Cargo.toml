@@ -3,6 +3,13 @@ name = "sv-macro"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+authors.workspace = true
 description = "view! 过程宏:把 Svelte 风味模板编译成 sv-ui 细粒度绑定调用"
 
 [lib]

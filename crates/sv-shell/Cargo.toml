@@ -3,6 +3,13 @@ name = "sv-shell"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+authors.workspace = true
 description = "桌面渲染壳:winit 窗口 + CPU 自绘(softbuffer/tiny-skia/swash)"
 
 [dependencies]

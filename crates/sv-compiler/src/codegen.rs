@@ -7,6 +7,7 @@
 //!    `{ let x = Clone::clone(&x); ... }`——兄弟节点各拿各的克隆,原变量保活;
 //! 2. **重建闭包体级**:if/each/key 的重建闭包每次调用开头重新克隆——闭包环境
 //!    保有原值,反复调用各拿新克隆。
+//!
 //! 代价:模板引用的普通变量需要 `Clone`(文档化约束)。
 
 use std::collections::HashSet;
@@ -104,7 +105,15 @@ pub fn generate(
 
     let file_ts = quote! {
         #props_struct
-        #[allow(unused_variables, unused_mut, clippy::all)]
+        // 生成代码不参与 lint 门禁:`clippy::all` 之外还要挡 rustc 侧的
+        // unused_braces/unused_parens(codegen 为了 hygiene 恒加括号)
+        #[allow(
+            unused_variables,
+            unused_mut,
+            unused_braces,
+            unused_parens,
+            clippy::all
+        )]
         pub fn #fn_ident(doc: &::sv_ui::Doc, parent: ::sv_ui::ViewId #props_param) {
             let __doc: ::sv_ui::Doc = doc.clone();
             let __parent = parent;

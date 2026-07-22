@@ -1,0 +1,60 @@
+# 应用打包(R4-R5,调研 25 §3.3)
+#
+# 库走 crates.io,应用走安装包。这条流水线拿 examples/showcase 当样板,
+# 三平台各出一份**未签名**产物:Windows nsis / macOS dmg / Linux appimage。
+#
+# 为什么不签名:Authenticode 证书与 Apple Developer ID + 公证都是组织级账号
+# 事务,工程侧只能把钩子留好(cargo-packager 支持 signing 配置,填入密钥即可)。
+# 未签名产物在 Windows 会弹 SmartScreen、在 macOS 会被 Gatekeeper 拦——
+# 这是预期行为,不是 bug。
+#
+# 手动触发(不进 PR 门禁:每次跑要装 packager + 三平台构建,太贵)。
+name: Package
+
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  package:
+    name: package (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # AppImage 打包需要 fuse;渲染需要真实字体(fontique 发现系统字体)
+      - name: Linux 依赖
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fonts-noto-cjk libfuse2 file desktop-file-utils
+
+      - name: 安装 cargo-packager
+        run: cargo install cargo-packager --locked
+
+      - name: 构建 release
+        run: cargo build -p showcase --release
+
+      - name: 打包(未签名)
+        run: cargo packager -p showcase --release --verbose
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: showcase-${{ matrix.os }}
+          path: |
+            target/release/*.exe
+            target/release/*.dmg
+            target/release/*.AppImage
+            target/release/nsis/**
+            target/release/appimage/*.AppImage
+          if-no-files-found: warn

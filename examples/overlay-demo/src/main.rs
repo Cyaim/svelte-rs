@@ -27,7 +27,7 @@ fn main() {
         println!("已渲染到 {path}");
         return;
     }
-    sv_shell::run_app("sv 弹层演示", |doc, root| overlay_demo(doc, root)).expect("运行失败");
+    sv_shell::run_app("sv 弹层演示", overlay_demo).expect("运行失败");
 }
 
 fn click_button(doc: &sv_ui::Doc, label: &str) {

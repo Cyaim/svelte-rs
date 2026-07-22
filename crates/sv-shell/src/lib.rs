@@ -26,6 +26,7 @@ pub use render::{
     paint_scrollbars, paint_tree, render_frame, route_wheel, scrollbar_thumb,
 };
 pub use text::{FontHandle, caret_index_at, caret_x, selection_rects};
+// ShellError 定义在下方(与窗口/呈现代码同处),此处不重复导出
 #[cfg(feature = "backend-vello")]
 pub use vello_backend::{VelloPainter, VelloWin, render_frame_vello};
 
@@ -79,6 +80,42 @@ fn vello_or_fallback(explicit: bool) -> Backend {
     Backend::Cpu
 }
 
+// ---------------------------------------------------------------------------
+// 错误类型(R4 去 panic 审计,调研 25 §3.4)
+//
+// 纪律:**窗口/呈现层的失败一律类型化**,事件循环里不 expect 崩——用户 App
+// 不该因为一次 present 失败整个进程消失。分两级:
+// - 致命(建窗/建 surface/事件循环):`ShellError` 冒泡出 `run_app`;
+// - 帧内(resize/取缓冲/present):记一次日志 + 丢该帧,下一帧重试。
+// 保留的 panic 只剩"自证不变量"(taffy 自建树取回、字体注册表键),它们
+// 不依赖外部环境,崩了是本仓库的 bug 而非运行时状况——`shell_panics_are_
+// invariants_only` 测试守住这条线。sv-reactive 里 derived 写保护的 panic 是
+// 语义设计(对齐 Svelte state_unsafe_mutation),不在本次范围。
+// ---------------------------------------------------------------------------
+
+/// 渲染壳致命错误(能起来就不该发生,起不来必须让调用方知道)
+#[derive(Debug)]
+pub enum ShellError {
+    /// 事件循环创建/运行失败(winit)
+    EventLoop(String),
+    /// 窗口创建失败
+    Window(String),
+    /// 绘图上下文 / surface 创建失败(softbuffer)
+    Surface(String),
+}
+
+impl std::fmt::Display for ShellError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EventLoop(e) => write!(f, "sv-shell: 事件循环失败:{e}"),
+            Self::Window(e) => write!(f, "sv-shell: 创建窗口失败:{e}"),
+            Self::Surface(e) => write!(f, "sv-shell: 创建绘图 surface 失败:{e}"),
+        }
+    }
+}
+
+impl std::error::Error for ShellError {}
+
 /// 窗口呈现器:CPU(softbuffer)或 GPU(vello/wgpu)
 enum Presenter {
     Cpu {
@@ -89,14 +126,15 @@ enum Presenter {
     Vello(vello_backend::VelloWin),
 }
 
-fn cpu_presenter(window: &Arc<Window>) -> Presenter {
-    let context = softbuffer::Context::new(window.clone()).expect("sv-shell: 创建绘图上下文失败");
-    let surface =
-        softbuffer::Surface::new(&context, window.clone()).expect("sv-shell: 创建 surface 失败");
-    Presenter::Cpu {
+fn cpu_presenter(window: &Arc<Window>) -> Result<Presenter, ShellError> {
+    let context = softbuffer::Context::new(window.clone())
+        .map_err(|e| ShellError::Surface(format!("上下文:{e}")))?;
+    let surface = softbuffer::Surface::new(&context, window.clone())
+        .map_err(|e| ShellError::Surface(e.to_string()))?;
+    Ok(Presenter::Cpu {
         surface,
         _context: context,
-    }
+    })
 }
 
 /// 事件循环用户事件:后台任务唤醒 + AccessKit 事件(调研 24 §4.2)
@@ -118,10 +156,13 @@ struct WinState {
     access: accesskit_winit::Adapter,
 }
 
+/// 首次 resumed 时跑一次的建树闭包(此后一切更新由 signal 驱动)
+type BuildFn = Box<dyn FnOnce(&Doc, ViewId)>;
+
 struct App {
     title: String,
     doc: Doc,
-    build: Option<Box<dyn FnOnce(&Doc, ViewId)>>,
+    build: Option<BuildFn>,
     _scope: Option<RootHandle>,
     backend: Backend,
     win: Option<WinState>,
@@ -146,9 +187,20 @@ struct App {
     fps_frames: u32,
     fps_t0: std::time::Instant,
     proxy: winit::event_loop::EventLoopProxy<UserEvent>,
+    /// 累计丢帧次数(present/resize 失败;仅用于限流日志)
+    frame_drops: u32,
+    /// 致命错误:记下并退事件循环,由 [`run_app`] 返给调用方
+    fatal: Option<ShellError>,
 }
 
 impl App {
+    /// 起不来时的体面退出:错误留给 run_app,事件循环立刻收摊
+    fn abort(&mut self, event_loop: &ActiveEventLoop, e: ShellError) {
+        eprintln!("{e}");
+        self.fatal = Some(e);
+        event_loop.exit();
+    }
+
     fn paint(&mut self) {
         // 先套用后台任务完成值、推进动画,再渲染本帧
         sv_ui::tasks::pump();
@@ -182,13 +234,32 @@ impl App {
                 else {
                     return;
                 };
-                surface.resize(w, h).expect("sv-shell: surface resize 失败");
-                let mut buffer = surface.buffer_mut().expect("sv-shell: 取帧缓冲失败");
-                for (dst, src) in buffer.iter_mut().zip(pixmap.pixels()) {
-                    let c = src.demultiply();
-                    *dst = ((c.red() as u32) << 16) | ((c.green() as u32) << 8) | (c.blue() as u32);
+                // 帧内失败一律降级为丢帧:窗口最小化/GPU 复位/合成器重启时
+                // 这些调用会短暂失败,崩进程是最坏的处理方式
+                let frame = surface
+                    .resize(w, h)
+                    .and_then(|()| surface.buffer_mut())
+                    .and_then(|mut buffer| {
+                        for (dst, src) in buffer.iter_mut().zip(pixmap.pixels()) {
+                            let c = src.demultiply();
+                            *dst = ((c.red() as u32) << 16)
+                                | ((c.green() as u32) << 8)
+                                | (c.blue() as u32);
+                        }
+                        buffer.present()
+                    });
+                if let Err(e) = frame {
+                    // 前三次与之后每 600 次各记一条:偶发不刷屏,持续故障看得见
+                    self.frame_drops += 1;
+                    // `%` 而非 `is_multiple_of`:后者 1.87 才稳定,MSRV 是 1.85
+                    if self.frame_drops <= 3 || self.frame_drops % 600 == 0 {
+                        eprintln!("sv-shell: 丢帧({e});累计 {} 次", self.frame_drops);
+                    }
+                    // 本帧作废:清帧键让下一帧重画(否则静止短路会永久跳过)
+                    self.last_frame_key = None;
+                    ws.window.request_redraw();
+                    return;
                 }
-                buffer.present().expect("sv-shell: present 失败");
             }
             #[cfg(feature = "backend-vello")]
             Presenter::Vello(vw) => {
@@ -465,11 +536,11 @@ impl ApplicationHandler<UserEvent> for App {
             .with_title(self.title.clone())
             .with_inner_size(LogicalSize::new(480.0, 400.0))
             .with_visible(false);
-        let window = Arc::new(
-            event_loop
-                .create_window(attrs)
-                .expect("sv-shell: 创建窗口失败"),
-        );
+        // 起不来就体面退出:记下错误、退事件循环,由 run_app 返给调用方
+        let window = match event_loop.create_window(attrs) {
+            Ok(w) => Arc::new(w),
+            Err(e) => return self.abort(event_loop, ShellError::Window(e.to_string())),
+        };
         let access = accesskit_winit::Adapter::with_event_loop_proxy(
             event_loop,
             &window,
@@ -490,6 +561,10 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             Backend::Cpu => cpu_presenter(&window),
+        };
+        let presenter = match presenter {
+            Ok(p) => p,
+            Err(e) => return self.abort(event_loop, e),
         };
 
         // 首次 resumed 时才构建 UI(此后 signal → 树 → 重绘的链路开始工作)
@@ -739,7 +814,9 @@ pub fn run_app(
     title: &str,
     build: impl FnOnce(&Doc, ViewId) + 'static,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
+    let event_loop = EventLoop::<UserEvent>::with_user_event()
+        .build()
+        .map_err(|e| ShellError::EventLoop(e.to_string()))?;
     let proxy = event_loop.create_proxy();
     // 系统剪贴板接入编辑内核(Ctrl+C/X/V;测试路径注入假实现,互不相扰)
     sv_ui::set_clipboard(ShellClipboard::default());
@@ -764,9 +841,17 @@ pub fn run_app(
         fps_frames: 0,
         fps_t0: std::time::Instant::now(),
         proxy,
+        frame_drops: 0,
+        fatal: None,
     };
-    event_loop.run_app(&mut app)?;
-    Ok(())
+    event_loop
+        .run_app(&mut app)
+        .map_err(|e| ShellError::EventLoop(e.to_string()))?;
+    // 循环里发生的致命错误(建窗/建 surface)在这里冒泡,而不是当场 panic
+    match app.fatal.take() {
+        Some(e) => Err(e.into()),
+        None => Ok(()),
+    }
 }
 
 /// 离屏渲染一帧到 PNG(验证渲染栈用,不开窗)。返回构建好的 Doc 供进一步断言
@@ -1178,6 +1263,56 @@ mod tests {
             x0 <= 0.5 && (w - tw).abs() < 1.0,
             "全选矩形应覆盖整串:{rects:?}"
         );
+    }
+
+    /// 去 panic 门禁(R4,调研 25 §3.4):事件循环/呈现层(lib.rs 非测试段)
+    /// 不许有 `expect`/`unwrap`/`panic!`——那里的失败全部来自运行时环境
+    /// (窗口系统、合成器、GPU),必须走 [`ShellError`] 或丢帧降级。
+    /// 其余文件保留的 expect 只允许是"自证不变量"(taffy 自建树取回、
+    /// 字体注册表键):不依赖外部环境,触发即本仓库的 bug。
+    #[test]
+    fn shell_panics_are_invariants_only() {
+        let src = include_str!("lib.rs");
+        let non_test = src
+            .split_once("#[cfg(test)]")
+            .map(|(head, _)| head)
+            .unwrap_or(src);
+        let offenders: Vec<&str> = non_test
+            .lines()
+            .filter(|l| {
+                let code = l.trim_start();
+                !code.starts_with("//")
+                    && !code.starts_with("///")
+                    && (code.contains(".expect(")
+                        || code.contains(".unwrap()")
+                        || code.contains("panic!("))
+            })
+            .collect();
+        assert!(
+            offenders.is_empty(),
+            "呈现层不许 panic,请改走 ShellError 或丢帧降级:{offenders:#?}"
+        );
+        // 不变量白名单:剩下的 expect 集中在这两处,数量变化需连同理由一起改
+        let invariant_files = [
+            ("render.rs", include_str!("render.rs")),
+            ("text.rs", include_str!("text.rs")),
+        ];
+        for (name, src) in invariant_files {
+            let head = src
+                .split_once("#[cfg(test)]")
+                .map(|(h, _)| h)
+                .unwrap_or(src);
+            for l in head.lines() {
+                let code = l.trim_start();
+                if code.starts_with("//") {
+                    continue;
+                }
+                assert!(
+                    !code.contains(".unwrap()") && !code.contains("panic!("),
+                    "{name} 里只允许带解释的 expect(不变量),不允许裸 unwrap/panic!:{l}"
+                );
+            }
+        }
     }
 
     /// 溢出输入框的点击命中:文本被光标跟随推左后,点右端应落在串尾附近

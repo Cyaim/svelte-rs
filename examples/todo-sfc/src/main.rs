@@ -28,7 +28,7 @@ fn main() {
         println!("已渲染到 {path}");
         return;
     }
-    sv_shell::run_app("sv 待办(.sv 特性演示)", |doc, root| todo(doc, root)).expect("运行失败");
+    sv_shell::run_app("sv 待办(.sv 特性演示)", todo).expect("运行失败");
 }
 
 /// 按文档顺序找第一个匹配文本的按钮并点击(--png 演示与测试共用)

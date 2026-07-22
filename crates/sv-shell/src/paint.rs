@@ -87,6 +87,9 @@ pub trait Painter {
         PainterCaps::default()
     }
     fn fill_rounded_rect(&mut self, x: f32, y: f32, w: f32, h: f32, radius: f32, color: Color);
+    /// 参数多但不打包成结构体:动词签名对齐 vello Scene,
+    /// 换后端时一一对照;打包会在每帧热路径上多一次构造
+    #[allow(clippy::too_many_arguments)]
     fn stroke_rounded_rect(
         &mut self,
         x: f32,

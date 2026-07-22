@@ -436,9 +436,10 @@ fn walk_taffy(
 /// 大全量树靠 virtual_list 兜底,ADR-9)
 pub fn layout_full_cached(doc: &Doc, logical_w: f32, logical_h: f32) -> Layout {
     use std::cell::RefCell;
+    /// (Doc 身份, 版本, 宽位, 高位, 上帧布局)
+    type CacheSlot = Option<(usize, u64, u32, u32, Layout)>;
     thread_local! {
-        static CACHE: RefCell<Option<(usize, u64, u32, u32, Layout)>> =
-            const { RefCell::new(None) };
+        static CACHE: RefCell<CacheSlot> = const { RefCell::new(None) };
     }
     let key = (
         doc.identity(),
@@ -907,7 +908,15 @@ pub fn render_frame(doc: &Doc, phys_w: u32, phys_h: u32, scale: f32) -> (Pixmap,
     let logical_h = phys_h as f32 / scale;
     let layout = layout_full_cached(doc, logical_w, logical_h);
 
-    let mut pixmap = Pixmap::new(phys_w.max(1), phys_h.max(1)).expect("sv-shell: 创建 pixmap 失败");
+    // 分配失败(尺寸超大/内存耗尽)退化成 1×1:调用方拿到的是一帧无用像素,
+    // 而不是一个崩掉的进程(R4 去 panic,调研 25 §3.4)
+    let mut pixmap = match Pixmap::new(phys_w.max(1), phys_h.max(1)) {
+        Some(p) => p,
+        None => {
+            eprintln!("sv-shell: {phys_w}×{phys_h} pixmap 分配失败,本帧退化为 1×1");
+            Pixmap::new(1, 1).expect("1×1 pixmap 分配不可能失败")
+        }
+    };
     pixmap.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
     let mut painter = TinySkiaPainter::new(&mut pixmap);
     paint_tree(doc, &layout.placed, &mut painter, scale);

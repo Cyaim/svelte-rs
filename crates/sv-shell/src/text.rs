@@ -151,9 +151,11 @@ pub fn measure(text: &str, px: f32, wrap_w: Option<f32>) -> (f32, f32) {
         // 会差几个 px);现在同源了
         return (0.0, line_height(px));
     }
+    /// 键 =(文本哈希, 字号位, 折行宽位)→ 值 =(宽, 高)
+    type MeasureCache = HashMap<(u64, u32, u32), (f32, f32)>;
     thread_local! {
-        static HOT: RefCell<HashMap<(u64, u32, u32), (f32, f32)>> = RefCell::new(HashMap::new());
-        static COLD: RefCell<HashMap<(u64, u32, u32), (f32, f32)>> = RefCell::new(HashMap::new());
+        static HOT: RefCell<MeasureCache> = RefCell::new(HashMap::new());
+        static COLD: RefCell<MeasureCache> = RefCell::new(HashMap::new());
     }
     const CAP: usize = 4096;
     let key = {

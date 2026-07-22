@@ -15,12 +15,11 @@ fn main() {
             .get(i + 1)
             .cloned()
             .unwrap_or_else(|| "counter-sfc.png".into());
-        sv_shell::render_to_png(|doc, root| counter(doc, root), 960, 800, 2.0, &path)
-            .expect("离屏渲染失败");
+        sv_shell::render_to_png(counter, 960, 800, 2.0, &path).expect("离屏渲染失败");
         println!("已渲染到 {path}");
         return;
     }
-    sv_shell::run_app("sv 计数器(SFC)", |doc, root| counter(doc, root)).expect("运行失败");
+    sv_shell::run_app("sv 计数器(SFC)", counter).expect("运行失败");
 }
 
 #[cfg(test)]

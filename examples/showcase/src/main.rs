@@ -31,7 +31,7 @@ fn main() {
         println!("已渲染到 {path}");
         return;
     }
-    sv_shell::run_app("sv 特性橱窗", |doc, root| showcase(doc, root)).expect("运行失败");
+    sv_shell::run_app("sv 特性橱窗", showcase).expect("运行失败");
 }
 
 /// 按文档顺序找第一个匹配文本的按钮并点击

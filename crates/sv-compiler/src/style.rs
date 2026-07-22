@@ -418,14 +418,14 @@ fn parse_style_with_vars(
         };
         let key = key.trim();
         let err = |msg: String| CompileError::at_offset(source, decl_offset, msg);
-        let value = substitute_vars(raw_value.trim(), vars).map_err(&err)?;
+        let value = substitute_vars(raw_value.trim(), vars).map_err(err)?;
         let value = value.trim();
 
-        let num = |v: &str| -> Result<f32, CompileError> { parse_length(key, v).map_err(&err) };
+        let num = |v: &str| -> Result<f32, CompileError> { parse_length(key, v).map_err(err) };
         let nums = || -> Result<Vec<f32>, CompileError> {
             value
                 .split_whitespace()
-                .map(|v| parse_length(key, v).map_err(&err))
+                .map(|v| parse_length(key, v).map_err(err))
                 .collect()
         };
 
@@ -470,12 +470,12 @@ fn parse_style_with_vars(
                         Some(i) => (&rest[..i], rest[i..].trim_start()),
                         None => (rest, ""),
                     };
-                    let w = parse_length("border", w_tok).map_err(&err)?;
+                    let w = parse_length("border", w_tok).map_err(err)?;
                     let mut rest = after;
                     if let Some(r) = rest.strip_prefix("solid") {
                         rest = r.trim_start();
                     }
-                    let c = color(if rest.is_empty() { "black" } else { rest }).map_err(&err)?;
+                    let c = color(if rest.is_empty() { "black" } else { rest }).map_err(err)?;
                     quote! { s.border = Some(::sv_ui::Border { width: #w, color: #c }); }
                 }
             }
@@ -619,7 +619,7 @@ fn parse_style_with_vars(
                 }
             },
             "bg" | "background" | "background-color" => {
-                let c = color(value).map_err(&err)?;
+                let c = color(value).map_err(err)?;
                 quote! { s.bg = Some(#c); }
             }
             "fg" | "color" => {
@@ -627,7 +627,7 @@ fn parse_style_with_vars(
                     // 继承语义:清除自身值,渲染时沿父链解析
                     quote! { s.fg = None; }
                 } else {
-                    let c = color(value).map_err(&err)?;
+                    let c = color(value).map_err(err)?;
                     quote! { s.fg = Some(#c); }
                 }
             }

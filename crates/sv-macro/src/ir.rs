@@ -12,7 +12,10 @@ pub struct ViewInput {
     pub nodes: Vec<Node>,
 }
 
-/// 模板节点(view 子层级可出现的东西)
+/// 模板节点(view 子层级可出现的东西)。
+/// 变体大小不均是 IR 的常态(叶子带段列表,分支带子树);IR 短命且每模板
+/// 只构造一次,装箱换来的是 codegen 里满地的解引用——不划算
+#[allow(clippy::large_enum_variant)]
 pub enum Node {
     /// `<view ...> 子节点... </view>`
     View(ViewElem),
@@ -77,7 +80,8 @@ pub enum AttrKind {
     BindScrollY,
 }
 
-/// 文本段:字符串字面量或 `{表达式}` 插值
+/// 文本段:字符串字面量或 `{表达式}` 插值(同上,不装箱)
+#[allow(clippy::large_enum_variant)]
 pub enum Segment {
     Lit(LitStr),
     Expr(Expr),

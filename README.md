@@ -104,6 +104,21 @@ This is a prototype — APIs churn, and several subsystems (layout, text shaping
 frame pacing) are placeholders with planned replacements. See
 [docs/DESIGN.md](docs/DESIGN.md) (Chinese) for the roadmap and ADRs.
 
+## Versioning & releases
+
+Nothing is published to crates.io yet — the crate names are pending a rename
+decision (`sv` is already taken; see ADR-10 in
+[docs/DESIGN.md](docs/DESIGN.md)). Once published, the workspace ships all
+crates at the same version, in dependency order.
+
+**0.x policy: a minor bump (`0.X.0`) means breaking changes, a patch bump
+(`0.0.X`) is backwards compatible.** Every breaking change documents its
+migration in [CHANGELOG.md](CHANGELOG.md). Three breaking changes are already
+scheduled before 1.0 is even discussed: merging the two template front-ends,
+converging the `on:` event syntax, and frame-pacing semantics (ADR-6).
+
+MSRV is **1.88** — set by let-chains (`if let ... && ...`), not by edition 2024 — and pinned by a CI lane.
+
 ## License
 
 Dual-licensed: MIT OR Apache-2.0.

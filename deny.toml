@@ -1,0 +1,49 @@
+# cargo-deny 配置(R4 发布门禁,调研 25 §3.2)
+#
+# 三件事:漏洞公告、许可证合规、依赖来源。CI 里 `cargo deny check advisories
+# bans licenses sources` 阻塞合并。
+
+[graph]
+# 只审我们真正会构建的目标(桌面三平台;鸿蒙进 R5 时补 *-unknown-linux-ohos)
+targets = [
+    "x86_64-pc-windows-msvc",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+]
+all-features = true
+
+[advisories]
+version = 2
+# 未修复的公告一律阻塞;确需放行时在此登记 ID 并写明理由与复查日期
+ignore = []
+
+[licenses]
+version = 2
+# 与本仓库 MIT OR Apache-2.0 相容的清单(Linebender/wgpu 生态的实际取值)
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "BSL-1.0",
+    "MPL-2.0",
+    "CC0-1.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "OpenSSL",
+]
+confidence-threshold = 0.9
+
+[bans]
+# 同一依赖多版本共存只提示不阻塞:上游生态(wgpu/winit 链)常态如此,
+# 一刀切会把门禁变成噪音源
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

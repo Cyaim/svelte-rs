@@ -601,7 +601,7 @@ pub fn unique_id() -> String {
 /// `tick`:立即冲刷待决 effect。本模型写入后本就同步 flush,该函数主要为
 /// API 对齐保留;batch 内调用是 no-op(不破坏批处理原子性),batch 结束照常统一 flush
 pub fn tick() {
-    RT.with(|rtc| maybe_flush(rtc));
+    RT.with(maybe_flush);
 }
 
 /// 在**无所有者、无追踪**环境下执行 `f`:期间创建的节点不挂进任何作用域,
@@ -708,10 +708,14 @@ pub fn debug_node_count() -> usize {
     RT.with(|rtc| rtc.borrow().nodes.len())
 }
 
+/// 句柄的类型标记:`fn() -> T` 让 `T` 协变且不牵动自动 trait,
+/// `*const ()` 关掉 `Send`/`Sync`(ADR-1:响应式图是单线程模型)
+type HandleMarker<T> = PhantomData<(fn() -> T, *const ())>;
+
 /// `$state` 的句柄。`Copy`、`!Send`,可自由塞进闭包
 pub struct Signal<T: 'static> {
     id: NodeId,
-    _t: PhantomData<(fn() -> T, *const ())>,
+    _t: HandleMarker<T>,
 }
 
 impl<T> Clone for Signal<T> {
@@ -810,7 +814,7 @@ impl<T: 'static> Signal<T> {
 /// 可用 [`Derived::set`]/[`Derived::update`] 临时覆盖(乐观 UI)
 pub struct Derived<T: 'static> {
     id: NodeId,
-    _t: PhantomData<(fn() -> T, *const ())>,
+    _t: HandleMarker<T>,
 }
 
 impl<T> Clone for Derived<T> {

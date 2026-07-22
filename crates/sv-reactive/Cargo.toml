@@ -3,6 +3,13 @@ name = "sv-reactive"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+authors.workspace = true
 description = "Svelte 5 runes 风格的细粒度响应式内核(state/derived/effect)"
 
 [dependencies]
