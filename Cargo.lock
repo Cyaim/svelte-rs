@@ -2816,6 +2816,7 @@ version = "0.0.1"
 dependencies = [
  "proc-macro2",
  "quote",
+ "sv-compiler",
  "sv-reactive",
  "sv-ui",
  "syn",

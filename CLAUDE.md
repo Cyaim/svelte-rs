@@ -32,8 +32,12 @@ runes 源变换 + build.rs 集成,示例 examples/counter-sfc)。
 约束:
 - 响应式是单线程模型(thread-local runtime,句柄 `Copy + !Send`)。
 - derived 计算中禁止写 state(会 panic,对应 Svelte state_unsafe_mutation)。
-- sv-ui 是宏的编译目标:改绑定原语签名要同步改 sv-macro codegen 与其测试。
+- sv-ui 是两个前端的编译目标,但**发射口只有一个**:`sv_compiler::emit`
+  (绑定原语调用词汇表)。改原语签名改那一处 + 它的形状测试即可,
+  不必两边同步(解析/IR/属性名表仍各前端自有)。
 - 布局已迁 taffy 0.12(封在 sv-shell layout_tree 内,`Vec<Placed>` 契约);
   文本栈已迁 Parley 0.11 + fontique(封在 sv-shell text.rs 门面,全仓唯一
-  parley import;fallback 混排/折行/对齐);TextInput 编辑几何仍走 swash
-  线性路径(R3-P3 随 PlainEditor 切换)。渲染 CPU/vello 双后端(Painter 抽象)。
+  parley import;fallback 混排/折行/对齐/光标与选区几何——**线性路径与
+  font.rs 已退役**)。渲染 CPU/vello 双后端(Painter 抽象)。
+- 开窗路径是**帧对齐**的(ADR-6):写 signal 只入队 + 催一帧,effect 在
+  帧前统一冲刷;要立刻看到结果调 `sv_reactive::tick()`。离屏/测试路径不受影响。

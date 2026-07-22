@@ -133,10 +133,18 @@ let double = $derived(count * 2);
 
 The original ADR-2 said "start with proc-macro only". After building runnable
 prototypes of both routes side by side, it was revised: **both frontends coexist over
-one compiler core**. The M1 plan is three no-regret steps: merge sv-macro and
-sv-compiler into a single core (shared IR/codegen, both frontends become thin shells),
-make templates data rather than generated types, and split codegen into setup/render —
-the latter two also serve hot reload. The biggest open risk of the `.sv` route is IDE
+one compiler core**. Three no-regret steps: (1) merge sv-macro and sv-compiler into a
+single core, (2) make templates data rather than generated types, (3) split codegen
+into setup/render — the latter two also serve hot reload.
+
+**Step 1 landed (2026-07-22)**: every emission against sv-ui now goes through one
+place, `sv_compiler::emit` (the binding-primitive call vocabulary plus the rebuild
+closure protocol); the `view!` macro depends on sv-compiler and emits from the same
+vocabulary, so a primitive's signature changes in exactly one file. **Parsing and the
+IR were deliberately left separate**: `view!` carries expressions as Rust tokens with
+real spans, while `.sv` carries source text with offsets (and runs them through the
+runes transform). Fusing the IRs would trade away the macro route's span precision —
+which is the very reason ADR-2 keeps both frontends. The biggest open risk of the `.sv` route is IDE
 support (no rust-analyzer inside `.sv`; a Volar-style forwarding LSP is unbuilt).
 See [sv-components](./sv-components.md).
 

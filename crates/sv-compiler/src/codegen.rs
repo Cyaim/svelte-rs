@@ -16,6 +16,7 @@ use proc_macro2::{TokenStream, TokenTree};
 use quote::{ToTokens, format_ident, quote};
 use syn::parse::Parser as _;
 
+use crate::emit::{self, ElemKind, TextPart};
 use crate::script::{self, ScriptOutput, collect_pat_idents};
 use crate::style::StyleSheet;
 use crate::template::{Arm, Attr, AttrValue, ExprSrc, Node, Segment, Tag};
@@ -316,7 +317,8 @@ impl Cg<'_> {
             Node::Text { segments } => {
                 let el = self.fresh("t");
                 let create = self.leaf_create(&el, &Tag::Text, segments, scope)?;
-                Ok(quote! { #create __doc.append(__parent, #el); })
+                let append = emit::append(&parent_ident(), &el);
+                Ok(quote! { #create #append })
             }
             Node::If {
                 arms,
@@ -500,9 +502,9 @@ impl Cg<'_> {
         }
         let el = self.fresh("el");
         let mut ts = match tag {
-            Tag::View => quote! { let #el = __doc.create_view(); },
-            Tag::Checkbox => quote! { let #el = __doc.create_checkbox(); },
-            Tag::Input => quote! { let #el = __doc.create_text_input(); },
+            Tag::View => emit::create(&el, ElemKind::View, ""),
+            Tag::Checkbox => emit::create(&el, ElemKind::Checkbox, ""),
+            Tag::Input => emit::create(&el, ElemKind::TextInput, ""),
             Tag::Overlay => unreachable!("overlay 在 emit_element 顶部拦截"),
             Tag::Text | Tag::Button => {
                 let segments: &[Segment] = match children.first() {
@@ -513,7 +515,7 @@ impl Cg<'_> {
             }
             Tag::Component(_) => unreachable!(),
         };
-        ts.extend(quote! { __doc.append(__parent, #el); });
+        ts.extend(emit::append(&parent_ident(), &el));
 
         // ---- 静态样式源(优先级:class 类 < style=""/简写,后写覆盖) ----
         let mut style_setters = TokenStream::new();
@@ -785,32 +787,22 @@ impl Cg<'_> {
         let user_focus = attrs.iter().find(|a| a.name == "onfocus");
         let user_blur = attrs.iter().find(|a| a.name == "onblur");
         if user_focus.is_some() || user_blur.is_some() {
-            let bind =
-                |attr: Option<&Attr>, var: TokenStream| -> Result<TokenStream, CompileError> {
-                    match attr {
-                        Some(a) => {
-                            let AttrValue::Expr(e) = &a.value else {
-                                return Err(CompileError::at_offset(
-                                    self.source,
-                                    a.offset,
-                                    "事件处理器应为 {闭包表达式}",
-                                ));
-                            };
-                            let x = self.expr(e, scope, true)?;
-                            Ok(quote! { let #var = #x; })
-                        }
-                        None => Ok(quote! { let #var = || {}; }),
-                    }
+            // 词汇表按"有没有用户闭包"收参(缺席的一侧它补空闭包);
+            // `.sv` 侧的表达式先过 runes 改写
+            let handler = |attr: Option<&Attr>| -> Result<Option<TokenStream>, CompileError> {
+                let Some(a) = attr else { return Ok(None) };
+                let AttrValue::Expr(e) = &a.value else {
+                    return Err(CompileError::at_offset(
+                        self.source,
+                        a.offset,
+                        "事件处理器应为 {闭包表达式}",
+                    ));
                 };
-            let f_bind = bind(user_focus, quote! { __uf })?;
-            let b_bind = bind(user_blur, quote! { __ub })?;
-            ts.extend(quote! {
-                {
-                    #f_bind
-                    #b_bind
-                    __doc.set_on_focus_change(#el, move |__f| if __f { __uf(); } else { __ub(); });
-                }
-            });
+                Ok(Some(self.expr(e, scope, true)?.to_token_stream()))
+            };
+            let f = handler(user_focus)?;
+            let b = handler(user_blur)?;
+            ts.extend(emit::focus_change(&el, f, b));
         }
 
         // ---- 事件 / 绑定 / 附着 / 过渡 ----
@@ -822,7 +814,7 @@ impl Cg<'_> {
                 "onclick" | "on:click" => match &attr.value {
                     AttrValue::Expr(e) => {
                         let handler = self.expr(e, scope, true)?;
-                        ts.extend(quote! { __doc.set_on_click(#el, #handler); });
+                        ts.extend(emit::on_click(&el, handler.to_token_stream()));
                     }
                     AttrValue::Str { .. } => {
                         return Err(CompileError::at_offset(
@@ -837,10 +829,7 @@ impl Cg<'_> {
                 "onkeydown" => match &attr.value {
                     AttrValue::Expr(e) => {
                         let handler = self.expr(e, scope, true)?;
-                        ts.extend(quote! {
-                            __doc.set_focusable(#el, true);
-                            __doc.set_on_key(#el, #handler);
-                        });
+                        ts.extend(emit::on_key(&el, handler.to_token_stream()));
                     }
                     AttrValue::Str { .. } => {
                         return Err(CompileError::at_offset(
@@ -890,19 +879,11 @@ impl Cg<'_> {
                 // aria-label:无障碍名称覆盖(调研 24 §4.1;任意元素可用)
                 "aria-label" => match &attr.value {
                     AttrValue::Str { value, .. } => {
-                        ts.extend(quote! { __doc.set_accessible_label(#el, #value); });
+                        ts.extend(emit::aria_label(&el, quote! { #value }, false));
                     }
                     AttrValue::Expr(e) => {
                         let expr = self.expr(e, scope, false)?;
-                        ts.extend(quote! {
-                            {
-                                let __a_doc = __doc.clone();
-                                let __a_el = #el;
-                                ::sv_reactive::effect(move || {
-                                    __a_doc.set_accessible_label(__a_el, &(#expr));
-                                });
-                            }
-                        });
+                        ts.extend(emit::aria_label(&el, expr.to_token_stream(), true));
                     }
                 },
                 // <input> 专属:placeholder / value 单向 / bind:value 双向 /
@@ -922,7 +903,7 @@ impl Cg<'_> {
                             "placeholder v0 只支持静态字符串",
                         ));
                     };
-                    ts.extend(quote! { __doc.set_placeholder(#el, #value); });
+                    ts.extend(emit::placeholder(&el, quote! { #value }));
                 }
                 "value" if *tag == Tag::Input => {
                     let AttrValue::Expr(e) = &attr.value else {
@@ -969,15 +950,7 @@ impl Cg<'_> {
                         let x = self.expr(e, scope, false)?;
                         quote! { #x }
                     };
-                    ts.extend(quote! {
-                        {
-                            let __b_sig = #sig_ts;
-                            let __b_doc = __doc.clone();
-                            let __b_el = #el;
-                            ::sv_reactive::effect(move || { __b_doc.set_input_value(__b_el, &__b_sig.get()); });
-                            __doc.set_on_input(#el, move |__v| __b_sig.set(__v.to_string()));
-                        }
-                    });
+                    ts.extend(emit::bind_value(&el, sig_ts));
                 }
                 "oninput" | "onsubmit" => {
                     if *tag != Tag::Input {
@@ -994,13 +967,12 @@ impl Cg<'_> {
                             "事件处理器应为 {闭包表达式}(签名 |值: &str|)",
                         ));
                     };
-                    let handler = self.expr(e, scope, true)?;
-                    let setter = if attr.name == "oninput" {
-                        quote! { set_on_input }
+                    let handler = self.expr(e, scope, true)?.to_token_stream();
+                    ts.extend(if attr.name == "oninput" {
+                        emit::on_input(&el, handler)
                     } else {
-                        quote! { set_on_submit }
-                    };
-                    ts.extend(quote! { __doc.#setter(#el, #handler); });
+                        emit::on_submit(&el, handler)
+                    });
                 }
                 // onscroll:滚动偏移变化回调(签名 Fn(f32, f32),新 (x, y))
                 "onscroll" => {
@@ -1012,7 +984,7 @@ impl Cg<'_> {
                         ));
                     };
                     let handler = self.expr(e, scope, true)?;
-                    ts.extend(quote! { __doc.set_on_scroll(#el, #handler); });
+                    ts.extend(emit::on_scroll(&el, handler.to_token_stream()));
                 }
                 // bind:scrolly:Signal<f32> ↔ 纵向滚动偏移双向桥(调研 22)。
                 // 延后到事件循环末尾发射:桥会链式保留既有 on_scroll,
@@ -1185,7 +1157,7 @@ impl Cg<'_> {
             }
         }
         if let Some(sig) = bind_scrolly {
-            ts.extend(quote! { ::sv_ui::bind_scroll_y(&__doc, #el, #sig); });
+            ts.extend(emit::bind_scroll_y(&el, sig));
         }
         if autofocus {
             ts.extend(quote! { __doc.focus(#el); });
@@ -1371,40 +1343,23 @@ impl Cg<'_> {
         segments: &[Segment],
         scope: &Scope,
     ) -> Result<TokenStream, CompileError> {
-        let create = |label: &str| match tag {
-            Tag::Button => quote! { let #el = __doc.create_button(#label); },
-            _ => quote! { let #el = __doc.create_text(#label); },
+        let kind = match tag {
+            Tag::Button => ElemKind::Button,
+            _ => ElemKind::Text,
         };
-        let all_static = segments.iter().all(|s| matches!(s, Segment::Static(_)));
-        if all_static {
-            let label: String = segments
-                .iter()
-                .map(|s| match s {
-                    Segment::Static(t) => t.as_str(),
-                    _ => unreachable!(),
-                })
-                .collect();
-            return Ok(create(&label));
-        }
-        let mut pushes = TokenStream::new();
+        // 模板段 → 共享词汇表的段(表达式先过 runes 改写,这是 .sv 独有的一步)
+        let mut parts = Vec::with_capacity(segments.len());
         for seg in segments {
-            match seg {
-                Segment::Static(t) if t.is_empty() => {}
-                Segment::Static(t) => pushes.extend(quote! { __s.push_str(#t); }),
-                Segment::Expr(e) => {
-                    let expr = self.expr(e, scope, false)?;
-                    pushes.extend(quote! { __s.push_str(&(#expr).to_string()); });
-                }
-            }
-        }
-        let mut ts = create("");
-        ts.extend(quote! {
-            ::sv_ui::bind_text(&__doc, #el, move || {
-                let mut __s = ::std::string::String::new();
-                #pushes
-                __s
+            parts.push(match seg {
+                Segment::Static(t) => TextPart::Lit(t.clone()),
+                Segment::Expr(e) => TextPart::Expr(self.expr(e, scope, false)?.to_token_stream()),
             });
-        });
+        }
+        if let Some(label) = emit::static_text(&parts) {
+            return Ok(emit::create(el, kind, &label));
+        }
+        let mut ts = emit::create(el, kind, "");
+        ts.extend(emit::bind_text(el, &parts));
         Ok(ts)
     }
 
@@ -1604,9 +1559,12 @@ impl Cg<'_> {
         };
         let then_closure = self.rebuild_closure(then_ts, scope);
         let else_closure = self.rebuild_closure(else_ts, scope);
-        Ok(quote! {
-            ::sv_ui::if_block(&__doc, __parent, move || #cond, #then_closure, #else_closure);
-        })
+        Ok(emit::if_block(
+            &parent_ident(),
+            cond.to_token_stream(),
+            then_closure,
+            else_closure,
+        ))
     }
 
     fn emit_each(
@@ -1694,7 +1652,11 @@ impl Cg<'_> {
                 }
             };
             if else_children.is_empty() {
-                Ok(quote! { ::sv_ui::each_block(&__doc, __parent, move || #list_expr, #row); })
+                Ok(emit::each_block(
+                    &parent_ident(),
+                    list_expr.to_token_stream(),
+                    row,
+                ))
             } else {
                 let empty_ts = self.emit_nodes(else_children, scope)?;
                 let empty = self.rebuild_closure(empty_ts, scope);
@@ -1708,18 +1670,15 @@ impl Cg<'_> {
     /// if/key/each-空态的重建闭包:`Fn` 会被反复调用,体内先对普通变量做
     /// 每次调用的预克隆,内层 move 闭包拿克隆、环境保原值
     fn rebuild_closure(&self, body: TokenStream, scope: &Scope) -> TokenStream {
-        if body.is_empty() {
-            return quote! { |_, _| {} };
-        }
+        // 闭包协议在共享词汇表里;`.sv` 独有的普通变量预克隆作为 prelude 注入
         let pre = preclones(&body, scope);
-        quote! {
-            move |__doc, __parent| {
-                let __doc: ::sv_ui::Doc = __doc.clone();
-                #pre
-                #body
-            }
-        }
+        emit::rebuild_closure(body, pre)
     }
+}
+
+/// 生成代码里的父节点变量名(共享词汇表按 Ident 收参,这里固定一个)
+fn parent_ident() -> syn::Ident {
+    format_ident!("__parent")
 }
 
 /// emit_each 的参数包(字段太多,聚合传递)

@@ -126,9 +126,16 @@ let double = $derived(count * 2);
 | 编译目标 | sv-ui 绑定原语 | sv-ui 绑定原语(相同) |
 
 ADR-2 原版结论是"proc-macro 起步"。两条路线的可运行原型并排实证之后修订为:
-**双前端共存,共享同一编译器核心**。M1 计划是三步无悔:sv-macro 与 sv-compiler
-合并为单一内核(同一 IR/codegen,两个前端都是薄壳)、模板数据化(生成数据而非
-生成类型)、codegen 拆 setup/render——后两步同时服务热重载。`.sv` 路线最大的
+**双前端共存,共享同一编译器核心**。三步无悔:① sv-macro 与 sv-compiler
+合并为单一内核、② 模板数据化(生成数据而非生成类型)、③ codegen 拆
+setup/render——后两步同时服务热重载。
+
+**① 已落地(2026-07-22)**:对 sv-ui 的**发射口收敛为一处**
+`sv_compiler::emit`(绑定原语调用词汇表 + 重建闭包协议),`view!` 宏改为
+依赖 sv-compiler 并从同一词汇表发射;原语签名变更从此只改一处。
+**刻意没有合并的是解析与 IR**:`view!` 的表达式是带真 span 的 Rust token,
+`.sv` 的是带偏移的源码串(还要过 runes 改写)——硬合成一份 IR 会把宏路径的
+span 精度赔进去,而那正是 ADR-2 保留双前端的理由。`.sv` 路线最大的
 悬置风险是 IDE 体验(`.sv` 内没有 rust-analyzer,Volar 式转发 LSP 未 spike)。
 详见 [sv-components](./sv-components.md)。
 

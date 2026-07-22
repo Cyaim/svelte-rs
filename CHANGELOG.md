@@ -35,6 +35,10 @@ sv-shell),按依赖序推送;`examples/` 不发布。
 
 ### 变更
 
+- **双前端共享 codegen 内核(ADR-2 无悔三步 ①)**:新增 `sv_compiler::emit`
+  作为两个前端对 sv-ui 的唯一发射口;`sv-macro` 现依赖 `sv-compiler`。
+  对用户无行为变化(两条路线生成的代码形状不变)。
+
 - **帧调度(ADR-6,语义 breaking)**:开窗应用的 signal 写入不再当场跑 effect,
   改为攒到帧边界由渲染壳统一冲刷(一次事件连写 N 次 = 一帧一轮)。迁移:
   需要立刻看到结果的地方调 `sv_reactive::tick()`。离屏渲染与测试路径不受影响。

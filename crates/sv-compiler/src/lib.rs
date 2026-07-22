@@ -28,6 +28,9 @@
 //! 构建集成:build.rs 里调用 [`build`],生成代码进 OUT_DIR,`include!` 引入。
 
 mod codegen;
+/// 绑定原语调用词汇表:**双前端共享的 codegen 内核**
+/// (`view!` 宏从这里发射同一套调用;见 emit.rs 头部说明)
+pub mod emit;
 mod script;
 mod sfc;
 mod style;
