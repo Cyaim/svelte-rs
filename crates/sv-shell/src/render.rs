@@ -965,12 +965,19 @@ pub fn paint_tree(doc: &Doc, placed: &[Placed], painter: &mut dyn Painter, scale
             }
 
             match n.kind {
-                // 【接线未完成】动画的像素要走 `Painter::draw_image`,那个动词
-                // 正在并行落地中。**这里刻意什么都不画**——不画占位方块,
-                // 因为占位方块会让"素材没接上"看起来像"接上了但内容是灰的",
-                // 而前者是配置错误、后者是渲染错误,查的方向完全不同。
-                // 现在的表现是:布局占位在(固有尺寸生效),但那块是背景色。
-                ElementKind::Animation => {}
+                ElementKind::Animation => {
+                    // 贴在**内容盒**上(扣掉 padding 与边框),与文本同口径。
+                    // 素材没接上 / 帧号越界 / 矢量档 → 什么都不画。
+                    // **刻意不画占位方块**:占位方块会让"素材没接上"看起来像
+                    // "接上了但内容是灰的",而这两者查的方向完全不同
+                    if let Some(a) = n.anim.as_deref()
+                        && let Some(img) = crate::animation::image_for(a)
+                    {
+                        let cw = (p.rect.w - s.padding.horizontal()) * scale - bw * 2.0;
+                        let ch = (p.rect.h - s.padding.vertical()) * scale - bw * 2.0;
+                        painter.draw_image(x + inset, y + inset_top, cw, ch, &img);
+                    }
+                }
                 ElementKind::Text => {
                     let fg = with_opacity(resolve_fg(inner, p.id), op);
                     // 断行在逻辑坐标做,与布局(taffy measure)同源;

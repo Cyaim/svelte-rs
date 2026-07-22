@@ -10,6 +10,7 @@
 //! - [`render_to_png`]:离屏渲染一帧存 PNG(CI / 可视化验证用,不需要窗口)。
 
 mod a11y;
+mod animation;
 mod paint;
 mod render;
 mod text;
@@ -17,6 +18,7 @@ mod text;
 mod vello_backend;
 
 pub use a11y::{A11yCache, build_tree_update, dispatch_action, incremental_tree_update};
+pub use animation::{frame, frame_count, register_frames, unregister};
 // `mod paint` 是私有的,所以这里没列出的类型就是**公开但不可命名** ——
 // 外部 crate 既写不出类型名也构造不出值。路径那五个类型漏了整整一轮:
 // `Painter::fill_path` 明明是 pub trait 的 pub 方法,外面却根本调不动,
@@ -2729,6 +2731,125 @@ cd",
         assert!(log.overflowed);
         assert!(log.items.is_empty());
         assert!(log.needs_rebuild(), "溢出必须退化成全量,不能被当成'没变'");
+    }
+
+    /// **从场景树到像素的端到端**:一个动画节点真的画出来了吗,换帧真的换画面吗。
+    ///
+    /// 这条把三段拼在一起验:`sv_ui` 的 `ElementKind::Animation` + 时间轴、
+    /// `sv_shell::animation` 的句柄注册表、`Painter::draw_image`。
+    /// 三段各自都有单元测试,但**"接起来能不能出图"是它们谁都答不了的**——
+    /// 上一版这里是个什么都不画的空分支,而全套测试照样全绿。
+    #[test]
+    fn animation_node_renders_pixels_and_frame_change_changes_them() {
+        crate::animation::reset_for_test();
+        crate::render::cache_reset();
+
+        // 两帧纯色:第 0 帧红、第 1 帧绿
+        let solid = |rgba: [u8; 4]| {
+            let px: Vec<u8> = (0..(8 * 8)).flat_map(|_| rgba).collect();
+            crate::PixelImage::new(8, 8, px).expect("固件应能构造")
+        };
+        let handle = crate::register_frames(vec![solid([255, 0, 0, 255]), solid([0, 255, 0, 255])]);
+
+        let doc = Doc::new();
+        let (id, _scope) = create_root(|| {
+            let id = doc.create_animation(sv_ui::AnimData {
+                source: sv_ui::AnimSource::Frames { handle },
+                intrinsic: (8.0, 8.0),
+                frame_rate: 10.0,
+                frame_count: 2,
+                frame: 0,
+                looped: true,
+                playing: false,
+            });
+            doc.append(doc.root(), id);
+            id
+        });
+
+        // 固有尺寸真的进了布局
+        let layout = crate::render::layout_tree_full(&doc, 40.0, 40.0);
+        let placed = layout
+            .placed
+            .iter()
+            .find(|p| p.id == id)
+            .expect("动画节点应在布局里");
+        assert!(
+            (placed.rect.w - 8.0).abs() < 0.01 && (placed.rect.h - 8.0).abs() < 0.01,
+            "动画的盒子应等于固有尺寸,实得 {}x{}",
+            placed.rect.w,
+            placed.rect.h
+        );
+
+        let pixel_at = |doc: &Doc, x: u32, y: u32| {
+            let (pm, _) = render_frame(doc, 40, 40, 1.0);
+            let p = pm.pixel(x, y).expect("取样点应在画面内").demultiply();
+            (p.red(), p.green(), p.blue())
+        };
+
+        // 第 0 帧:红
+        let c0 = pixel_at(&doc, 4, 4);
+        assert_eq!(c0, (255, 0, 0), "第 0 帧应画出红色,实得 {c0:?}");
+
+        // 换帧 → 画面必须跟着变
+        doc.set_anim_frame(id, 1);
+        let c1 = pixel_at(&doc, 4, 4);
+        assert_eq!(c1, (0, 255, 0), "换到第 1 帧应变绿,实得 {c1:?}");
+
+        // 素材注销后:什么都不画(背景白),**不是**画一块占位灰
+        crate::unregister(handle);
+        let c2 = pixel_at(&doc, 4, 4);
+        assert_eq!(
+            c2,
+            (255, 255, 255),
+            "素材没了就该什么都不画(留背景),而不是占位方块;实得 {c2:?}"
+        );
+    }
+
+    /// 时间轴 → 帧号 → 像素:整条链一起走一遍
+    #[test]
+    fn timeline_drives_the_rendered_frame() {
+        crate::animation::reset_for_test();
+        crate::render::cache_reset();
+        let solid = |rgba: [u8; 4]| {
+            let px: Vec<u8> = (0..(8 * 8)).flat_map(|_| rgba).collect();
+            crate::PixelImage::new(8, 8, px).expect("固件应能构造")
+        };
+        // 4 帧:红 绿 蓝 黑,10fps → 每帧 100ms
+        let handle = crate::register_frames(vec![
+            solid([255, 0, 0, 255]),
+            solid([0, 255, 0, 255]),
+            solid([0, 0, 255, 255]),
+            solid([0, 0, 0, 255]),
+        ]);
+        let doc = Doc::new();
+        let (id, _scope) = create_root(|| {
+            let id = doc.create_animation(sv_ui::AnimData {
+                source: sv_ui::AnimSource::Frames { handle },
+                intrinsic: (8.0, 8.0),
+                frame_rate: 10.0,
+                frame_count: 4,
+                frame: 0,
+                looped: true,
+                playing: false,
+            });
+            doc.append(doc.root(), id);
+            id
+        });
+        sv_ui::anim::play(&doc, id);
+
+        let sample = |doc: &Doc| {
+            let (pm, _) = render_frame(doc, 40, 40, 1.0);
+            let p = pm.pixel(4, 4).expect("取样点应在画面内").demultiply();
+            (p.red(), p.green(), p.blue())
+        };
+        sv_ui::anim::pump(0.0);
+        assert_eq!(sample(&doc), (255, 0, 0));
+        sv_ui::anim::pump(250.0);
+        assert_eq!(sample(&doc), (0, 0, 255), "250ms @10fps = 第 2 帧");
+        // 循环:450ms → 第 4 帧 → 环绕回第 0 帧
+        sv_ui::anim::pump(450.0);
+        assert_eq!(sample(&doc), (255, 0, 0), "环绕回第 0 帧");
+        sv_ui::anim::stop(&doc, id);
     }
 
     /// 动画帧不该重建布局树。
