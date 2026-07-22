@@ -20,6 +20,9 @@ sv-shell),按依赖序推送;`examples/` 不发布。
 
 ### 新增
 
+- **keyup 与捕获段**(R1 档 B):`KeyEvent.phase`、`onkeyup` / `on_key_up`、
+  `Doc::set_on_key_capture`(root→焦点,先于冒泡)。抬起不触发默认段。
+
 - **`:focus` 伪类**(`.btn:focus` / `&:focus`):接焦点链,与 `onfocus`/`onblur`
   合成一次设入;写了 `:focus` 的元素自动可获焦。
 - **滚动条 thumb 拖拽**(调研 22 S4):命中带容差、记住抓点、按比例反算偏移。

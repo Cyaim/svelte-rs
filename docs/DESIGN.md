@@ -331,7 +331,15 @@ sv-compiler / sv-macro / sv-build)**空闲**;`runa`、`sylph` 被占。
   dispatch_key(冒泡→Tab 导航→Enter/Space 激活→快捷键)、快捷键注册表
   (on_cleanup 自动注销、后进先出)、winit 接入(map_key、synthetic 过滤、
   点击设焦)、默认焦点环、双前端 onkeydown/onfocus/onblur/autofocus;
-  `:focus` 伪类接线与 keyup/捕获段留档 B(调研 20 §6);TextInput+剪贴板+IME
+  ——**✅ 2026-07-22 档 B 补齐(调研 20 §6)**:`:focus` 伪类接线
+  (`ClassStyle.focus`,独立与嵌套两种写法;状态信号接**焦点链**不是指针;
+  声明序按 CSS L-V-F-H-A;**与 onfocus/onblur 合成一次设入**——sv-ui 每种
+  回调只有一个槽,分开设互相顶掉;写了 `:focus` 自动设可获焦,与 onkeydown
+  同理:不设位样式永不生效且查不出原因);**keyup 相位 + 捕获段**
+  (`KeyEvent.phase`、`onkeyup`/`on_key_up` 双前端、`set_on_key_capture`
+  root→焦点先于冒泡;**抬起不进默认段**,否则一次按键处理两遍;按下与抬起
+  共用同一个 on_key 槽位,故在 emit 里按相位分派而非设两次);
+  TextInput+剪贴板+IME
   (6.5–10.5 人周;裁决:编辑态 `Box<InputState>` 在节点内不进 Signal、EditOp
   纯模型词汇对齐 Parley PlainEditor、剪贴板 arboard、`bind:value` 复刻
   bind:checked 模板;Painter 新增 push_clip/pop_clip——与 R2 滚动共享)
