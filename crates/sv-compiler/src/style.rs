@@ -631,17 +631,26 @@ fn parse_style_with_vars(
                     )));
                 }
             },
-            "overflow" => match value {
-                "visible" => quote! { s.overflow = ::sv_ui::Overflow::Visible; },
-                "hidden" => quote! { s.overflow = ::sv_ui::Overflow::Hidden; },
-                // v0:auto 按 scroll 处理(调研 22 §2.5)
-                "scroll" | "auto" => quote! { s.overflow = ::sv_ui::Overflow::Scroll; },
-                _ => {
-                    return Err(err(format!(
-                        "overflow 支持 visible/hidden/scroll/auto,收到 `{value}`"
-                    )));
+            // overflow 简写写两轴;overflow-x/-y 各写一轴(CSS 同款)
+            "overflow" | "overflow-x" | "overflow-y" => {
+                let variant = match value {
+                    "visible" => quote! { ::sv_ui::Overflow::Visible },
+                    "hidden" => quote! { ::sv_ui::Overflow::Hidden },
+                    "scroll" | "auto" => quote! { ::sv_ui::Overflow::Scroll },
+                    _ => {
+                        return Err(CompileError::at_offset(
+                            source,
+                            offset,
+                            format!("{key} 支持 visible/hidden/scroll/auto,收到 `{value}`"),
+                        ));
+                    }
+                };
+                match key {
+                    "overflow-x" => quote! { s.overflow_x = #variant; },
+                    "overflow-y" => quote! { s.overflow = #variant; },
+                    _ => quote! { s.overflow = #variant; s.overflow_x = #variant; },
                 }
-            },
+            }
             "bg" | "background" | "background-color" => {
                 let c = color(value).map_err(err)?;
                 quote! { s.bg = Some(#c); }
@@ -659,7 +668,8 @@ fn parse_style_with_vars(
                 return Err(err(format!(
                     "未知样式键 `{key}`(支持盒模型 padding/margin/border(-radius)、gap、font-size、\
                      opacity、width/height/min-max、flex 系(direction/grow/shrink/wrap/justify-content/\
-                     align-items/align-self)、background(-color)、color、cursor、overflow、\
+                     align-items/align-self)、background(-color)、color、cursor、\
+                     overflow(-x/-y)、\
                      white-space、text-align;其余见 CSS-SUPPORT 矩阵)"
                 )));
             }

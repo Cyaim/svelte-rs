@@ -367,8 +367,13 @@ sv-compiler / sv-macro / sv-build)**空闲**;`runa`、`sylph` 被占。
   否则会穿透去点底下的内容;桌面无显式指针捕获,按住期间一直跟指针、
   松开即止,与原生一致、
   `onscroll`/`bind:scrolly`(链式保留)双前端、virtual_scroll 桥(100k 行
-  虚拟高度接真实滚轮);**留档 B**:S4 thumb 拖拽 + 指针捕获、S6 平滑/惯性、
-  触摸滚动、overflow-x/y 按轴拆分;
+  虚拟高度接真实滚轮);
+  ——**✅ 2026-07-22 overflow 按轴拆分落地**:`Style.overflow`(纵)+
+  `overflow_x`(横),`.sv` 认 `overflow`/`overflow-x`/`overflow-y`(简写
+  写两轴);**只在该轴可滚时给滚动范围** —— 横向 hidden + 纵向 scroll
+  的容器不会被滚轮横推、滚动条也只出纵向那根;任一轴非 Visible 就裁剪
+  (裁剪矩形是二维的,没法只裁一轴);
+  **留档 B**:S6 平滑/惯性、触摸滚动;
   ——**✅ 2026-07-18 taffy + 换行落地**(调研 23 T1/T2/T3):taffy 0.12
   变更帧重建封在 layout_tree 内(`Vec<Placed>` 契约不动,全部金样/回路/
   滚动测试零回归;disable_rounding 保 HiDPI;缺省 align_items=Start、

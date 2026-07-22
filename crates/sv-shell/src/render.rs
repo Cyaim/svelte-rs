@@ -233,7 +233,7 @@ fn to_taffy(s: &sv_ui::Style) -> taffy::Style {
         // "顶对齐不拉伸"行为,迁移零回归优先(调研 23 §2.2)
         align_items: Some(map_align(s.align_items)),
         align_self: s.align_self.map(map_align),
-        overflow: if s.overflow == Overflow::Visible {
+        overflow: if s.overflow == Overflow::Visible && s.overflow_x == Overflow::Visible {
             taffy::Point {
                 x: taffy::Overflow::Visible,
                 y: taffy::Overflow::Visible,
@@ -391,7 +391,9 @@ fn walk_taffy(
         return;
     }
 
-    let (child_clip, child_depth, scroll) = if n.style.overflow != Overflow::Visible {
+    // 任一轴非 Visible 就要裁剪(裁剪矩形是二维的,没法只裁一轴)
+    let clips = n.style.overflow != Overflow::Visible || n.style.overflow_x != Overflow::Visible;
+    let (child_clip, child_depth, scroll) = if clips {
         let clip2 = Some(clip.map_or(rect, |c| intersect(c, rect)));
         // 内容尺寸与滚动范围:content_override(virtual_scroll 桥)优先,
         // 否则取 taffy 的 scrollable overflow(content_size 含 padding 贡献)
@@ -406,7 +408,17 @@ fn walk_taffy(
                 (l.scroll_width(), l.scroll_height()),
             ),
         };
-        if n.style.overflow == Overflow::Scroll {
+        // 只在**该轴可滚**时给出滚动范围:横向 hidden + 纵向 scroll 的
+        // 容器不该被滚轮横推,滚动条也只该出纵向那根
+        let scrollable = (
+            n.style.overflow_x == Overflow::Scroll,
+            n.style.overflow == Overflow::Scroll,
+        );
+        let max = (
+            if scrollable.0 { max.0 } else { 0.0 },
+            if scrollable.1 { max.1 } else { 0.0 },
+        );
+        if scrollable.0 || scrollable.1 {
             out.scroll_areas.push(ScrollArea {
                 id: vid,
                 viewport: rect,
@@ -1172,10 +1184,10 @@ pub fn route_wheel(
         .find(|p| {
             p.hit(x, y)
                 && doc.read(|inner| {
-                    inner
-                        .nodes
-                        .get(p.id)
-                        .is_some_and(|n| n.style.overflow == Overflow::Scroll)
+                    inner.nodes.get(p.id).is_some_and(|n| {
+                        n.style.overflow == Overflow::Scroll
+                            || n.style.overflow_x == Overflow::Scroll
+                    })
                 })
         })
         .map(|p| p.id);
@@ -1193,11 +1205,9 @@ pub fn route_wheel(
         target = doc.read(|inner| {
             let mut cur = inner.nodes.get(id).and_then(|n| n.parent);
             while let Some(c) = cur {
-                if inner
-                    .nodes
-                    .get(c)
-                    .is_some_and(|n| n.style.overflow == Overflow::Scroll)
-                {
+                if inner.nodes.get(c).is_some_and(|n| {
+                    n.style.overflow == Overflow::Scroll || n.style.overflow_x == Overflow::Scroll
+                }) {
                     return Some(c);
                 }
                 cur = inner.nodes.get(c).and_then(|n| n.parent);

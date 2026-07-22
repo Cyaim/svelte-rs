@@ -976,6 +976,39 @@ let count = $state(0i32);
 
     /// `<textarea>`:与 `<input>` 共用全部输入属性,额外认 rows;
     /// rows 用错地方要报错(而不是静默忽略)
+    /// `overflow` 简写写两轴,`overflow-x/-y` 各写一轴(CSS 同款)
+    #[test]
+    fn overflow_axis_keys_compile() {
+        let both = compile_sv("<script></script><view style=\"overflow: scroll\" />", "c")
+            .expect("简写应编译成功");
+        assert!(
+            both.contains("s.overflow = ") && both.contains("s.overflow_x = "),
+            "简写应同时写两轴:
+{both}"
+        );
+
+        let split = compile_sv(
+            "<script></script><view style=\"overflow-x: hidden; overflow-y: scroll\" />",
+            "c",
+        )
+        .expect("分轴应编译成功");
+        assert!(
+            split.contains("s.overflow_x = ::sv_ui::Overflow::Hidden"),
+            "
+{split}"
+        );
+        assert!(
+            split.contains("s.overflow = ::sv_ui::Overflow::Scroll"),
+            "
+{split}"
+        );
+        syn::parse_file(&split).unwrap();
+
+        let err = compile_sv("<script></script><view style=\"overflow-x: 斜着\" />", "c")
+            .expect_err("非法值应报错");
+        assert!(err.message.contains("overflow-x"), "{}", err.message);
+    }
+
     /// `onkeyup` 与 `onkeydown` 共用 sv-ui 的单一槽位:必须合成一次设入,
     /// 否则后设的把先设的顶掉(R1 档 B)
     #[test]

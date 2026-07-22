@@ -1651,6 +1651,79 @@ cd",
         (doc, container, rows)
     }
 
+    /// R2 档 B:overflow 按轴拆分。"横向裁掉、纵向滚"是最常见的组合,
+    /// 过去只有一个 overflow 字段,横向也会跟着可滚
+    #[test]
+    fn overflow_axis_split() {
+        let doc = Doc::new();
+        let container = doc.create_view();
+        doc.append(doc.root(), container);
+        doc.update_style(container, |s| {
+            s.overflow = sv_ui::Overflow::Scroll; // 纵向滚
+            s.overflow_x = sv_ui::Overflow::Hidden; // 横向裁
+            s.width = Some(200.0);
+            s.height = Some(100.0);
+        });
+        // 内容比容器又宽又高
+        let wide = doc.create_view();
+        doc.update_style(wide, |s| {
+            s.width = Some(600.0);
+            s.height = Some(400.0);
+        });
+        doc.append(container, wide);
+
+        let layout = layout_tree_full(&doc, 480.0, 400.0);
+        let a = layout
+            .scroll_areas
+            .iter()
+            .find(|a| a.id == container)
+            .expect("纵向可滚 → 应有滚动区");
+        assert!(a.max.1 > 0.0, "纵向应可滚:{:?}", a.max);
+        assert_eq!(a.max.0, 0.0, "横向 hidden 不该给出滚动范围:{:?}", a.max);
+
+        // 滚轮:纵向消费,横向因为无范围而不动
+        let (cx, cy) = (a.viewport.x + 10.0, a.viewport.y + 10.0);
+        assert!(
+            route_wheel(
+                &doc,
+                &layout.placed,
+                &layout.scroll_areas,
+                cx,
+                cy,
+                0.0,
+                50.0
+            )
+            .is_some(),
+            "纵向滚轮应被消费"
+        );
+        let before = doc.scroll_of(container).0;
+        route_wheel(
+            &doc,
+            &layout.placed,
+            &layout.scroll_areas,
+            cx,
+            cy,
+            50.0,
+            0.0,
+        );
+        assert_eq!(doc.scroll_of(container).0, before, "横向 hidden 不该被推动");
+
+        // 两轴都 hidden:只裁不滚,连滚动区都不该产生
+        doc.update_style(container, |s| s.overflow = sv_ui::Overflow::Hidden);
+        let layout = layout_tree_full(&doc, 480.0, 400.0);
+        assert!(
+            !layout.scroll_areas.iter().any(|a| a.id == container),
+            "都 hidden 不该有滚动区"
+        );
+        assert!(
+            layout
+                .placed
+                .iter()
+                .any(|p| p.id == wide && p.clip.is_some()),
+            "hidden 仍然要裁剪"
+        );
+    }
+
     #[test]
     fn scroll_offset_shifts_children_and_clamps() {
         let (doc, container, rows) = scroll_doc();

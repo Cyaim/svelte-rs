@@ -20,6 +20,9 @@ sv-shell),按依赖序推送;`examples/` 不发布。
 
 ### 新增
 
+- **`overflow-x` / `overflow-y` 按轴拆分**(R2 档 B):`overflow` 简写写两轴;
+  分轴支持"横向裁掉、纵向滚"。
+
 - **keyup 与捕获段**(R1 档 B):`KeyEvent.phase`、`onkeyup` / `on_key_up`、
   `Doc::set_on_key_capture`(root→焦点,先于冒泡)。抬起不触发默认段。
 

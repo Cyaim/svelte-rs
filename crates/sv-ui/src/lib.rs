@@ -208,7 +208,10 @@ pub struct Style {
     pub cursor: Option<Cursor>,
     /// 溢出行为(Hidden/Scroll 的 View 尺寸不被内容撑开,子内容按
     /// scroll 偏移平移并裁剪;调研 22)
+    /// 纵轴溢出行为(`overflow-y`);`overflow` 简写同时写两轴
     pub overflow: Overflow,
+    /// 横轴溢出行为(`overflow-x`)。分轴的常见用法是"横向裁掉、纵向滚"
+    pub overflow_x: Overflow,
     // ---- flex 第一批(调研 23 T3;taffy 直通,渲染层不读) ----
     pub justify_content: JustifyContent,
     pub align_items: AlignItems,
@@ -243,6 +246,7 @@ impl Default for Style {
             opacity: 1.0,
             cursor: None,
             overflow: Overflow::Visible,
+            overflow_x: Overflow::Visible,
             justify_content: JustifyContent::Start,
             align_items: AlignItems::Start,
             align_self: None,
@@ -282,6 +286,7 @@ impl PartialEq for Style {
             && self.opacity == other.opacity
             && self.cursor == other.cursor
             && self.overflow == other.overflow
+            && self.overflow_x == other.overflow_x
             && self.justify_content == other.justify_content
             && self.align_items == other.align_items
             && self.align_self == other.align_self
