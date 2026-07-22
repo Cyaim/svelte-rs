@@ -865,11 +865,7 @@ fn tokens_reference(ts: TokenStream, pred: &dyn Fn(&str) -> bool) -> bool {
                     return true;
                 }
             }
-            TokenTree::Group(g) => {
-                if tokens_reference(g.stream(), pred) {
-                    return true;
-                }
-            }
+            TokenTree::Group(g) if tokens_reference(g.stream(), pred) => return true,
             _ => {}
         }
     }

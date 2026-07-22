@@ -680,12 +680,11 @@ pub fn line_col_to_byte(source: &str, line: usize, col: usize) -> usize {
     }
     let rest = &source[off..];
     let line_end = rest.find('\n').unwrap_or(rest.len());
-    let mut chars = 1usize;
-    for (i, _) in rest[..line_end].char_indices() {
+    // col 是 **1-based 字符列**(与 rustc 一致,见本模块头),所以从 1 数起
+    for (chars, (i, _)) in (1usize..).zip(rest[..line_end].char_indices()) {
         if chars == col {
             return off + i;
         }
-        chars += 1;
     }
     off + line_end
 }

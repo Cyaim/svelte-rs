@@ -274,8 +274,10 @@ impl App {
                 if let Err(e) = frame {
                     // 前三次与之后每 600 次各记一条:偶发不刷屏,持续故障看得见
                     self.frame_drops += 1;
-                    // `%` 而非 `is_multiple_of`:后者 1.87 才稳定,MSRV 是 1.85
-                    if self.frame_drops <= 3 || self.frame_drops % 600 == 0 {
+                    // 早先这里写的是 `%`,注释理由是"`is_multiple_of` 1.87 才稳定、
+                    // MSRV 是 1.85"。**那条注释后来过期了**:MSRV 已由 let-chains
+                    // 定在 1.88(见 Cargo.toml),1.87 的 std API 反而可用了
+                    if self.frame_drops <= 3 || self.frame_drops.is_multiple_of(600) {
                         eprintln!("sv-shell: 丢帧({e});累计 {} 次", self.frame_drops);
                     }
                     // 本帧作废:清帧键让下一帧重画(否则静止短路会永久跳过)
@@ -3456,8 +3458,15 @@ cd",
             r.start > 0 && r.end == layout.placed.len(),
             "弹层应追加在末尾"
         );
-        // 弹层按钮盖在底部按钮上方 → 重叠处优先命中弹层
-        let hit = layout.hit_click(&doc, 30.0, 30.0).expect("应命中");
+        // 弹层按钮盖在底部按钮上方 → 重叠处优先命中弹层。
+        //
+        // **取样点必须离边界足够远**:原来打在 (30, 30),而弹层按钮实测是
+        // `rect=(10.0, 10.0, 64.0, 20.3)` —— 下边界 30.3,只剩 **0.3px** 余量。
+        // 按钮高度来自文本行高,而行高随字体版本浮动;本机绿、CI 的 macOS 与
+        // Windows 双双红,就是这 0.3px 翻了面(本地探针量出来的)。
+        // 改打按钮中心附近:横向 64 宽里取 20,纵向 20.3 高里取 15,
+        // 两轴都留出**数倍于字体差异**的余量
+        let hit = layout.hit_click(&doc, 20.0, 15.0).expect("应命中");
         assert!(
             layout.placed[r.start..r.end].iter().any(|p| p.id == hit),
             "重叠处应优先命中弹层"
@@ -3466,7 +3475,7 @@ cd",
         open.set(false);
         let layout = layout_tree_full(&doc, 480.0, 400.0);
         assert!(layout.overlay_regions.is_empty());
-        assert!(layout.hit_click(&doc, 30.0, 30.0).is_some());
+        assert!(layout.hit_click(&doc, 20.0, 15.0).is_some());
     }
 
     /// O1:Below 锚定放不下时翻转 Above,最终 clamp 进窗口

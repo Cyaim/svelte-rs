@@ -894,7 +894,7 @@ fn report_too_deep(id: ViewId) {
         h.set(h.get() + 1);
         h.get()
     });
-    if n <= 3 || n % 600 == 0 {
+    if n <= 3 || n.is_multiple_of(600) {
         eprintln!(
             "sv-shell: 子树嵌套超过 {MAX_TREE_DEPTH} 层(节点 {id:?}),\
              该子树按叶子处理以避免栈溢出;累计 {n} 次"

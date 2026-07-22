@@ -560,9 +560,7 @@ fn bad_magic_is_rejected() {
     bytes[0] = b'X';
     assert_eq!(
         PagFile::parse(&bytes),
-        Err(PagError::BadMagic {
-            found: [b'X', b'A', b'G']
-        })
+        Err(PagError::BadMagic { found: *b"XAG" })
     );
 
     // 一段和 PAG 完全无关、但长度够的数据
@@ -1330,7 +1328,7 @@ fn mutating_a_valid_file_never_panics_and_actually_reaches_the_parsers() {
             buf[at] ^= (next() & 0xFF) as u8;
         }
         // 偶尔再截一刀,把"变异 + 截断"这个组合也覆盖上
-        if next() % 4 == 0 {
+        if next().is_multiple_of(4) {
             let keep = (next() as usize) % buf.len();
             buf.truncate(keep);
         }

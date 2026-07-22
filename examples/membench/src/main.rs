@@ -439,7 +439,7 @@ fn build_deep(doc: &Doc, controls: usize, depth: usize) -> Vec<Signal<i32>> {
             seen += 1;
             // `sigs.is_empty()` 兜底:极小规模(子节点总数 < TEXT_EVERY)时
             // 一个探针都不建的话,--mutate 会静默变成空转
-            if seen % TEXT_EVERY == 0 || (sigs.is_empty() && level + 1 == depth) {
+            if seen.is_multiple_of(TEXT_EVERY) || (sigs.is_empty() && level + 1 == depth) {
                 let probe = doc.create_text("");
                 doc.append(link, probe);
                 let sig = state(level as i32);

@@ -46,7 +46,7 @@ jobs:
       # 只在 vello_backend.rs 里读),留着纯属每轮多花一次 apt
       - name: Install fonts (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y fonts-noto-cjk
+        run: sudo apt-get update && sudo apt-get install -y fonts-noto-cjk libfontconfig-dev
 
       - name: Build (all targets)
         run: cargo build --workspace --all-targets
@@ -96,7 +96,7 @@ jobs:
 
       - name: Install fonts & software Vulkan (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y fonts-noto-cjk mesa-vulkan-drivers
+        run: sudo apt-get update && sudo apt-get install -y fonts-noto-cjk libfontconfig-dev mesa-vulkan-drivers
 
       # --all-targets 是重点:回归当时挂的是 lib,但测试/bench/示例里同样有
       # cfg 分支,只 build lib 照不到。这一步同时把 membench、showcase 的
@@ -125,6 +125,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # `cargo doc` 也要先把各 crate check 一遍 —— 于是 fontconfig 的 -sys
+      # 依赖同样要在这一道装。少了它这一道会以"failed to run custom build
+      # command"红掉,而那跟文档一点关系都没有
+      - name: Install build deps (fontconfig)
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig-dev
 
       # --all-features:vello 那半边的 doc 注释平时被 cfg 掉,rustdoc 根本不解析,
       # 链接烂了也照样绿 —— 这正是本轮要根治的那类"cfg 之外的代码在腐烂"
@@ -254,7 +260,7 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install fonts
-        run: sudo apt-get update && sudo apt-get install -y fonts-noto-cjk
+        run: sudo apt-get update && sudo apt-get install -y fonts-noto-cjk libfontconfig-dev
       # 带上 --all-features:MSRV 是对**用户**的承诺,用户开 backend-vello 时
       # 同样得能在 1.88 上编。wgpu/vello 那棵树抬 MSRV 比我们勤,漏掉这条
       # 就会出现"文档写 1.88、开个特性就编不过"。
@@ -287,7 +293,7 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install fonts
-        run: sudo apt-get update && sudo apt-get install -y fonts-noto-cjk
+        run: sudo apt-get update && sudo apt-get install -y fonts-noto-cjk libfontconfig-dev
 
       # 门槛**故意宽**:CI 跑道的绝对数字没有可比性(共享 vCPU,同一提交能差
       # 两三倍),硬卡本地数字只会制造 flaky。这里拦的是**数量级回归**——

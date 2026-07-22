@@ -18,8 +18,30 @@ all-features = true
 
 [advisories]
 version = 2
-# 未修复的公告一律阻塞;确需放行时在此登记 ID 并写明理由与复查日期
-ignore = []
+# 未修复的公告一律阻塞;确需放行时在此登记 ID 并写明理由与复查日期。
+#
+# **下面三条全部来自 winit 的 Linux 窗口装饰链,我们一行都没直接调用**,
+# 而且三条都**没有我们能自己走的升级路**(试过了,见各条)。
+# 复查日期:**2026-10-22**(登记于 2026-07-23)。到期请重跑
+# `cargo tree --target all -i <crate>` 看上游有没有动,能删就删掉这几条。
+ignore = [
+    # quick-xml:两条 DoS 类公告(重复属性名的二次方耗时 / NsReader 命名空间
+    # 声明无上界分配),修复版是 >=0.41。
+    # **够不着**:唯一引入者是 `wayland-scanner`,它把依赖钉在 `quick-xml = "^0.39"`
+    # (实测 `cargo update -p quick-xml --precise 0.41.0` 直接被 cargo 拒),
+    # 要动得等 wayland-rs / winit 先升。
+    # **风险面**:`wayland-scanner` 是 **proc-macro**,只在**构建期**跑,
+    # 解析的是**随 crate 一起发布的** Wayland 协议 XML —— 不是攻击者能控制的输入,
+    # 而这两条公告的前提正是"解析不可信 XML"。且仅 Linux。
+    { id = "RUSTSEC-2026-0194", reason = "wayland-scanner 构建期解析自带协议 XML;上游钉 ^0.39 升不动;仅 Linux" },
+    { id = "RUSTSEC-2026-0195", reason = "同上,同一个 quick-xml" },
+    # ttf-parser 无人维护(**不是漏洞**,是维护状态)。公告自己写着
+    # "No safe upgrade is available"。
+    # 引入路径:`sctk-adwaita`(Wayland 客户端侧窗口装饰)→ `ab_glyph` → 它,
+    # 用途是画标题栏文字。**与本仓库的文本栈无关**(我们走 Parley/swash),
+    # 我们没有任何一行代码调用它。
+    { id = "RUSTSEC-2026-0192", reason = "winit 的 Linux CSD 标题栏字体链;无安全升级版;与本仓库文本栈无关" },
+]
 
 [licenses]
 version = 2
