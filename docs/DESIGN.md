@@ -695,6 +695,16 @@ sv-compiler / sv-macro / sv-build)**空闲**;`runa`、`sylph` 被占。
   在这里原样复现且更重;且 Windows/Linux 无预编译原生库);可行的是离线转换。
   更要紧的是它自己论证出的结论:**真正该先交付的不是 `<animation>`,是 `<img>`**
   ——`draw_image` 是最前置的缺口,而 `<img>` 的使用频率高一个数量级。
+  —— **⚠️ 2026-07-22 这条裁决已被实测改写**:`crates/sv-pag` 落地(**零依赖
+  纯 Rust**,40 条测试)证明 **c2 序列帧不需要 libpag** —— PAG 的位图序列帧
+  数据完整存在于文件容器里(AE 插件导出时每帧编成 WebP 直接写进去),
+  格式全部公开在 Apache-2.0 的 `src/codec`,用 `gh api` 取原文逐字核实,
+  并用 libpag 自带的第二份实现(TypeScript 的 libpag-lite)交叉印证。
+  于是"离线转换要靠官方 wasm 渲染器"只对**矢量档/视频档**成立。
+  同批落地:`Painter::draw_image`(三后端)+ 动画内容注册表,
+  端到端出图有像素级测试。**运行期绑 libpag 仍是硬否**(理由未变)。
+  🔴 头号缺口:**sv-pag 从未在真实 `.pag` 上验证过**,固件全是按源码手工构造;
+  且 `BitmapSequence` 布局是单源(lite 没有它)。还缺 WebP 解码与差分帧重放。
   接入时场景树只加**一个** `ElementKind::Animation`(不是 `Pag`),
   格式差异收在 `AnimSource` 枚举里;前端标签叫 `<animation>` 不叫 `<pag>`
   (标签描述用途,不绑格式)。
