@@ -45,6 +45,49 @@ pub enum PathFill {
     EvenOdd,
 }
 
+/// 线端形状(SVG `stroke-linecap` / lottie 同名属性)
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum LineCap {
+    #[default]
+    Butt,
+    Round,
+    Square,
+}
+
+/// 折点形状(SVG `stroke-linejoin`)
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum LineJoin {
+    #[default]
+    Miter,
+    Round,
+    Bevel,
+}
+
+/// 描边风格。**这一个动词打包成结构体**,与本 trait "参数不打包"的惯例
+/// (见 `stroke_rounded_rect` 的注释)相反 —— 差异是有意的:
+/// vello 的 `Scene::stroke` 收 `&kurbo::Stroke`、tiny-skia 的 `stroke_path`
+/// 收 `&tiny_skia::Stroke`,**打包才是"对齐后端词汇"**,不打包反而要在
+/// 每个后端里现场拼一个结构体。
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct StrokeStyle {
+    pub width: f32,
+    pub cap: LineCap,
+    pub join: LineJoin,
+    /// 斜接上限(超过就退化成 Bevel);SVG 缺省 4.0
+    pub miter_limit: f32,
+}
+
+impl Default for StrokeStyle {
+    fn default() -> Self {
+        Self {
+            width: 1.0,
+            cap: LineCap::default(),
+            join: LineJoin::default(),
+            miter_limit: 4.0,
+        }
+    }
+}
+
 /// 字形光栅键:字体身份 + 字形 id + 字号(f32 以位模式存储,保 Hash/Eq)。
 /// 三项唯一决定一张覆盖度位图(HiDPI 已把 scale 乘进 px;调研 24 P0:
 /// font_key 让 fallback 后同帧多字体的缓存不串位)
@@ -144,6 +187,15 @@ pub trait Painter {
     /// **没有默认实现是刻意的**:给个 no-op 默认会让新后端"静默不画",
     /// 而漏画在自绘 UI 里极难定位 —— 宁可编译期逼着实现者面对它。
     fn fill_path(&mut self, path: &[PathCmd], fill: PathFill, color: Color);
+
+    /// 任意路径描边。
+    ///
+    /// **为什么不省掉它**(描边完全可以在上层用轮廓展开成填充再走 `fill_path`):
+    /// tiny-skia 与 vello **都有原生描边**,vello 侧还是 GPU 管线的一等公民;
+    /// 上层展开等于在 CPU 上做两个后端本来都不用做的事,而且每帧都做。
+    /// 何况 SVG 图标以描边为主(调研 26 §5:arco 图标 stroke 为主),
+    /// 这条路径是热的。
+    fn stroke_path(&mut self, path: &[PathCmd], style: &StrokeStyle, color: Color);
 }
 
 // ---------------------------------------------------------------------------
@@ -188,6 +240,15 @@ pub enum PaintCmd {
     Path {
         cmds: usize,
         fill: PathFill,
+        color: Color,
+        bbox: (i32, i32, i32, i32),
+    },
+    /// 路径描边(同上口径;`width` 取整,cap/join 直记)
+    StrokePath {
+        cmds: usize,
+        width: i32,
+        cap: LineCap,
+        join: LineJoin,
         color: Color,
         bbox: (i32, i32, i32, i32),
     },
@@ -257,6 +318,17 @@ impl Painter for RecordingPainter {
         self.cmds.push(PaintCmd::Path {
             cmds: path.len(),
             fill,
+            color,
+            bbox: path_bbox_i32(path),
+        });
+    }
+
+    fn stroke_path(&mut self, path: &[PathCmd], style: &StrokeStyle, color: Color) {
+        self.cmds.push(PaintCmd::StrokePath {
+            cmds: path.len(),
+            width: style.width as i32,
+            cap: style.cap,
+            join: style.join,
             color,
             bbox: path_bbox_i32(path),
         });
@@ -578,19 +650,9 @@ impl Painter for TinySkiaPainter<'_> {
     }
 
     fn fill_path(&mut self, path: &[PathCmd], fill: PathFill, color: Color) {
-        let mut pb = PathBuilder::new();
-        for c in path {
-            match *c {
-                PathCmd::MoveTo(x, y) => pb.move_to(x, y),
-                PathCmd::LineTo(x, y) => pb.line_to(x, y),
-                PathCmd::QuadTo(cx, cy, x, y) => pb.quad_to(cx, cy, x, y),
-                PathCmd::CubicTo(c1x, c1y, c2x, c2y, x, y) => pb.cubic_to(c1x, c1y, c2x, c2y, x, y),
-                PathCmd::Close => pb.close(),
-            }
-        }
         // finish() 对空路径/只有 MoveTo 的退化路径返回 None —— 静默跳过,
         // 这不是错误(SVG 里空 <path d=""> 合法)
-        let Some(p) = pb.finish() else { return };
+        let Some(p) = build_sk_path(path) else { return };
         let mut paint = Paint::default();
         paint.set_color(skia_color(color));
         paint.anti_alias = true;
@@ -609,6 +671,47 @@ impl Painter for TinySkiaPainter<'_> {
             None,
         );
     }
+
+    fn stroke_path(&mut self, path: &[PathCmd], style: &StrokeStyle, color: Color) {
+        let Some(p) = build_sk_path(path) else { return };
+        let mut paint = Paint::default();
+        paint.set_color(skia_color(color));
+        paint.anti_alias = true;
+        let stroke = Stroke {
+            width: style.width,
+            miter_limit: style.miter_limit,
+            line_cap: match style.cap {
+                LineCap::Butt => tiny_skia::LineCap::Butt,
+                LineCap::Round => tiny_skia::LineCap::Round,
+                LineCap::Square => tiny_skia::LineCap::Square,
+            },
+            line_join: match style.join {
+                LineJoin::Miter => tiny_skia::LineJoin::Miter,
+                LineJoin::Round => tiny_skia::LineJoin::Round,
+                LineJoin::Bevel => tiny_skia::LineJoin::Bevel,
+            },
+            ..Stroke::default()
+        };
+        // 裁剪同 fill_path:见那边的已知缺口注释
+        self.pixmap
+            .stroke_path(&p, &paint, &stroke, Transform::identity(), None);
+    }
+}
+
+/// PathCmd 序列 → tiny-skia Path。填充与描边共用,免得两处各写一遍
+/// 然后慢慢长歪
+fn build_sk_path(path: &[PathCmd]) -> Option<tiny_skia::Path> {
+    let mut pb = PathBuilder::new();
+    for c in path {
+        match *c {
+            PathCmd::MoveTo(x, y) => pb.move_to(x, y),
+            PathCmd::LineTo(x, y) => pb.line_to(x, y),
+            PathCmd::QuadTo(cx, cy, x, y) => pb.quad_to(cx, cy, x, y),
+            PathCmd::CubicTo(c1x, c1y, c2x, c2y, x, y) => pb.cubic_to(c1x, c1y, c2x, c2y, x, y),
+            PathCmd::Close => pb.close(),
+        }
+    }
+    pb.finish()
 }
 
 #[cfg(test)]
@@ -685,6 +788,83 @@ mod tests {
         );
         p.fill_path(&[PathCmd::Close], PathFill::EvenOdd, Color::rgb(1, 2, 3));
         assert_eq!(px(&pm, 5, 5).3, 0, "退化路径不该画出任何东西");
+    }
+
+    /// 描边:线宽真的生效,且**只染到线上**——一条水平线,线上有色、
+    /// 上下远处无色。描边最容易出的错是"当成填充画了",那样整个闭合区域会被涂满
+    #[test]
+    fn stroke_paints_the_line_not_the_area() {
+        let mut pm = Pixmap::new(100, 100).unwrap();
+        // 一个方框:填充会涂满内部,描边只画边
+        let square = [
+            PathCmd::MoveTo(20.0, 20.0),
+            PathCmd::LineTo(80.0, 20.0),
+            PathCmd::LineTo(80.0, 80.0),
+            PathCmd::LineTo(20.0, 80.0),
+            PathCmd::Close,
+        ];
+        let style = StrokeStyle {
+            width: 6.0,
+            ..StrokeStyle::default()
+        };
+        TinySkiaPainter::new(&mut pm).stroke_path(&square, &style, Color::rgb(0, 128, 0));
+        assert_eq!(px(&pm, 50, 20).3, 255, "上边线上应有色");
+        assert_eq!(px(&pm, 20, 50).3, 255, "左边线上应有色");
+        assert_eq!(
+            px(&pm, 50, 50).3,
+            0,
+            "方框内部**不该**被涂满(那是填充的行为)"
+        );
+        assert_eq!(px(&pm, 50, 5).3, 0, "线外不该染色");
+    }
+
+    /// 线宽真的传下去了:粗线覆盖的像素严格多于细线。
+    /// 这条防的是"StrokeStyle 被构造了但没接到后端"这类静默失效
+    #[test]
+    fn stroke_width_reaches_the_backend() {
+        let line = [PathCmd::MoveTo(10.0, 50.0), PathCmd::LineTo(90.0, 50.0)];
+        let count = |w: f32| {
+            let mut pm = Pixmap::new(100, 100).unwrap();
+            TinySkiaPainter::new(&mut pm).stroke_path(
+                &line,
+                &StrokeStyle {
+                    width: w,
+                    ..StrokeStyle::default()
+                },
+                Color::rgb(0, 0, 0),
+            );
+            (0..100)
+                .flat_map(|y| (0..100).map(move |x| (x, y)))
+                .filter(|(x, y)| px(&pm, *x, *y).3 > 0)
+                .count()
+        };
+        let (thin, thick) = (count(1.0), count(9.0));
+        assert!(
+            thick > thin * 4,
+            "线宽 9 覆盖的像素应远多于线宽 1:{thin} vs {thick}"
+        );
+    }
+
+    /// 线端形状生效:Round 端帽会在端点外多出一个半圆,Butt 不会
+    #[test]
+    fn line_cap_shape_reaches_the_backend() {
+        let line = [PathCmd::MoveTo(30.0, 50.0), PathCmd::LineTo(70.0, 50.0)];
+        let probe = |cap: LineCap| {
+            let mut pm = Pixmap::new(100, 100).unwrap();
+            TinySkiaPainter::new(&mut pm).stroke_path(
+                &line,
+                &StrokeStyle {
+                    width: 10.0,
+                    cap,
+                    ..StrokeStyle::default()
+                },
+                Color::rgb(0, 0, 0),
+            );
+            // 端点外 3px 处
+            px(&pm, 27, 50).3
+        };
+        assert_eq!(probe(LineCap::Butt), 0, "Butt 端帽不该越过端点");
+        assert!(probe(LineCap::Round) > 0, "Round 端帽应在端点外多出半圆");
     }
 
     /// 金样后端记录路径:条数/规则/颜色/包围盒(逐点记录会让金样没法看)

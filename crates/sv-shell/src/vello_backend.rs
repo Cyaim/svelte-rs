@@ -21,7 +21,9 @@ use winit::window::Window;
 
 use sv_ui::{Color, Doc};
 
-use crate::paint::{GlyphPos, Painter, PainterCaps, PathCmd, PathFill};
+use crate::paint::{
+    GlyphPos, LineCap, LineJoin, Painter, PainterCaps, PathCmd, PathFill, StrokeStyle,
+};
 use crate::render::{Placed, paint_tree};
 
 fn pcolor(c: Color) -> vello::peniko::Color {
@@ -164,25 +166,7 @@ impl Painter for VelloPainter {
     }
 
     fn fill_path(&mut self, path: &[PathCmd], fill: PathFill, color: Color) {
-        // 自有 PathCmd → kurbo BezPath:类型翻译只在 GPU 后端内部发生,
-        // Painter 接口不沾 kurbo(vello 是 optional dependency,见 paint.rs
-        // 里 PathCmd 的裁决)
-        let mut p = BezPath::new();
-        for c in path {
-            match *c {
-                PathCmd::MoveTo(x, y) => p.move_to((x as f64, y as f64)),
-                PathCmd::LineTo(x, y) => p.line_to((x as f64, y as f64)),
-                PathCmd::QuadTo(cx, cy, x, y) => {
-                    p.quad_to((cx as f64, cy as f64), (x as f64, y as f64))
-                }
-                PathCmd::CubicTo(c1x, c1y, c2x, c2y, x, y) => p.curve_to(
-                    (c1x as f64, c1y as f64),
-                    (c2x as f64, c2y as f64),
-                    (x as f64, y as f64),
-                ),
-                PathCmd::Close => p.close_path(),
-            }
-        }
+        let p = bez_path(path);
         if p.is_empty() {
             return;
         }
@@ -197,6 +181,50 @@ impl Painter for VelloPainter {
             &p,
         );
     }
+
+    fn stroke_path(&mut self, path: &[PathCmd], style: &StrokeStyle, color: Color) {
+        let p = bez_path(path);
+        if p.is_empty() {
+            return;
+        }
+        let stroke = Stroke::new(style.width as f64)
+            .with_miter_limit(style.miter_limit as f64)
+            .with_caps(match style.cap {
+                LineCap::Butt => vello::kurbo::Cap::Butt,
+                LineCap::Round => vello::kurbo::Cap::Round,
+                LineCap::Square => vello::kurbo::Cap::Square,
+            })
+            .with_join(match style.join {
+                LineJoin::Miter => vello::kurbo::Join::Miter,
+                LineJoin::Round => vello::kurbo::Join::Round,
+                LineJoin::Bevel => vello::kurbo::Join::Bevel,
+            });
+        self.scene
+            .stroke(&stroke, Affine::IDENTITY, pcolor(color), None, &p);
+    }
+}
+
+/// 自有 PathCmd → kurbo BezPath。**类型翻译只在 GPU 后端内部发生**,
+/// Painter 接口不沾 kurbo(vello 是 optional dependency,见 paint.rs 里
+/// PathCmd 的裁决)。填充与描边共用
+fn bez_path(path: &[PathCmd]) -> BezPath {
+    let mut p = BezPath::new();
+    for c in path {
+        match *c {
+            PathCmd::MoveTo(x, y) => p.move_to((x as f64, y as f64)),
+            PathCmd::LineTo(x, y) => p.line_to((x as f64, y as f64)),
+            PathCmd::QuadTo(cx, cy, x, y) => {
+                p.quad_to((cx as f64, cy as f64), (x as f64, y as f64))
+            }
+            PathCmd::CubicTo(c1x, c1y, c2x, c2y, x, y) => p.curve_to(
+                (c1x as f64, c1y as f64),
+                (c2x as f64, c2y as f64),
+                (x as f64, y as f64),
+            ),
+            PathCmd::Close => p.close_path(),
+        }
+    }
+    p
 }
 
 // ---------------------------------------------------------------------------
