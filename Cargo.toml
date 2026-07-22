@@ -6,6 +6,7 @@ members = [
     "crates/sv-macro",
     "crates/sv-compiler",
     "crates/sv-shell",
+    "crates/sv-lottie",
     "examples/counter",
     "examples/counter-sfc",
     "examples/todo-sfc",
@@ -38,6 +39,7 @@ sv-ui = { path = "crates/sv-ui", version = "0.0.1" }
 sv-macro = { path = "crates/sv-macro", version = "0.0.1" }
 sv-compiler = { path = "crates/sv-compiler", version = "0.0.1" }
 sv-shell = { path = "crates/sv-shell", version = "0.0.1" }
+sv-lottie = { path = "crates/sv-lottie", version = "0.0.1" }
 
 [profile.dev]
 # UI 原型迭代期:略微提高优化等级让 demo 不至于太卡,同时保持编译速度
