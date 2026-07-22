@@ -202,10 +202,13 @@ impl App {
     }
 
     fn paint(&mut self) {
-        // 先套用后台任务完成值、推进动画,再渲染本帧
+        // 帧前流水线(ADR-6):后台任务完成值 → 动画推进 → **响应式统一冲刷**
+        // → 布局 → 绘制。上面两步都会写 signal,所以 tick 必须排在它们之后;
+        // 冲刷完成前不读版本号,否则会拿到上一帧的 key 而跳过本帧
         sv_ui::tasks::pump();
         let now_ms = self.epoch.elapsed().as_secs_f64() * 1000.0;
         let animating = sv_ui::anim::pump(now_ms);
+        sv_reactive::tick();
         let Some(ws) = &mut self.win else { return };
         let size = ws.window.inner_size();
         if size.width == 0 || size.height == 0 {
@@ -566,6 +569,14 @@ impl ApplicationHandler<UserEvent> for App {
             Ok(p) => p,
             Err(e) => return self.abort(event_loop, e),
         };
+
+        // 帧对齐(ADR-6):**先于 build**开启——建树期的 effect 首跑是创建时
+        // 同步执行(ADR-1),不走队列,不受影响;之后一切写入攒到帧前统一冲刷。
+        // 一次事件里连写 N 个 state 只重绘一帧,effect 写树与布局/绘制严格有序
+        {
+            let w = window.clone();
+            sv_reactive::set_frame_scheduler(move || w.request_redraw());
+        }
 
         // 首次 resumed 时才构建 UI(此后 signal → 树 → 重绘的链路开始工作)
         if let Some(build) = self.build.take() {
@@ -1263,6 +1274,43 @@ mod tests {
             x0 <= 0.5 && (w - tw).abs() < 1.0,
             "全选矩形应覆盖整串:{rects:?}"
         );
+    }
+
+    /// ADR-6 帧对齐在场景树上的可观测契约(渲染壳侧,零窗口):
+    /// 写 signal 只催帧、不改树;帧前 `tick`(paint 的第一段)后树才更新
+    #[test]
+    fn frame_aligned_tree_updates_only_at_frame() {
+        let doc = Doc::new();
+        let label = std::cell::RefCell::new(None);
+        let (_, _scope) = create_root(|| {
+            let text = sv_reactive::state(String::from("旧"));
+            let t = doc.create_text("");
+            doc.append(doc.root(), t);
+            sv_ui::bind_text(&doc, t, move || text.get());
+            *label.borrow_mut() = Some(text);
+        });
+        let text = label.borrow().unwrap();
+        let node_text = || doc.read(|inner| inner.nodes[inner.root].children[0]);
+        let read = || doc.read(|inner| inner.nodes[node_text()].text.clone());
+        assert_eq!(read(), "旧");
+
+        // 渲染壳在 resumed 里做的事:把"催帧"接到 request_redraw
+        let wakes = std::rc::Rc::new(std::cell::Cell::new(0));
+        let w = wakes.clone();
+        sv_reactive::set_frame_scheduler(move || w.set(w.get() + 1));
+
+        let v0 = doc.version();
+        text.set("新".into());
+        text.set("更新".into());
+        assert_eq!(read(), "旧", "帧对齐下写入不该当场改树");
+        assert_eq!(doc.version(), v0, "树没动,版本号也不该动");
+        assert_eq!(wakes.get(), 1, "连写两次只催一帧");
+
+        // paint() 的第一段
+        sv_reactive::tick();
+        assert_eq!(read(), "更新", "帧前冲刷后树才更新");
+        assert!(doc.version() > v0, "树变了,版本号该 bump(触发重绘)");
+        sv_reactive::clear_frame_scheduler();
     }
 
     /// 去 panic 门禁(R4,调研 25 §3.4):事件循环/呈现层(lib.rs 非测试段)

@@ -172,10 +172,26 @@ openharmony-ability(社区,类 android-activity)起步,保留手写 XComponent g
 - 风险最高的两个工程点:自绘 surface 上的 IME(中文组合文本/候选窗定位)与 OH_NativeVSync
   帧循环,应尽早真机验证。
 
-### ADR-6 帧调度(未实现,最大开放设计点)
-Svelte 的 microtask flush 要换成窗口系统帧管线:事件 → batch 写入 → 帧前 flush
-(pre → render → layout → paint → user effects),配 `flush_sync` 逃生舱。桌面接
-winit redraw 时机,鸿蒙接 OH_NativeVSync。目前原型是写入即同步 flush,正确但未对齐帧。
+### ADR-6(2026-07-22 落地)帧调度:写入攒到帧边界,渲染壳统一冲刷
+> Svelte 的 microtask flush 换成窗口系统帧管线。原文记为"最大开放设计点";
+> 现已实现,语义级 breaking 在 API 冻结前一次出清。
+
+**机制**:`sv_reactive::set_frame_scheduler(f)` 开启帧对齐——写入 signal 不再
+当场跑 effect,而是入队 + 调 `f`(渲染壳接 `request_redraw`),一轮只催一次帧;
+渲染壳在 `paint()` 首段按 **tasks::pump → anim::pump → `tick()` → 布局 → 绘制**
+的顺序统一冲刷。于是 ADR 原定的相位链 `pre → render → layout → paint` 自然成立:
+`effect_pre` 先于普通 effect(既有两阶段 flush),普通 effect 承担"改场景树"
+即 render,布局/绘制在其后。`tick()` 即 `flush_sync` 逃生舱。
+
+**收益**:一次输入事件里连写 N 个 state,过去是 N 轮 effect + N 次树改动 +
+N 次重绘请求,现在是一帧一轮。
+
+**语义变化(breaking)**:开窗路径下,写完立刻读 derived / 查场景树看到的是
+**旧值**,直到下一帧或显式 `tick()`。**只有 `run_app` 开窗路径开启**;离屏
+渲染与测试保持"写入即同步 flush",既有离屏测试零改动。
+
+**未做**:与 vsync 的深度对齐(mailbox 呈现模式,见 ADR-9 后续阶梯)、
+鸿蒙 `OH_NativeVSync` 接线(R5)。
 
 ### ADR-7 each 块:保留 Svelte 的 keyed reconcile 设计(未实现)
 现状是整块重建(`sv_ui::each_block`)。目标形态:每项持有 `Signal<Item>`,内容变化走
@@ -431,7 +447,10 @@ sv-compiler / sv-macro / sv-build)**空闲**;`runa`、`sylph` 被占。
   nsis/dmg/appimage **未签名**产物工作流(手动触发;签名/公证是组织级账号
   事务,工程侧只做到钩子就位);
   **未做**:改名(ADR-10 待裁决,阻塞真实 publish)、cargo-semver-checks
-  (需已发布基线才有意义)、双前端合并与 ADR-6(API 冻结前置,独立大件)。
+  (需已发布基线才有意义)、双前端合并(API 冻结前置,独立大件)。
+  ——**✅ 2026-07-22 帧调度 ADR-6 落地**:见上文 ADR-6(开窗路径写入攒到帧
+  边界统一冲刷,`tick()` 为逃生舱;离屏与测试路径行为不变)。API 冻结前置
+  只剩双前端内核合并。
   → **档 B 达成(单桌面平台可商用;校准业界先例 2–3 年全职,含打磨周期)**
 - **R5 鸿蒙(档 C,原 M3 不变)**:XComponent + wgpu(GLES)三角形 → 场景树渲染 →
   触摸事件 → 真机 IME/VSync 验证;窄窗口 trait 落地;hvigorw CI;

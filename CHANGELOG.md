@@ -34,6 +34,10 @@ sv-shell),按依赖序推送;`examples/` 不发布。
 
 ### 变更
 
+- **帧调度(ADR-6,语义 breaking)**:开窗应用的 signal 写入不再当场跑 effect,
+  改为攒到帧边界由渲染壳统一冲刷(一次事件连写 N 次 = 一帧一轮)。迁移:
+  需要立刻看到结果的地方调 `sv_reactive::tick()`。离屏渲染与测试路径不受影响。
+
 - `sv_shell::caret_x` / `caret_index_at` 迁至 `text` 模块并改签名:不再收
   `&FontRef` 参数(几何由 Parley 提供)。迁移:去掉第一个参数即可。
 - `sv_shell::run_app` 的错误路径改为返回 [`ShellError`],窗口/呈现层不再 panic;

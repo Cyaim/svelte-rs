@@ -105,6 +105,10 @@ struct Runtime {
     queue: Vec<NodeId>,
     batch_depth: usize,
     flushing: bool,
+    /// 帧对齐模式(ADR-6):写入不再当场 flush,攒到帧前由渲染壳统一冲刷
+    frame_scheduler: Option<Rc<dyn Fn()>>,
+    /// 本轮是否已催过帧(避免一次事件里 N 次写入催 N 次重绘)
+    frame_requested: bool,
     /// [`unique_id`] 的自增计数器(线程内单调)
     next_unique_id: u64,
 }
@@ -219,7 +223,33 @@ fn assert_writable(rtc: &RefCell<Runtime>) {
     }
 }
 
+/// 写入后的默认冲刷路径。帧对齐模式下**不 flush**,只催一帧
+/// (ADR-6:事件 → batch 写入 → 帧前统一 flush → 布局 → 绘制)
 fn maybe_flush(rtc: &RefCell<Runtime>) {
+    let sched = {
+        let rt = rtc.borrow();
+        if rt.batch_depth != 0 || rt.flushing {
+            return;
+        }
+        match &rt.frame_scheduler {
+            None => None,
+            Some(_) if rt.queue.is_empty() || rt.frame_requested => return,
+            Some(f) => Some(f.clone()),
+        }
+    };
+    match sched {
+        // 帧对齐:标记已催帧,回调在**不持有 RT 借用**时调用
+        // (渲染壳的回调可能反过来写 signal)
+        Some(f) => {
+            rtc.borrow_mut().frame_requested = true;
+            f();
+        }
+        None => flush(rtc),
+    }
+}
+
+/// 无视帧对齐,立刻冲刷(帧前调用 / [`tick`] 逃生舱)
+fn force_flush(rtc: &RefCell<Runtime>) {
     let should = {
         let rt = rtc.borrow();
         rt.batch_depth == 0 && !rt.flushing
@@ -236,7 +266,12 @@ fn flush(rtc: &RefCell<Runtime>) {
             self.0.borrow_mut().flushing = false;
         }
     }
-    rtc.borrow_mut().flushing = true;
+    {
+        let mut rt = rtc.borrow_mut();
+        rt.flushing = true;
+        // 队列即将清空:下一次写入应重新催帧
+        rt.frame_requested = false;
+    }
     let _g = Unflag(rtc);
 
     let mut passes = 0usize;
@@ -598,10 +633,39 @@ pub fn unique_id() -> String {
     })
 }
 
-/// `tick`:立即冲刷待决 effect。本模型写入后本就同步 flush,该函数主要为
-/// API 对齐保留;batch 内调用是 no-op(不破坏批处理原子性),batch 结束照常统一 flush
+/// `tick`:立即冲刷待决 effect —— 帧对齐模式下的**逃生舱**
+/// (ADR-6:写入攒到帧前才生效,需要"现在就要看到结果"时调它)。
+/// 非帧对齐模式下写入本就同步 flush,此函数是 API 对齐;
+/// batch 内调用恒为 no-op(不破坏批处理原子性),batch 结束照常统一 flush
 pub fn tick() {
-    RT.with(maybe_flush);
+    RT.with(force_flush);
+}
+
+// ---------------------------------------------------------------------------
+// 帧调度(ADR-6)
+// ---------------------------------------------------------------------------
+
+/// 开启**帧对齐**:此后写入 signal 不再当场跑 effect,而是入队并调用
+/// `f`(渲染壳把它接到 `request_redraw`),由渲染壳在帧前调用 [`tick`] 统一冲刷。
+///
+/// 为什么要对齐:一次输入事件里连写 10 个 state,同步模型会跑 10 轮 effect、
+/// 改 10 次场景树;对齐后只在帧前跑一轮,且 effect 写入与"布局 → 绘制"严格
+/// 有序(Svelte 用 microtask flush 达成同一件事,桌面端的等价物是帧边界)。
+///
+/// **语义变化**:开启后,写完立刻读 derived / 查场景树看到的是**旧值**,
+/// 直到下一帧或显式 [`tick`]。默认(如离屏测试)不开启,行为与过去一致。
+pub fn set_frame_scheduler(f: impl Fn() + 'static) {
+    RT.with(|rtc| {
+        let mut rt = rtc.borrow_mut();
+        rt.frame_scheduler = Some(Rc::new(f));
+        rt.frame_requested = false;
+    });
+}
+
+/// 关掉帧对齐,回到"写入即同步 flush"(离屏渲染/测试路径)
+pub fn clear_frame_scheduler() {
+    RT.with(|rtc| rtc.borrow_mut().frame_scheduler = None);
+    tick();
 }
 
 /// 在**无所有者、无追踪**环境下执行 `f`:期间创建的节点不挂进任何作用域,
@@ -1346,6 +1410,84 @@ mod tests {
         let na: u64 = a["sv-".len()..].parse().unwrap();
         let nb: u64 = b["sv-".len()..].parse().unwrap();
         assert_eq!(nb, na + 1, "同线程内应自增,保证互不相同");
+    }
+
+    /// ADR-6 帧对齐:写入只催帧不跑 effect,帧前 `tick` 统一冲刷。
+    /// 关键收益是"一次事件连写 N 次 = 一帧一轮",这里逐条钉住
+    #[test]
+    fn frame_aligned_defers_effects_until_tick() {
+        let (_, _scope) = create_root(|| {
+            let count = state(0);
+            let runs = Rc::new(RefCell::new(0));
+            let r = runs.clone();
+            effect(move || {
+                count.get();
+                *r.borrow_mut() += 1;
+            });
+            assert_eq!(*runs.borrow(), 1, "创建时同步首跑(ADR-1),不进队列");
+
+            let wakes = Rc::new(RefCell::new(0));
+            let w = wakes.clone();
+            set_frame_scheduler(move || *w.borrow_mut() += 1);
+
+            // 一次"事件"里连写三次:effect 一次都不该跑,帧只该被催一次
+            count.set(1);
+            count.set(2);
+            count.set(3);
+            assert_eq!(*runs.borrow(), 1, "帧对齐下写入不该当场跑 effect");
+            assert_eq!(*wakes.borrow(), 1, "连写只催一帧");
+
+            // 帧前冲刷:三次写入合成一轮 effect
+            tick();
+            assert_eq!(*runs.borrow(), 2, "帧前统一冲刷 = 一轮");
+            assert_eq!(count.get(), 3);
+
+            // 下一轮写入重新催帧
+            count.set(4);
+            assert_eq!(*wakes.borrow(), 2, "新一轮写入应重新催帧");
+            tick();
+            assert_eq!(*runs.borrow(), 3);
+
+            // 逃生舱:帧对齐下 tick 就是 flush_sync
+            count.set(5);
+            tick();
+            assert_eq!(*runs.borrow(), 4, "tick 是逃生舱,立刻看到结果");
+
+            // 关掉帧对齐 → 回到写入即同步
+            clear_frame_scheduler();
+            count.set(6);
+            assert_eq!(*runs.borrow(), 5, "关掉后应恢复同步 flush");
+        });
+    }
+
+    /// 帧对齐与 batch 叠加:batch 内不催帧,batch 结束催一次
+    #[test]
+    fn frame_aligned_composes_with_batch() {
+        let (_, _scope) = create_root(|| {
+            let a = state(0);
+            let b = state(0);
+            let runs = Rc::new(RefCell::new(0));
+            let r = runs.clone();
+            effect(move || {
+                a.get();
+                b.get();
+                *r.borrow_mut() += 1;
+            });
+            let wakes = Rc::new(RefCell::new(0));
+            let w = wakes.clone();
+            set_frame_scheduler(move || *w.borrow_mut() += 1);
+
+            batch(|| {
+                a.set(1);
+                b.set(1);
+                assert_eq!(*wakes.borrow(), 0, "batch 内不催帧");
+            });
+            assert_eq!(*wakes.borrow(), 1, "batch 结束催一次");
+            assert_eq!(*runs.borrow(), 1, "但仍不跑 effect,等帧前");
+            tick();
+            assert_eq!(*runs.borrow(), 2);
+            clear_frame_scheduler();
+        });
     }
 
     #[test]

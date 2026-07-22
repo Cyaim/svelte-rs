@@ -21,7 +21,7 @@ APIs churn.
 | `$effect.root` | `create_root` (closest equivalent) | ownership scope with manual `dispose` |
 | `$effect.pending()` | `sv_ui::tasks::pending_count` | reactive in-flight task count |
 | `$props.id()` | `unique_id` | `"sv-1"`, `"sv-2"`, … per thread |
-| `tick` | `tick` | kept for API parity; writes already flush synchronously |
+| `tick` | `tick` | flush escape hatch under frame alignment; offscreen writes still flush synchronously |
 | `setContext` / `getContext` | `provide_context` / `use_context` | keyed by Rust type instead of string |
 | `untrack` | `untrack` | |
 
@@ -122,7 +122,28 @@ batch(|| {
 tick();          // flush pending effects now; inside batch it is a no-op
 ```
 
-`tick` exists mostly for API parity: writes outside a batch already flush synchronously.
+`tick` is an escape hatch in **windowed apps** and mostly API parity offscreen —
+the difference comes from frame scheduling:
+
+### Frame alignment (ADR-6)
+
+Once `sv_shell::run_app` has a window it calls `set_frame_scheduler`, and from
+then on **a write no longer runs effects on the spot**: it enqueues and requests
+a frame, and the shell flushes once at the top of that frame, before layout and
+paint. Writing ten states in one event handler costs one repaint and one effect
+pass. (Svelte achieves the same thing with a microtask flush; on the desktop the
+equivalent boundary is the frame.)
+
+```rust
+count.set(1);
+count.set(2);
+assert_eq!(derived_total.get(), /* still the old value */);  // frame hasn't come
+tick();                                                       // escape hatch
+```
+
+**Only the windowed path enables this.** Offscreen rendering (`render_to_png`)
+and tests keep the old "writes flush synchronously" behaviour, so `tick` stays
+essentially a no-op there. Call `clear_frame_scheduler()` to turn it back off.
 
 ## untrack and is_tracking
 
