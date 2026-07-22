@@ -20,6 +20,9 @@ sv-shell),按依赖序推送;`examples/` 不发布。
 
 ### 新增
 
+- **平滑滚动**(R2 档 B S6):鼠标滚轮走 140ms ease-out 逼近目标;
+  触摸板 PixelDelta 保持直通。
+
 - **无障碍滚动与弹层语义**:可滚容器报 `ScrollView` + 偏移与 `ScrollUp/Down/
   SetScrollOffset` 动作;裁剪容器报 `clips_children`;多行输入报
   `MultilineTextInput`;弹层根按层与 modal 位报 `Dialog`/`Menu`/`Tooltip`。

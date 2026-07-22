@@ -23,7 +23,7 @@ pub use paint::{
 pub use render::{
     Layout, OverlayRegion, Placed, Rect, ScrollArea, hit_click_target, ime_caret_rect,
     input_caret_at, input_caret_line_move, layout_full_cached, layout_tree, layout_tree_full,
-    overlay_click_gate, paint_scrollbars, paint_tree, render_frame, route_wheel,
+    overlay_click_gate, paint_scrollbars, paint_tree, render_frame, route_wheel, route_wheel_with,
     scrollbar_drag_offset, scrollbar_grab, scrollbar_thumb,
 };
 pub use text::{FontHandle, caret_index_at, caret_x, selection_rects};
@@ -707,12 +707,16 @@ impl ApplicationHandler<UserEvent> for App {
                     (self.cursor.0 / scale) as f32,
                     (self.cursor.1 / scale) as f32,
                 );
-                // 行滚 ≈ 40 逻辑 px;触摸板 PixelDelta 直通(设备已平滑)
+                // 行滚 ≈ 40 逻辑 px;触摸板 PixelDelta 直通(设备已平滑)。
+                // **只给鼠标滚轮补缓动**:LineDelta 是离散的一格一格,不补会
+                // 一跳 40px;PixelDelta 本身连续,再补一层只会更黏(S6)
                 const LINE_PX: f32 = 40.0;
-                let (dx, dy) = match delta {
-                    winit::event::MouseScrollDelta::LineDelta(x, y) => (x * LINE_PX, y * LINE_PX),
+                let (dx, dy, smooth) = match delta {
+                    winit::event::MouseScrollDelta::LineDelta(x, y) => {
+                        (x * LINE_PX, y * LINE_PX, true)
+                    }
                     winit::event::MouseScrollDelta::PixelDelta(p) => {
-                        ((p.x / scale) as f32, (p.y / scale) as f32)
+                        ((p.x / scale) as f32, (p.y / scale) as f32, false)
                     }
                 };
                 let size = ws.window.inner_size();
@@ -722,7 +726,7 @@ impl ApplicationHandler<UserEvent> for App {
                     size.height as f32 / scale as f32,
                 );
                 // winit 正值 = 内容向右/下移 → offset 减
-                if route_wheel(
+                if route_wheel_with(
                     &self.doc,
                     &layout.placed,
                     &layout.scroll_areas,
@@ -730,6 +734,7 @@ impl ApplicationHandler<UserEvent> for App {
                     ly,
                     -dx,
                     -dy,
+                    smooth,
                 )
                 .is_some()
                 {
@@ -1775,6 +1780,89 @@ cd",
             rows.push(row);
         }
         (doc, container, rows)
+    }
+
+    /// S6 平滑滚动(R2 档 B):滚轮给的是目标,偏移由动画通道逐帧逼近;
+    /// 连续滚要在**目标**上累加,否则快滚会越滚越慢
+    #[test]
+    fn smooth_scroll_animates_to_target() {
+        let (doc, container, _rows) = scroll_doc();
+        let layout = layout_tree_full(&doc, 480.0, 400.0);
+        let a = *layout
+            .scroll_areas
+            .iter()
+            .find(|a| a.id == container)
+            .unwrap();
+        let (cx, cy) = (a.viewport.x + 10.0, a.viewport.y + 10.0);
+
+        // 平滑:一次滚轮不立刻到位
+        route_wheel_with(
+            &doc,
+            &layout.placed,
+            &layout.scroll_areas,
+            cx,
+            cy,
+            0.0,
+            40.0,
+            true,
+        );
+        assert_eq!(doc.scroll_of(container).1, 0.0, "平滑模式下当帧不该跳到位");
+        assert_eq!(
+            sv_ui::anim::scroll_y_target(&doc, container),
+            40.0,
+            "目标应已就位"
+        );
+
+        // 逐帧逼近:中途在两端之间,收尾精确等于目标
+        assert!(sv_ui::anim::pump(0.0));
+        assert!(sv_ui::anim::pump(70.0));
+        let mid = doc.scroll_of(container).1;
+        assert!(mid > 0.0 && mid < 40.0, "中途应在两端之间:{mid}");
+        assert!(!sv_ui::anim::pump(500.0), "超时应完成出队");
+        assert_eq!(doc.scroll_of(container).1, 40.0, "收尾应精确落在目标");
+
+        // 连续滚:在目标上累加(而不是在当前帧位置上)
+        route_wheel_with(
+            &doc,
+            &layout.placed,
+            &layout.scroll_areas,
+            cx,
+            cy,
+            0.0,
+            40.0,
+            true,
+        );
+        sv_ui::anim::pump(1000.0); // 只推一点点
+        route_wheel_with(
+            &doc,
+            &layout.placed,
+            &layout.scroll_areas,
+            cx,
+            cy,
+            0.0,
+            40.0,
+            true,
+        );
+        assert_eq!(
+            sv_ui::anim::scroll_y_target(&doc, container),
+            120.0,
+            "第二次滚轮应叠在目标上,而不是叠在落后的当前位置上"
+        );
+
+        // 非平滑(触摸板 PixelDelta):当帧直接到位
+        let (doc2, c2, _r2) = scroll_doc();
+        let l2 = layout_tree_full(&doc2, 480.0, 400.0);
+        route_wheel_with(
+            &doc2,
+            &l2.placed,
+            &l2.scroll_areas,
+            cx,
+            cy,
+            0.0,
+            30.0,
+            false,
+        );
+        assert_eq!(doc2.scroll_of(c2).1, 30.0, "非平滑应直接写偏移");
     }
 
     /// R2 档 B:overflow 按轴拆分。"横向裁掉、纵向滚"是最常见的组合,

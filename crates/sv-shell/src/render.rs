@@ -1178,6 +1178,22 @@ pub fn route_wheel(
     dx: f32,
     dy: f32,
 ) -> Option<ViewId> {
+    route_wheel_with(doc, placed, areas, x, y, dx, dy, false)
+}
+
+/// 同上,`smooth=true` 时纵向走平滑滚动(S6):把目标交给动画通道逐帧逼近。
+/// 横向仍是直接写 —— 触摸板横滚本身连续,再补一层缓动只会更黏
+#[allow(clippy::too_many_arguments)]
+pub fn route_wheel_with(
+    doc: &Doc,
+    placed: &[Placed],
+    areas: &[ScrollArea],
+    x: f32,
+    y: f32,
+    dx: f32,
+    dy: f32,
+    smooth: bool,
+) -> Option<ViewId> {
     let mut target = placed
         .iter()
         .rev()
@@ -1195,9 +1211,23 @@ pub fn route_wheel(
         if let Some(a) = areas.iter().find(|a| a.id == id) {
             let (sx, sy) = doc.scroll_of(id);
             let nx = (sx + dx).clamp(0.0, a.max.0);
-            let ny = (sy + dy).clamp(0.0, a.max.1);
-            if nx != sx || ny != sy {
-                doc.set_scroll(id, nx, ny);
+            // 平滑模式下在**进行中的目标**上累加,而不是在"这一帧画到哪儿"
+            // 上累加 —— 后者会让连续快滚越滚越慢(每次都从落后的位置起算)
+            let base_y = if smooth {
+                sv_ui::anim::scroll_y_target(doc, id)
+            } else {
+                sy
+            };
+            let ny = (base_y + dy).clamp(0.0, a.max.1);
+            if nx != sx || ny != base_y {
+                if smooth && ny != base_y {
+                    sv_ui::anim::scroll_y_to(doc, id, ny);
+                    if nx != sx {
+                        doc.set_scroll(id, nx, sy);
+                    }
+                } else {
+                    doc.set_scroll(id, nx, ny);
+                }
                 return Some(id);
             }
         }
