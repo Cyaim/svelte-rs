@@ -231,8 +231,16 @@ jobs:
       - name: clippy(backend-vello)
         run: cargo clippy -p sv-shell --all-targets --features backend-vello -- -D warnings
 
+  # **这里不写 `name:`,是被 GitHub 拒过一次换来的。**
+  # 原来写的是 `name: MSRV (${{ env.MSRV }})` —— 而 job 级的 `name` **不能用
+  # `env` 上下文**(可用的只有 github/needs/strategy/matrix/vars/inputs)。
+  # 后果不是某个 job 红,是**整个 workflow 文件被拒**:run 在 0 秒内失败、
+  # 一个 job 都不启动、`gh run view` 只说一句"likely failed because of a
+  # workflow file issue"、check-runs 是空的。本地 `yaml.safe_load` 完全看不出来
+  # —— 它只验 YAML 语法,不验 Actions 的 schema。
+  # 想在名字里带版本号,就得把 MSRV 挪进 matrix(那是 name 能用的上下文),
+  # 而为一个值开个矩阵不值当。让 job id 直接当显示名,与下面 `ci-ok` 同一条理由。
   msrv:
-    name: MSRV (${{ env.MSRV }})
     runs-on: ubuntu-latest
     env:
       # 由 let-chains 决定(见 Cargo.toml 注释);与 rust-version 保持一致
