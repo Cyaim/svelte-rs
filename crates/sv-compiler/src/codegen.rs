@@ -504,7 +504,7 @@ impl Cg<'_> {
         let mut ts = match tag {
             Tag::View => emit::create(&el, ElemKind::View, ""),
             Tag::Checkbox => emit::create(&el, ElemKind::Checkbox, ""),
-            Tag::Input => emit::create(&el, ElemKind::TextInput, ""),
+            Tag::Input | Tag::TextArea => emit::create(&el, ElemKind::TextInput, ""),
             Tag::Overlay => unreachable!("overlay 在 emit_element 顶部拦截"),
             Tag::Text | Tag::Button => {
                 let segments: &[Segment] = match children.first() {
@@ -530,6 +530,7 @@ impl Cg<'_> {
             Tag::Button => "button",
             Tag::Checkbox => "checkbox",
             Tag::Input => "input",
+            Tag::TextArea => "textarea",
             Tag::Overlay => unreachable!(),
             Tag::Component(_) => unreachable!(),
         };
@@ -573,8 +574,9 @@ impl Cg<'_> {
         }
         for attr in attrs {
             match attr.name.as_str() {
-                "class" | "checked" | "@attach" | "autofocus" | "placeholder" | "aria-label" => {}
-                "value" if *tag == Tag::Input => {}
+                "class" | "checked" | "@attach" | "autofocus" | "placeholder" | "aria-label"
+                | "rows" => {}
+                "value" if tag.is_text_input() => {}
                 name if name == "onclick"
                     || name.starts_with("on")
                     || name.starts_with("style:")
@@ -807,6 +809,7 @@ impl Cg<'_> {
 
         // ---- 事件 / 绑定 / 附着 / 过渡 ----
         let mut autofocus = false;
+        let mut rows: u16 = 3;
         let mut bind_scrolly: Option<TokenStream> = None;
         for attr in attrs {
             match attr.name.as_str() {
@@ -886,14 +889,39 @@ impl Cg<'_> {
                         ts.extend(emit::aria_label(&el, expr.to_token_stream(), true));
                     }
                 },
-                // <input> 专属:placeholder / value 单向 / bind:value 双向 /
-                // oninput / onsubmit(调研 21 §2.7,复刻 bind:checked 模板)
-                "placeholder" => {
-                    if *tag != Tag::Input {
+                // <textarea> 专属:可见行数(布局高 = rows × 行高)
+                "rows" => {
+                    if *tag != Tag::TextArea {
                         return Err(CompileError::at_offset(
                             self.source,
                             attr.offset,
-                            "placeholder 只能用在 <input> 上",
+                            "rows 只能用在 <textarea> 上",
+                        ));
+                    }
+                    let AttrValue::Str { value, .. } = &attr.value else {
+                        return Err(CompileError::at_offset(
+                            self.source,
+                            attr.offset,
+                            "rows 的值应为静态数字,如 rows=\"5\"",
+                        ));
+                    };
+                    let n: u16 = value.trim().parse().map_err(|_| {
+                        CompileError::at_offset(
+                            self.source,
+                            attr.offset,
+                            format!("rows 应为 1..=65535 的整数,收到 `{value}`"),
+                        )
+                    })?;
+                    rows = n.max(1);
+                }
+                // <input> 专属:placeholder / value 单向 / bind:value 双向 /
+                // oninput / onsubmit(调研 21 §2.7,复刻 bind:checked 模板)
+                "placeholder" => {
+                    if !tag.is_text_input() {
+                        return Err(CompileError::at_offset(
+                            self.source,
+                            attr.offset,
+                            "placeholder 只能用在 <input>/<textarea> 上",
                         ));
                     }
                     let AttrValue::Str { value, .. } = &attr.value else {
@@ -905,7 +933,7 @@ impl Cg<'_> {
                     };
                     ts.extend(emit::placeholder(&el, quote! { #value }));
                 }
-                "value" if *tag == Tag::Input => {
+                "value" if tag.is_text_input() => {
                     let AttrValue::Expr(e) = &attr.value else {
                         return Err(CompileError::at_offset(
                             self.source,
@@ -923,7 +951,7 @@ impl Cg<'_> {
                     });
                 }
                 "bind:value" => {
-                    if *tag != Tag::Input {
+                    if !tag.is_text_input() {
                         return Err(CompileError::at_offset(
                             self.source,
                             attr.offset,
@@ -953,7 +981,7 @@ impl Cg<'_> {
                     ts.extend(emit::bind_value(&el, sig_ts));
                 }
                 "oninput" | "onsubmit" => {
-                    if *tag != Tag::Input {
+                    if !tag.is_text_input() {
                         return Err(CompileError::at_offset(
                             self.source,
                             attr.offset,
@@ -1155,6 +1183,10 @@ impl Cg<'_> {
                 }
                 _ => {}
             }
+        }
+        // 多行开关放在属性之后:rows 已定,一次调用定型
+        if *tag == Tag::TextArea {
+            ts.extend(quote! { __doc.set_multiline(#el, true, #rows); });
         }
         if let Some(sig) = bind_scrolly {
             ts.extend(emit::bind_scroll_y(&el, sig));

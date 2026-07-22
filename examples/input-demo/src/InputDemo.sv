@@ -2,6 +2,7 @@
 let name = $state(String::new());
 let last_submit = $state(String::new());
 let history = $state(Vec::<String>::new());
+let note = $state(String::from("第一行\n第二行(Enter 换行)"));
 </script>
 
 <view style="padding:24; gap:12">
@@ -20,6 +21,10 @@ let history = $state(Vec::<String>::new());
          }} />
 
   <text>实时值(bind:value):{name}</text>
+
+  <text font-size="13" fg="#666677">多行 textarea:Enter 换行,↑/↓ 按视觉行走,超出 rows 自动上滚</text>
+  <textarea rows="4" placeholder="多行输入…" bind:value={note} />
+  <text font-size="13" fg="#999999">note 长度:{note.chars().count()}</text>
 
   <view style="direction:row; gap:8">
     <button style="padding:8; radius:6; bg:#3c78ff; fg:#fff"

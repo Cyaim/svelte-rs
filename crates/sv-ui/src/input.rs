@@ -50,6 +50,12 @@ pub struct InputState {
     /// IME 组合中文本 + 组合区间(winit Preedit 原样;None = 无组合)
     pub preedit: Option<(String, Option<(usize, usize)>)>,
     pub placeholder: String,
+    /// 多行模式(`<textarea>`):Enter 换行而不是提交,粘贴保留换行,
+    /// 文本按内容宽折行。几何相关的动作(上下行移动)由渲染壳处理 ——
+    /// 本模块只认字节,视觉行是排版的产物
+    pub multiline: bool,
+    /// 多行模式的可见行数(布局高度 = rows × 行高)
+    pub rows: u16,
     /// 单行横向滚动(光标跟随;渲染壳每帧计算,此处为持久化载体)
     pub scroll_x: f32,
     /// 值变化回调(每次编辑后带新值)
@@ -69,6 +75,8 @@ impl Default for InputState {
             anchor: 0,
             preedit: None,
             placeholder: String::new(),
+            multiline: false,
+            rows: 3,
             scroll_x: 0.0,
             on_input: None,
             on_submit: None,
@@ -378,6 +386,14 @@ pub fn apply_edit(doc: &Doc, id: ViewId, op: EditOp) {
                     Caret::Right => next_boundary(&n.text, input.cursor),
                     Caret::WordLeft => prev_word_boundary(&n.text, input.cursor),
                     Caret::WordRight => next_word_boundary(&n.text, input.cursor),
+                    // 多行:Home/End 走**硬行**(换行符之间)。视觉折行的
+                    // 行首行尾要几何才知道,那是渲染壳的活儿,模型层不猜
+                    Caret::Home if input.multiline => {
+                        n.text[..input.cursor].rfind('\n').map_or(0, |i| i + 1)
+                    }
+                    Caret::End if input.multiline => n.text[input.cursor..]
+                        .find('\n')
+                        .map_or(n.text.len(), |i| input.cursor + i),
                     Caret::Home => 0,
                     Caret::End => n.text.len(),
                 };
@@ -544,6 +560,16 @@ pub fn clipboard_set(text: &str) {
 // ---------------------------------------------------------------------------
 
 /// 焦点输入框的键盘处理。返回是否消费(Tab/Esc 恒不消费——放行给导航段)
+fn is_multiline(doc: &Doc, id: ViewId) -> bool {
+    doc.read(|inner| {
+        inner
+            .nodes
+            .get(id)
+            .and_then(|n| n.input.as_deref())
+            .is_some_and(|i| i.multiline)
+    })
+}
+
 pub(crate) fn route_editing_key(doc: &Doc, id: ViewId, e: &KeyEvent) -> bool {
     debug_assert!(doc.read(|inner| {
         inner
@@ -594,8 +620,13 @@ pub(crate) fn route_editing_key(doc: &Doc, id: ViewId, e: &KeyEvent) -> bool {
             }
             'v' => {
                 if let Some(text) = clipboard_get() {
-                    // 单行控件:粘贴内容里的换行替换为空格
-                    let text = text.replace(['\r', '\n'], " ");
+                    let text = if is_multiline(doc, id) {
+                        // 多行:保留换行,只统一 CRLF
+                        text.replace("\r\n", "\n").replace('\r', "\n")
+                    } else {
+                        // 单行控件:粘贴内容里的换行替换为空格
+                        text.replace(['\r', '\n'], " ")
+                    };
                     apply_edit(doc, id, EditOp::InsertStr(text));
                 }
                 true
@@ -658,6 +689,11 @@ pub(crate) fn route_editing_key(doc: &Doc, id: ViewId, e: &KeyEvent) -> bool {
         }
         Key::End => {
             apply_edit(doc, id, EditOp::Move(Caret::End, e.mods.shift));
+            true
+        }
+        // 多行:Enter 换行(与浏览器 textarea 一致);提交交给按钮或快捷键
+        Key::Enter if is_multiline(doc, id) => {
+            apply_edit(doc, id, EditOp::InsertStr("\n".into()));
             true
         }
         Key::Enter => {
@@ -931,6 +967,68 @@ mod tests {
             "外部",
             "程序化赋值不该被 Ctrl+Z 回滚"
         );
+    }
+
+    /// 多行模式:Enter 换行、粘贴保留换行、Home/End 走硬行
+    #[test]
+    fn multiline_enter_paste_and_line_home_end() {
+        struct Fake(&'static str);
+        impl Clipboard for Fake {
+            fn get_text(&mut self) -> Option<String> {
+                Some(self.0.to_string())
+            }
+            fn set_text(&mut self, _: &str) {}
+        }
+        let (doc, id) = input_doc();
+        let submitted: Rc<RefCell<Vec<String>>> = Default::default();
+        let log = submitted.clone();
+        doc.set_on_submit(id, move |v| log.borrow_mut().push(v.to_string()));
+        doc.focus(id);
+
+        // 单行:Enter 提交
+        dispatch_key(&doc, &KeyEvent::new(Key::Char('a'), Mods::NONE));
+        dispatch_key(&doc, &KeyEvent::new(Key::Enter, Mods::NONE));
+        assert_eq!(*submitted.borrow(), vec!["a"], "单行 Enter 应提交");
+
+        // 切多行:Enter 换行,不再提交
+        doc.set_multiline(id, true, 4);
+        dispatch_key(&doc, &KeyEvent::new(Key::Enter, Mods::NONE));
+        dispatch_key(&doc, &KeyEvent::new(Key::Char('b'), Mods::NONE));
+        assert_eq!(
+            doc.input_value(id).unwrap(),
+            "a
+b"
+        );
+        assert_eq!(submitted.borrow().len(), 1, "多行 Enter 不该提交");
+
+        // Home/End 走硬行(不是整串首尾)
+        apply_edit(&doc, id, EditOp::Move(Caret::Home, false));
+        assert_eq!(caret(&doc, id).0, 2, "Home 应到本行行首(\n 之后)");
+        apply_edit(&doc, id, EditOp::Move(Caret::End, false));
+        assert_eq!(caret(&doc, id).0, 3, "End 应到本行行尾");
+        // 第一行的 End 停在换行符前
+        apply_edit(&doc, id, EditOp::MoveTo(0, false));
+        apply_edit(&doc, id, EditOp::Move(Caret::End, false));
+        assert_eq!(caret(&doc, id).0, 1);
+
+        // 粘贴:多行保留换行(单行折成空格)
+        set_clipboard(Fake(
+            "x
+y",
+        ));
+        apply_edit(&doc, id, EditOp::Move(Caret::End, false));
+        dispatch_key(&doc, &KeyEvent::new(Key::Char('v'), Mods::CTRL));
+        assert_eq!(
+            doc.input_value(id).unwrap(),
+            "ax
+y
+b",
+            "CRLF 应统一成 \n"
+        );
+        doc.set_multiline(id, false, 1);
+        apply_edit(&doc, id, EditOp::SelectAll);
+        dispatch_key(&doc, &KeyEvent::new(Key::Char('v'), Mods::CTRL));
+        assert_eq!(doc.input_value(id).unwrap(), "x y", "单行应把换行折成空格");
     }
 
     /// 双击选词 / 三击全选 / 拖选(渲染壳调的 Doc 面)

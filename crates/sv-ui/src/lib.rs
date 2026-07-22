@@ -947,6 +947,23 @@ impl Doc {
         self.bump();
     }
 
+    /// 多行模式(`<textarea>`):Enter 换行、粘贴保留换行、按内容宽折行。
+    /// `rows` 是可见行数(布局高度 = rows × 行高)
+    pub fn set_multiline(&self, id: ViewId, multiline: bool, rows: u16) {
+        {
+            let mut inner = self.0.borrow_mut();
+            let Some(input) = inner.nodes.get_mut(id).and_then(|n| n.input.as_deref_mut()) else {
+                return;
+            };
+            if input.multiline == multiline && input.rows == rows {
+                return;
+            }
+            input.multiline = multiline;
+            input.rows = rows.max(1);
+        }
+        self.bump();
+    }
+
     /// 输入框当前值(非 TextInput 返回 None)
     pub fn input_value(&self, id: ViewId) -> Option<String> {
         self.0

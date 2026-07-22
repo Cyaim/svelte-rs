@@ -22,8 +22,8 @@ pub use paint::{
 };
 pub use render::{
     Layout, OverlayRegion, Placed, Rect, ScrollArea, hit_click_target, ime_caret_rect,
-    input_caret_at, layout_full_cached, layout_tree, layout_tree_full, overlay_click_gate,
-    paint_scrollbars, paint_tree, render_frame, route_wheel, scrollbar_thumb,
+    input_caret_at, input_caret_line_move, layout_full_cached, layout_tree, layout_tree_full,
+    overlay_click_gate, paint_scrollbars, paint_tree, render_frame, route_wheel, scrollbar_thumb,
 };
 pub use text::{FontHandle, caret_index_at, caret_x, selection_rects};
 // ShellError 定义在下方(与窗口/呈现代码同处),此处不重复导出
@@ -320,6 +320,30 @@ impl App {
         let cache = &mut self.a11y;
         ws.access
             .update_if_active(|| a11y::incremental_tree_update(cache, &doc, placed, scale));
+    }
+
+    /// 多行输入的 ↑/↓:按视觉行移动光标(Shift 扩选)。
+    /// 归渲染壳是因为"上一行的同一 x"只有排版知道;单行输入不消费,
+    /// 方向键照旧留给导航段
+    fn route_line_move(&mut self, e: &sv_ui::KeyEvent) -> bool {
+        let down = match e.key {
+            sv_ui::Key::ArrowDown => true,
+            sv_ui::Key::ArrowUp => false,
+            _ => return false,
+        };
+        let Some(id) = self.doc.focused() else {
+            return false;
+        };
+        let Some(p) = self.layout.placed.iter().find(|p| p.id == id).copied() else {
+            return false;
+        };
+        match input_caret_line_move(&self.doc, &p, down) {
+            Some(byte) => {
+                self.doc.set_caret(id, byte, e.mods.shift);
+                true
+            }
+            None => false,
+        }
     }
 
     /// 本次按下是第几击(1/2/3 循环)。窗口 500ms、位移 4 物理 px 内算连击
@@ -651,8 +675,9 @@ impl ApplicationHandler<UserEvent> for App {
                 if let Some((id, p)) = self.drag_input
                     && let Some(ws) = &self.win
                 {
-                    let lx = (position.x / ws.window.scale_factor()) as f32;
-                    let byte = input_caret_at(&self.doc, &p, lx);
+                    let sf = ws.window.scale_factor();
+                    let (lx, ly) = ((position.x / sf) as f32, (position.y / sf) as f32);
+                    let byte = input_caret_at(&self.doc, &p, lx, ly);
                     self.doc.set_caret(id, byte, true);
                 }
                 self.update_hover();
@@ -711,8 +736,12 @@ impl ApplicationHandler<UserEvent> for App {
                     event.repeat,
                     self.mods,
                 ) {
-                    // 路由(冒泡/编辑/导航/激活/快捷键)在 sv-ui,离屏可测
-                    sv_ui::dispatch_key(&self.doc, &e);
+                    // 路由(冒泡/编辑/导航/激活/快捷键)在 sv-ui,离屏可测。
+                    // 没人消费才轮到几何相关的编辑动作 —— 多行输入的上下行
+                    // 移动要知道视觉行在哪,那是排版的产物,模型层不该猜
+                    if !sv_ui::dispatch_key(&self.doc, &e) {
+                        self.route_line_move(&e);
+                    }
                     // Tab/Esc 可能移焦进出输入框
                     self.sync_ime();
                 }
@@ -789,7 +818,7 @@ impl ApplicationHandler<UserEvent> for App {
                             .get(p.id)
                             .is_some_and(|n| n.kind == sv_ui::ElementKind::TextInput)
                     }) {
-                        let byte = input_caret_at(&self.doc, &p, lx);
+                        let byte = input_caret_at(&self.doc, &p, lx, ly);
                         match self.click_streak() {
                             1 => {
                                 self.doc.set_caret(p.id, byte, false);
@@ -1431,6 +1460,81 @@ mod tests {
         }
     }
 
+    /// 多行 textarea:高度按 rows 算、文本按内容宽折行、光标带行号、
+    /// 点第二行命中第二行、↑/↓ 按视觉行走
+    #[test]
+    fn textarea_multiline_geometry() {
+        use sv_ui::{EditOp, apply_edit};
+        let doc = Doc::new();
+        let (_, _scope) = create_root(|| {
+            let ta = doc.create_text_input();
+            doc.append(doc.root(), ta);
+            doc.update_style(ta, |s| s.width = Some(160.0));
+            doc.set_multiline(ta, true, 4);
+        });
+        let ta = doc.read(|inner| inner.nodes[inner.root].children[0]);
+        let placed = layout_tree(&doc, 480.0, 400.0);
+        let p = *placed.iter().find(|pp| pp.id == ta).unwrap();
+
+        // 布局高 = 4 行(单行输入是 1 行高)
+        let line_h = crate::text::line_height(16.0);
+        assert!(
+            (p.rect.h - line_h * 4.0).abs() < 1.0,
+            "rows=4 的高应是 4 行:{} vs {}",
+            p.rect.h,
+            line_h * 4.0
+        );
+
+        // 硬换行 → 光标 y 落到第二行
+        apply_edit(
+            &doc,
+            ta,
+            EditOp::InsertStr(
+                "ab
+cd"
+                .into(),
+            ),
+        );
+        let (x1, y1, h1) = crate::text::caret_rect(
+            "ab
+cd",
+            16.0,
+            Some(160.0),
+            2,
+        );
+        let (x2, y2, _) = crate::text::caret_rect(
+            "ab
+cd",
+            16.0,
+            Some(160.0),
+            3,
+        );
+        assert!(y2 > y1, "换行后光标应下移一行:{y1} → {y2}");
+        assert!(x2 < x1, "新行光标应回到行首:{x1} → {x2}");
+        assert!(h1 > 0.0);
+
+        // 点第二行:命中第二行的字节(不再恒落在第一行)
+        let bw = 0.0;
+        let text_y = p.rect.y + bw;
+        let hit = input_caret_at(&doc, &p, p.rect.x + 1.0, text_y + y2 + h1 * 0.5);
+        assert!(hit >= 3, "点第二行应命中换行符之后:{hit}");
+
+        // ↑/↓ 按视觉行走
+        doc.set_caret(ta, 4, false); // 第二行中间
+        let up = input_caret_line_move(&doc, &p, false).expect("多行应支持上下移动");
+        assert!(up <= 2, "↑ 应回到第一行:{up}");
+        doc.set_caret(ta, up, false);
+        let down = input_caret_line_move(&doc, &p, true).expect("多行应支持上下移动");
+        assert!(down >= 3, "↓ 应回到第二行:{down}");
+
+        // 单行输入不参与行移动(方向键留给导航段)
+        let input = doc.create_text_input();
+        doc.append(doc.root(), input);
+        let placed = layout_tree(&doc, 480.0, 400.0);
+        let pi = *placed.iter().find(|pp| pp.id == input).unwrap();
+        assert!(input_caret_line_move(&doc, &pi, true).is_none());
+    }
+
     /// 溢出输入框的点击命中:文本被光标跟随推左后,点右端应落在串尾附近
     /// (P3 前 `input_caret_at` 忽略滚移,长文本点哪都偏到左边)
     #[test]
@@ -1451,7 +1555,7 @@ mod tests {
 
         // 光标在末尾 → 已滚到最右;点内容区右缘应命中串尾附近
         let right = p.rect.x + p.rect.w - 4.0;
-        let hit = input_caret_at(&doc, &p, right);
+        let hit = input_caret_at(&doc, &p, right, p.rect.y);
         assert!(
             hit >= text.len() - 2,
             "右缘点击应命中串尾附近,得到 {hit}/{}",
@@ -1459,7 +1563,7 @@ mod tests {
         );
         // 回到串首(滚移归零)后,同一 x 命中的是可见窗口内的字符,不再是串尾
         apply_edit(&doc, input, EditOp::Move(Caret::Home, false));
-        let hit0 = input_caret_at(&doc, &p, right);
+        let hit0 = input_caret_at(&doc, &p, right, p.rect.y);
         assert!(hit0 < hit, "滚移归零后同一坐标应命中更靠前的字符:{hit0}");
     }
 

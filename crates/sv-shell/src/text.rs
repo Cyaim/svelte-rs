@@ -209,37 +209,65 @@ pub fn line_height(px: f32) -> f32 {
 // ——"画的"与"点的"必须出自同一次排版。
 // ---------------------------------------------------------------------------
 
-fn with_line_layout<R>(text: &str, px: f32, f: impl FnOnce(&parley::Layout<[u8; 4]>) -> R) -> R {
-    with_layout(text, px, None, sv_ui::TextAlign::Left, f)
+fn with_line_layout<R>(
+    text: &str,
+    px: f32,
+    wrap_w: Option<f32>,
+    f: impl FnOnce(&parley::Layout<[u8; 4]>) -> R,
+) -> R {
+    with_layout(text, px, wrap_w, sv_ui::TextAlign::Left, f)
 }
 
-/// 光标 x(逻辑 px,相对文本起点);`byte` 非 char 边界时向下取所在簇起点
+/// 光标 x(逻辑 px,相对文本起点);`byte` 非 char 边界时向下取所在簇起点。
+/// 单行专用(多行请用 [`caret_rect`])
 pub fn caret_x(text: &str, px: f32, byte: usize) -> f32 {
+    caret_rect(text, px, None, byte).0
+}
+
+/// 光标矩形(逻辑 px,相对文本起点):`(x, y, 行高)`。
+/// `wrap_w=Some(w)` 时按 w 折行 —— 多行输入的光标要知道自己在第几行
+pub fn caret_rect(text: &str, px: f32, wrap_w: Option<f32>, byte: usize) -> (f32, f32, f32) {
     if text.is_empty() {
-        return 0.0;
+        return (0.0, 0.0, line_height(px));
     }
-    with_line_layout(text, px, |l| {
-        Cursor::from_byte_index(l, byte.min(text.len()), Affinity::Downstream)
-            .geometry(l, 0.0)
-            .x0 as f32
+    with_line_layout(text, px, wrap_w, |l| {
+        let r =
+            Cursor::from_byte_index(l, byte.min(text.len()), Affinity::Downstream).geometry(l, 0.0);
+        (r.x0 as f32, r.y0 as f32, (r.y1 - r.y0) as f32)
     })
 }
 
 /// 点击 x(逻辑 px,相对文本起点)→ 最近簇边界的字节偏移(与 [`caret_x`] 互逆)
 pub fn caret_index_at(text: &str, px: f32, x: f32) -> usize {
+    caret_index_at_point(text, px, None, x, 0.0)
+}
+
+/// 点(x, y)→ 最近簇边界的字节偏移(多行:y 决定落在第几行)
+pub fn caret_index_at_point(text: &str, px: f32, wrap_w: Option<f32>, x: f32, y: f32) -> usize {
     if text.is_empty() {
         return 0;
     }
-    with_line_layout(text, px, |l| Cursor::from_point(l, x, 0.0).index())
+    with_line_layout(text, px, wrap_w, |l| Cursor::from_point(l, x, y).index())
 }
 
 /// 选区矩形(逻辑 px,相对文本起点):`(x, y, w, h)` 序列。
 /// 单行下通常一个矩形,BiDi 混排会分段——所以返回的是序列而不是一对 x
 pub fn selection_rects(text: &str, px: f32, lo: usize, hi: usize) -> Vec<(f32, f32, f32, f32)> {
+    selection_rects_wrapped(text, px, None, lo, hi)
+}
+
+/// 选区矩形(折行版):多行选区天然是**每行一个矩形**
+pub fn selection_rects_wrapped(
+    text: &str,
+    px: f32,
+    wrap_w: Option<f32>,
+    lo: usize,
+    hi: usize,
+) -> Vec<(f32, f32, f32, f32)> {
     if text.is_empty() || lo >= hi {
         return Vec::new();
     }
-    with_line_layout(text, px, |l| {
+    with_line_layout(text, px, wrap_w, |l| {
         let sel = Selection::new(
             Cursor::from_byte_index(l, lo.min(text.len()), Affinity::Downstream),
             Cursor::from_byte_index(l, hi.min(text.len()), Affinity::Downstream),

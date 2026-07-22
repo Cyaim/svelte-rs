@@ -974,6 +974,46 @@ let count = $state(0i32);
         assert!(err.message.contains("bindable"), "{err}");
     }
 
+    /// `<textarea>`:与 `<input>` 共用全部输入属性,额外认 rows;
+    /// rows 用错地方要报错(而不是静默忽略)
+    #[test]
+    fn textarea_compiles() {
+        let src = r#"<script>
+let note = $state(String::new());
+</script>
+<view>
+  <textarea rows="5" placeholder="写点什么" bind:value={note}
+            oninput={|v| { let _ = v; }} />
+</view>
+"#;
+        let code = compile_sv(src, "c").expect("应编译成功");
+        assert!(
+            code.contains("create_text_input") && code.contains("set_multiline"),
+            "textarea 应建输入框并开多行:
+{code}"
+        );
+        assert!(
+            code.contains("5u16"),
+            "rows 应直通:
+{code}"
+        );
+        assert!(code.contains("set_placeholder") && code.contains("set_on_input"));
+        syn::parse_file(&code).unwrap();
+
+        // rows 只对 textarea 有意义
+        let err = compile_sv("<script></script><view><input rows=\"3\" /></view>", "c")
+            .expect_err("input 上写 rows 应报错");
+        assert!(err.message.contains("textarea"), "{}", err.message);
+
+        // rows 必须是静态数字
+        let err = compile_sv(
+            "<script></script><view><textarea rows=\"很多\" /></view>",
+            "c",
+        )
+        .expect_err("非数字 rows 应报错");
+        assert!(err.message.contains("整数"), "{}", err.message);
+    }
+
     #[test]
     fn keyed_each_compiles() {
         let src = r#"<script>

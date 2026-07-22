@@ -160,8 +160,10 @@ struct MeasureCtx {
     kind: ElementKind,
     text: String,
     px: f32,
-    /// Text 叶子是否折行(Button/Checkbox/TextInput 恒单行)
+    /// Text 叶子是否折行(Button/Checkbox 恒单行;TextInput 见 rows)
     wrap: bool,
+    /// TextInput 的可见行数:1 = 单行 `<input>`,>1 = 多行 `<textarea>`
+    rows: u16,
 }
 
 /// sv-ui Style → taffy::Style 纯映射(sv-ui 不依赖 taffy 类型,
@@ -290,6 +292,11 @@ fn build_taffy(
                 text: n.text.clone(),
                 px: fs,
                 wrap: n.kind == ElementKind::Text && n.style.text_wrap == sv_ui::TextWrap::Wrap,
+                rows: n
+                    .input
+                    .as_deref()
+                    .filter(|i| i.multiline)
+                    .map_or(1, |i| i.rows),
             },
         )
         .expect("sv-shell: taffy 建叶子失败")
@@ -341,9 +348,11 @@ fn measure_leaf(
                 height: side,
             }
         }
+        // 多行 textarea 的高 = rows × 行高(内容再长也不撑高:溢出靠滚动,
+        // 与浏览器 textarea 一致)
         ElementKind::TextInput => taffy::Size {
             width: 200.0,
-            height: crate::text::line_height(ctx.px),
+            height: crate::text::line_height(ctx.px) * f32::from(ctx.rows.max(1)),
         },
         ElementKind::View => unreachable!("View 不是叶子"),
     }
@@ -625,6 +634,12 @@ fn effective_opacity(inner: &DocumentInner, id: ViewId) -> f32 {
     o
 }
 
+/// 多行输入的纵向滚移(逻辑 px):光标行掉出可视区底部时把文本整体上推,
+/// 其余不动 —— 与浏览器 textarea 同款"最小移动"
+fn input_scroll_y(caret_y: f32, caret_h: f32, content_h: f32) -> f32 {
+    (caret_y + caret_h - content_h).max(0.0)
+}
+
 /// 单行输入的横向滚移(逻辑 px):光标顶到右内边时把文本整体推左。
 /// 绘制、命中、IME 上报三处共用本函数——"画的"、"点的"、"报的"同一个数
 fn input_scroll_x(display: &str, px: f32, caret_byte: usize, content_w: f32) -> f32 {
@@ -790,30 +805,47 @@ pub fn paint_tree(doc: &Doc, placed: &[Placed], painter: &mut dyn Painter, scale
                     let (display, caret_byte, preedit_range) =
                         sv_ui::input::display_text(value, input);
 
-                    // 光标跟随:每帧无状态计算横向滚移。几何一律在**逻辑 px**
-                    // 求(与 taffy measure/断行同源),画的时候再乘 scale
+                    // 几何一律在**逻辑 px**求(与 taffy measure/断行同源),
+                    // 画的时候再乘 scale
                     let fs_l = resolve_font_size(inner, p.id);
                     let content_w_l = p.rect.w - (s.padding.horizontal() + bw * 2.0);
-                    let caret_l = crate::text::caret_x(&display, fs_l, caret_byte);
-                    let scroll = input_scroll_x(&display, fs_l, caret_byte, content_w_l);
-                    let text_x = content_x - scroll * scale;
+                    let content_h_l = p.rect.h - (s.padding.vertical() + bw * 2.0);
+                    // 多行按内容宽折行;单行不折(靠横向滚移)
+                    let wrap_w = input.multiline.then_some(content_w_l);
+                    let (caret_lx, caret_ly, caret_lh) =
+                        crate::text::caret_rect(&display, fs_l, wrap_w, caret_byte);
+                    // 光标跟随:单行推 x,多行推 y —— 都是每帧无状态算
+                    let (scroll_x, scroll_y) = if input.multiline {
+                        (0.0, input_scroll_y(caret_ly, caret_lh, content_h_l))
+                    } else {
+                        (input_scroll_x(&display, fs_l, caret_byte, content_w_l), 0.0)
+                    };
+                    let text_x = content_x - scroll_x * scale;
+                    let text_y = content_y - scroll_y * scale;
 
                     painter.push_clip(content_x - scale, y, content_w + 2.0 * scale, h, 0.0);
 
                     // 选区高亮(组合中隐藏选区,IME 惯例)。
-                    // Selection::geometry 逐行给矩形——BiDi 混排会分段,故是序列
+                    // Selection::geometry 逐行给矩形——多行选区天然分行,
+                    // BiDi 混排也会分段,故是序列而不是一对 x
                     if focused && input.preedit.is_none() && input.cursor != input.anchor {
-                        for (rx, _, rw, _) in crate::text::selection_rects(
+                        for (rx, ry, rw, rh) in crate::text::selection_rects_wrapped(
                             value,
                             fs_l,
+                            wrap_w,
                             input.cursor.min(input.anchor),
                             input.cursor.max(input.anchor),
                         ) {
+                            let (sy, sh) = if input.multiline {
+                                (text_y + ry * scale, rh * scale)
+                            } else {
+                                (content_y, content_h)
+                            };
                             painter.fill_rounded_rect(
                                 text_x + rx * scale,
-                                content_y,
+                                sy,
                                 rw * scale,
-                                content_h,
+                                sh,
                                 0.0,
                                 with_opacity(Color::rgba(60, 120, 255, 80), op),
                             );
@@ -833,36 +865,42 @@ pub fn paint_tree(doc: &Doc, placed: &[Placed], painter: &mut dyn Painter, scale
                     for run in crate::text::shape(
                         draw,
                         fs_l,
-                        None,
+                        wrap_w,
                         sv_ui::TextAlign::Left,
                         text_x,
-                        content_y,
+                        text_y,
                         scale,
                     ) {
                         painter.glyph_run(run.font, &run.glyphs, fg);
                     }
 
-                    // 预编辑整段 2px 下划线(over-the-spot,候选窗是输入法自己的)
+                    // 预编辑整段 2px 下划线(over-the-spot,候选窗是输入法自己的)。
+                    // 组合串不跨行(输入法上屏前是一段),按光标所在行画
                     if let Some((lo, hi)) = preedit_range {
-                        let x0 = crate::text::caret_x(&display, fs_l, lo) * scale;
-                        let x1 = crate::text::caret_x(&display, fs_l, hi) * scale;
+                        let (x0, uy, uh) = crate::text::caret_rect(&display, fs_l, wrap_w, lo);
+                        let (x1, _, _) = crate::text::caret_rect(&display, fs_l, wrap_w, hi);
                         painter.fill_rounded_rect(
-                            text_x + x0,
-                            content_y + content_h - 2.0 * scale,
-                            x1 - x0,
+                            text_x + x0 * scale,
+                            text_y + (uy + uh) * scale - 2.0 * scale,
+                            (x1 - x0) * scale,
                             2.0 * scale,
                             0.0,
                             with_opacity(resolve_fg(inner, p.id), op),
                         );
                     }
 
-                    // 光标竖线(仅焦点时)
+                    // 光标竖线(仅焦点时):多行按行定位,单行占满内容高
                     if focused {
+                        let (cy, ch) = if input.multiline {
+                            (text_y + caret_ly * scale, caret_lh * scale)
+                        } else {
+                            (content_y, content_h)
+                        };
                         painter.fill_rounded_rect(
-                            text_x + caret_l * scale,
-                            content_y,
+                            text_x + caret_lx * scale,
+                            cy,
                             (1.5 * scale).max(1.0),
-                            content_h,
+                            ch,
                             0.0,
                             with_opacity(Color::rgb(255, 62, 0), op),
                         );
@@ -925,9 +963,10 @@ pub fn render_frame(doc: &Doc, phys_w: u32, phys_h: u32, scale: f32) -> (Pixmap,
     (pixmap, layout.placed)
 }
 
-/// 点击命中 TextInput 时:窗口逻辑 x → 值内字节偏移(含 padding/border 内缩)。
-/// 溢出滚移与绘制层同源([`input_scroll_x`]),长文本尾部点击不再偏到左边
-pub fn input_caret_at(doc: &Doc, p: &Placed, lx: f32) -> usize {
+/// 点击命中 TextInput 时:窗口逻辑坐标 → 值内字节偏移(含 padding/border 内缩)。
+/// 溢出滚移与绘制层同源([`input_scroll_x`] / [`input_scroll_y`]),长文本尾部
+/// 点击不再偏到左边;多行时 `ly` 决定落在第几行
+pub fn input_caret_at(doc: &Doc, p: &Placed, lx: f32, ly: f32) -> usize {
     doc.read(|inner| {
         let Some(n) = inner.nodes.get(p.id) else {
             return 0;
@@ -939,12 +978,50 @@ pub fn input_caret_at(doc: &Doc, p: &Placed, lx: f32) -> usize {
         let fs = resolve_font_size(inner, p.id);
         let bw = s.border.map(|b| b.width).unwrap_or(0.0);
         let text_x = p.rect.x + s.padding.left + bw;
+        let text_y = p.rect.y + s.padding.top + bw;
         let content_w = p.rect.w - (s.padding.horizontal() + bw * 2.0);
+        let content_h = p.rect.h - (s.padding.vertical() + bw * 2.0);
         // 滚移按显示串算(与绘制一致),命中按值算——组合中点击本就少见,
         // 且预编辑期光标由输入法掌控
         let (display, caret_byte, _) = sv_ui::input::display_text(&n.text, input);
-        let scroll = input_scroll_x(&display, fs, caret_byte, content_w);
-        crate::text::caret_index_at(&n.text, fs, lx - text_x + scroll)
+        let wrap_w = input.multiline.then_some(content_w);
+        if input.multiline {
+            let (_, cy, ch) = crate::text::caret_rect(&display, fs, wrap_w, caret_byte);
+            let scroll_y = input_scroll_y(cy, ch, content_h);
+            crate::text::caret_index_at_point(
+                &n.text,
+                fs,
+                wrap_w,
+                lx - text_x,
+                ly - text_y + scroll_y,
+            )
+        } else {
+            let scroll = input_scroll_x(&display, fs, caret_byte, content_w);
+            crate::text::caret_index_at(&n.text, fs, lx - text_x + scroll)
+        }
+    })
+}
+
+/// 多行输入的上下行移动:模型层只认字节,视觉行是排版的产物,所以这一步
+/// 归渲染壳。返回目标字节偏移(已在行首/行尾则原地不动)
+pub fn input_caret_line_move(doc: &Doc, p: &Placed, down: bool) -> Option<usize> {
+    doc.read(|inner| {
+        let n = inner.nodes.get(p.id)?;
+        let input = n.input.as_deref()?;
+        if !input.multiline {
+            return None;
+        }
+        let s = &n.style;
+        let fs = resolve_font_size(inner, p.id);
+        let bw = s.border.map(|b| b.width).unwrap_or(0.0);
+        let content_w = p.rect.w - (s.padding.horizontal() + bw * 2.0);
+        let wrap_w = Some(content_w);
+        let (cx, cy, ch) = crate::text::caret_rect(&n.text, fs, wrap_w, input.cursor);
+        // 目标点 = 同一 x、上/下一行的行中;越界时 from_point 会钳到首/末行
+        let ty = if down { cy + ch * 1.5 } else { cy - ch * 0.5 };
+        Some(crate::text::caret_index_at_point(
+            &n.text, fs, wrap_w, cx, ty,
+        ))
     })
 }
 
@@ -964,10 +1041,21 @@ pub fn ime_caret_rect(doc: &Doc, placed: &[Placed], scale: f32) -> Option<(f32, 
         let content_w = p.rect.w - (s.padding.horizontal() + bw * 2.0);
         let content_h = (p.rect.h - (s.padding.vertical() + bw * 2.0)) * scale;
         let (display, caret_byte, _) = sv_ui::input::display_text(&n.text, input);
-        let caret_l = crate::text::caret_x(&display, fs, caret_byte);
+        let wrap_w = input.multiline.then_some(content_w);
+        let (cx, cy, ch) = crate::text::caret_rect(&display, fs, wrap_w, caret_byte);
+        if input.multiline {
+            let content_h_l = p.rect.h - (s.padding.vertical() + bw * 2.0);
+            let scroll_y = input_scroll_y(cy, ch, content_h_l);
+            return Some((
+                content_x + cx * scale,
+                content_y + (cy - scroll_y) * scale,
+                (1.5 * scale).max(1.0),
+                ch * scale,
+            ));
+        }
         let scroll = input_scroll_x(&display, fs, caret_byte, content_w);
         Some((
-            content_x + (caret_l - scroll) * scale,
+            content_x + (cx - scroll) * scale,
             content_y,
             (1.5 * scale).max(1.0),
             content_h,

@@ -409,7 +409,14 @@ sv-compiler / sv-macro / sv-build)**空闲**;`runa`、`sylph` 被占。
   撤销重做(整值快照 + 连打合并 + 空格封口,程序化赋值清历史,与浏览器
   input 一致);词边界用**字符类规则**(空白/表意文字逐字/字母数字串/标点串)
   不引 UAX #29 表——sv-ui 是编译目标须保持零依赖,且与 icu_segmenter 缺
-  cjdict 时的退化行为一致;**留档**:多行 TextArea(需新元素与多行几何);
+  cjdict 时的退化行为一致;**✅ 2026-07-22 多行 textarea 落地**:`InputState.multiline/rows`
+  (不新增 ElementKind —— 加一个变体要连带改 render 两处 match、dump、a11y
+  与两个前端的标签表,而"多行"本就是同一控件的模式)、`<textarea rows="N">`
+  与 `<input>` 共用全部属性与编辑内核;Enter 换行、粘贴保留换行(只统一
+  CRLF)、Home/End 走硬行、按内容宽折行、高 = rows × 行高(内容再长也不
+  撑高,靠上滚)、选区逐行出矩形、光标带行号;**↑/↓ 归渲染壳**
+  (`input_caret_line_move`)——"上一行的同一 x"只有排版知道,模型层只认
+  字节,不猜视觉行;
   AccessKit(egui PR #2294 形态:懒激活 + Doc 版本号节拍推送,TreeUpdate.focus
   与 R1 焦点链强耦合,树映射纯函数金样测试)
   ——**✅ 2026-07-18 P4/P5 落地**:a11y.rs 纯函数 `build_tree_update`

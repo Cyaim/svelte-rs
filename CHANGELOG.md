@@ -20,6 +20,9 @@ sv-shell),按依赖序推送;`examples/` 不发布。
 
 ### 新增
 
+- **多行 `<textarea rows="N">`**:与 `<input>` 共用编辑内核与全部属性;
+  Enter 换行、粘贴保留换行、按内容宽折行、↑/↓ 按视觉行移动。
+
 - **`#[derive(Store)]`(sv-macro)**:结构体 → 字段级信号 store
   (ADR-1 里 Proxy 深层响应的替代品);改一个字段不再叫醒只读别的字段的 effect。
 
