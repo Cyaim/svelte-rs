@@ -884,11 +884,9 @@ impl Cg<'_> {
                 },
                 // onkeydown:挂键盘回调并自动设 focusable(floem 教训:
                 // 不自动设位,回调永远收不到事件是新手第一坑)
-                "onkeydown" => match &attr.value {
-                    AttrValue::Expr(e) => {
-                        let handler = self.expr(e, scope, true)?;
-                        ts.extend(emit::on_key(&el, handler.to_token_stream()));
-                    }
+                // onkeydown/onkeyup 在下面合成一次设入(共用一个槽位)
+                "onkeydown" | "onkeyup" => match &attr.value {
+                    AttrValue::Expr(_) => {}
                     AttrValue::Str { .. } => {
                         return Err(CompileError::at_offset(
                             self.source,
@@ -1239,6 +1237,23 @@ impl Cg<'_> {
                 _ => {}
             }
         }
+        // onkeydown/onkeyup 合成一次设入(sv-ui 只有一个 on_key 槽位,
+        // 分开设会互相顶掉;自动设 focusable 也在 key_handlers 里)
+        let key_expr = |name: &str| -> Result<Option<TokenStream>, CompileError> {
+            let Some(a) = attrs.iter().find(|a| a.name == name) else {
+                return Ok(None);
+            };
+            let AttrValue::Expr(e) = &a.value else {
+                return Ok(None); // 上面已对字符串形态报过错
+            };
+            Ok(Some(self.expr(e, scope, true)?.to_token_stream()))
+        };
+        ts.extend(emit::key_handlers(
+            &el,
+            key_expr("onkeydown")?,
+            key_expr("onkeyup")?,
+        ));
+
         // 多行开关放在属性之后:rows 已定,一次调用定型
         if *tag == Tag::TextArea {
             ts.extend(quote! { __doc.set_multiline(#el, true, #rows); });

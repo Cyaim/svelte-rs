@@ -62,6 +62,8 @@ pub enum AttrKind {
     OnClick,
     /// `on_key_down(闭包)` → `set_focusable(el, true) + set_on_key(el, 闭包)`
     OnKeyDown,
+    /// `on_key_up(闭包)`(与 on_key_down 共用 sv-ui 的单一槽位,按相位分派)
+    OnKeyUp,
     /// `on_focus(闭包)` / `on_blur(闭包)` → 合成进单一 `set_on_focus_change`
     OnFocus,
     OnBlur,

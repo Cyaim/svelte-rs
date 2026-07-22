@@ -164,7 +164,8 @@ fn gen_attrs(attrs: &[Attr], var: &Ident) -> TokenStream {
                 // 表面语法,故不进共享词汇表
                 AttrKind::Style => quote! { ::sv_ui::bind_style(&__doc, #var, #expr); },
                 AttrKind::OnClick => emit::on_click(var, expr),
-                AttrKind::OnKeyDown => emit::on_key(var, expr),
+                // 按下/抬起在下面合成(sv-ui 只有一个 on_key 槽位)
+                AttrKind::OnKeyDown | AttrKind::OnKeyUp => TokenStream::new(),
                 AttrKind::Placeholder => emit::placeholder(var, expr),
                 AttrKind::BindValue => emit::bind_value(var, expr),
                 AttrKind::OnInput => emit::on_input(var, expr),
@@ -192,6 +193,11 @@ fn gen_attrs(attrs: &[Attr], var: &Ident) -> TokenStream {
         // 宏前端没有 `<style>` 块,因而没有 `:focus` 伪类状态要写
         ts.extend(emit::focus_change(var, focus, blur, None));
     }
+    ts.extend(emit::key_handlers(
+        var,
+        find(AttrKind::OnKeyDown),
+        find(AttrKind::OnKeyUp),
+    ));
     ts
 }
 

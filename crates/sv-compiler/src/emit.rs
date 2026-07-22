@@ -134,11 +134,29 @@ pub fn on_click(el: &Ident, handler: TokenStream) -> TokenStream {
 }
 
 /// 键盘回调 **+ 自动设 focusable**:不自动设位回调永远收不到事件
-/// (floem 教训,调研 20)。两个前端都必须带上这一行,故收在这里
-pub fn on_key(el: &Ident, handler: TokenStream) -> TokenStream {
+/// (floem 教训,调研 20)。两个前端都必须带上这一行,故收在这里。
+///
+/// 按下/抬起共用 sv-ui 的**同一个槽位**,所以在这里按相位分派而不是设两次
+/// ——设两次只会互相覆盖(与 focus_change 同一类坑)
+pub fn key_handlers(el: &Ident, down: Option<TokenStream>, up: Option<TokenStream>) -> TokenStream {
+    if down.is_none() && up.is_none() {
+        return TokenStream::new();
+    }
+    let d = down.map_or(quote! { let __kd = |_: &::sv_ui::KeyEvent| {}; }, |e| {
+        quote! { let __kd = #e; }
+    });
+    let u = up.map_or(quote! { let __ku = |_: &::sv_ui::KeyEvent| {}; }, |e| {
+        quote! { let __ku = #e; }
+    });
     quote! {
         __doc.set_focusable(#el, true);
-        __doc.set_on_key(#el, #handler);
+        {
+            #d
+            #u
+            __doc.set_on_key(#el, move |__e| {
+                if __e.is_up() { __ku(__e); } else { __kd(__e); }
+            });
+        }
     }
 }
 
@@ -237,9 +255,19 @@ mod tests {
         assert!(s(create(&el, ElemKind::TextInput, "")).contains("create_text_input ()"));
         assert!(s(append(&parent, &el)).contains("append (__parent , __el0)"));
 
-        // 自动 focusable 是 on_key 的一部分,少了它回调收不到事件
-        let k = s(on_key(&el, quote! { |e| {} }));
+        // 自动 focusable 是 key_handlers 的一部分,少了它回调收不到事件
+        let k = s(key_handlers(
+            &el,
+            Some(quote! { |e: &::sv_ui::KeyEvent| {} }),
+            None,
+        ));
         assert!(k.contains("set_focusable (__el0 , true)") && k.contains("set_on_key"));
+        // 按下/抬起共用一个槽位,必须在闭包里按相位分派
+        assert!(k.contains("is_up ()"));
+        assert!(
+            s(key_handlers(&el, None, None)).is_empty(),
+            "都没有就不该发射"
+        );
 
         // 全静态文本不该产生绑定
         let parts = vec![TextPart::Lit("a".into()), TextPart::Lit("b".into())];

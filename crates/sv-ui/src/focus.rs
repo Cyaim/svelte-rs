@@ -73,8 +73,18 @@ pub struct KeyEvent {
     pub text: Option<String>,
     pub mods: Mods,
     pub repeat: bool,
+    /// 按下还是抬起(R1 档 B)。**默认段(编辑/导航/激活/快捷键)只认
+    /// 按下**:抬起触发它们会导致"按住 Tab 跳两格"这类双触发
+    pub phase: KeyPhase,
     stop: Cell<bool>,
     default_prevented: Cell<bool>,
+}
+
+/// 按键相位
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum KeyPhase {
+    Down,
+    Up,
 }
 
 impl KeyEvent {
@@ -84,9 +94,20 @@ impl KeyEvent {
             text: None,
             mods,
             repeat: false,
+            phase: KeyPhase::Down,
             stop: Cell::new(false),
             default_prevented: Cell::new(false),
         }
+    }
+
+    /// 抬起事件(`onkeyup` / 捕获段可见;不进默认段)
+    pub fn released(mut self) -> Self {
+        self.phase = KeyPhase::Up;
+        self
+    }
+
+    pub fn is_up(&self) -> bool {
+        self.phase == KeyPhase::Up
     }
 
     pub fn with_text(mut self, text: impl Into<String>) -> Self {
@@ -130,8 +151,26 @@ impl KeyEvent {
 /// ②–④ 仅在 `prevent_default()` 未置位时进入。放在 sv-ui 而非渲染壳:
 /// 路由是纯树逻辑,离屏可测,且未来鸿蒙壳复用同一实现。
 pub fn dispatch_key(doc: &Doc, e: &KeyEvent) -> bool {
-    // ① 冒泡段(handler clone 出借用外再调,既有惯例)
+    // ⓪ 捕获段(root → 焦点,与冒泡反向):祖先想在后代之前拦截时用它。
+    // DOM 的 capture 语义,先攒好路径再调回调——回调可能改树
+    let mut path = Vec::new();
+    let mut cur = doc.focused();
+    while let Some(id) = cur {
+        path.push(id);
+        cur = doc.parent(id);
+    }
     let mut handled = false;
+    for id in path.iter().rev() {
+        if let Some(h) = doc.key_capture_handler(*id) {
+            handled = true;
+            h(e);
+        }
+        if e.propagation_stopped() {
+            return true;
+        }
+    }
+
+    // ① 冒泡段(handler clone 出借用外再调,既有惯例)
     let mut cur = doc.focused();
     while let Some(id) = cur {
         if let Some(h) = doc.key_handler(id) {
@@ -145,6 +184,11 @@ pub fn dispatch_key(doc: &Doc, e: &KeyEvent) -> bool {
     }
     if e.default_prevented() {
         return true;
+    }
+    // 抬起到此为止:默认段(编辑/导航/激活/快捷键)只认按下,
+    // 否则一次按键会被处理两遍
+    if e.is_up() {
+        return handled;
     }
 
     // ①.5 编辑段:焦点是 TextInput → 键翻译成 EditOp / 剪贴板 / Enter 提交
@@ -241,6 +285,62 @@ mod tests {
 
     use super::*;
     use crate::Doc;
+
+    /// R1 档 B:捕获段(root→焦点,先于冒泡)与 keyup 相位
+    #[test]
+    fn capture_phase_and_keyup() {
+        let doc = Doc::new();
+        let outer = doc.create_view();
+        doc.append(doc.root(), outer);
+        let btn = doc.create_button("确定");
+        doc.append(outer, btn);
+        let log: Rc<RefCell<Vec<&'static str>>> = Default::default();
+
+        let l = log.clone();
+        doc.set_on_key_capture(outer, move |_| l.borrow_mut().push("capture-outer"));
+        let l = log.clone();
+        doc.set_on_key(btn, move |_| l.borrow_mut().push("bubble-btn"));
+        let l = log.clone();
+        doc.set_on_key(outer, move |_| l.borrow_mut().push("bubble-outer"));
+        doc.focus(btn);
+
+        dispatch_key(&doc, &KeyEvent::new(Key::Char('x'), Mods::NONE));
+        assert_eq!(
+            *log.borrow(),
+            vec!["capture-outer", "bubble-btn", "bubble-outer"],
+            "捕获先于冒泡,且方向相反"
+        );
+
+        // 捕获段 stop_propagation 直接掐断冒泡
+        log.borrow_mut().clear();
+        let l = log.clone();
+        doc.set_on_key_capture(outer, move |e| {
+            l.borrow_mut().push("capture-outer");
+            e.stop_propagation();
+        });
+        dispatch_key(&doc, &KeyEvent::new(Key::Char('x'), Mods::NONE));
+        assert_eq!(*log.borrow(), vec!["capture-outer"], "捕获拦下后不该冒泡");
+
+        // keyup:回调看得到,但默认段不认(否则一次按键处理两遍)
+        let doc2 = Doc::new();
+        let a = doc2.create_button("A");
+        let b = doc2.create_button("B");
+        doc2.append(doc2.root(), a);
+        doc2.append(doc2.root(), b);
+        doc2.focus(a);
+        let ups: Rc<RefCell<usize>> = Default::default();
+        let u = ups.clone();
+        doc2.set_on_key(a, move |e| {
+            if e.is_up() {
+                *u.borrow_mut() += 1;
+            }
+        });
+        dispatch_key(&doc2, &KeyEvent::new(Key::Tab, Mods::NONE).released());
+        assert_eq!(*ups.borrow(), 1, "keyup 应到达回调");
+        assert_eq!(doc2.focused(), Some(a), "keyup 不该触发 Tab 导航");
+        dispatch_key(&doc2, &KeyEvent::new(Key::Tab, Mods::NONE));
+        assert_eq!(doc2.focused(), Some(b), "keydown 才导航");
+    }
 
     /// root
     /// ├── view(不可焦)

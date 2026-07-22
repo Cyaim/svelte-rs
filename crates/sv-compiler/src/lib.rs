@@ -976,6 +976,38 @@ let count = $state(0i32);
 
     /// `<textarea>`:与 `<input>` 共用全部输入属性,额外认 rows;
     /// rows 用错地方要报错(而不是静默忽略)
+    /// `onkeyup` 与 `onkeydown` 共用 sv-ui 的单一槽位:必须合成一次设入,
+    /// 否则后设的把先设的顶掉(R1 档 B)
+    #[test]
+    fn keyup_and_keydown_share_one_slot() {
+        let code = compile_sv(
+            "<script></script><view onkeydown={|e| { let _ = e; }} onkeyup={|e| { let _ = e; }} />",
+            "c",
+        )
+        .expect("应编译成功");
+        assert_eq!(
+            code.matches("set_on_key").count(),
+            1,
+            "两个回调必须合成一次设入:
+{code}"
+        );
+        assert!(
+            code.contains("is_up"),
+            "应按相位分派:
+{code}"
+        );
+        assert!(code.contains("set_focusable"), "键盘回调应自动设可获焦");
+        syn::parse_file(&code).unwrap();
+
+        // 只写一个也照常工作
+        let only_up = compile_sv(
+            "<script></script><view onkeyup={|e| { let _ = e; }} />",
+            "c",
+        )
+        .expect("只写 onkeyup 应编译成功");
+        assert_eq!(only_up.matches("set_on_key").count(), 1);
+    }
+
     /// `:focus` 伪类(R1 档 B):走焦点链而不是指针;与 onfocus/onblur
     /// **合成一次**设入(sv-ui 只有一个回调槽,分开设会互相覆盖);
     /// 元素自动设为可获焦,否则样式永远不生效

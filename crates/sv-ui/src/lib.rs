@@ -23,7 +23,7 @@ pub mod overlay;
 pub mod shortcuts;
 pub mod tasks;
 
-pub use focus::{Key, KeyEvent, Mods, dispatch_key};
+pub use focus::{Key, KeyEvent, KeyPhase, Mods, dispatch_key};
 pub use input::{
     Caret, Clipboard, EditOp, ImeEvent, InputState, UndoEntry, apply_edit, clipboard_get,
     clipboard_set, handle_ime, next_word_boundary, prev_word_boundary, set_clipboard,
@@ -336,6 +336,8 @@ pub struct ViewNode {
     pub on_pointer_up: Option<Rc<dyn Fn()>>,
     pub on_pointer_leave: Option<Rc<dyn Fn()>>,
     pub on_key: Option<KeyHandler>,
+    /// 捕获段回调(root → 焦点,先于冒泡;祖先拦截后代用)
+    pub on_key_capture: Option<KeyHandler>,
     /// 焦点变化回调(true=获焦,false=失焦;`:focus` 伪类接线用)
     pub on_focus_change: Option<Rc<dyn Fn(bool)>>,
     /// TextInput 的编辑态(其它元素恒 None;Box 控制节点大小预算)
@@ -393,6 +395,7 @@ impl Doc {
             on_pointer_up: None,
             on_pointer_leave: None,
             on_key: None,
+            on_key_capture: None,
             on_focus_change: None,
             input: None,
             scroll_x: 0.0,
@@ -485,6 +488,7 @@ impl Doc {
             on_pointer_up: None,
             on_pointer_leave: None,
             on_key: None,
+            on_key_capture: None,
             on_focus_change: None,
             input: (kind == ElementKind::TextInput).then(Default::default),
             scroll_x: 0.0,
@@ -801,6 +805,27 @@ impl Doc {
     /// 取出键盘回调(同 [`Doc::click_handler`]:clone 出来调用,不持树借用)
     pub fn key_handler(&self, id: ViewId) -> Option<KeyHandler> {
         self.0.borrow().nodes.get(id).and_then(|n| n.on_key.clone())
+    }
+
+    /// 捕获段回调:**先于**冒泡、从 root 往焦点走(DOM capture 语义)。
+    /// 用途是祖先要在后代之前拦截(快捷键守卫、模态吞键)
+    pub fn set_on_key_capture(&self, id: ViewId, f: impl Fn(&KeyEvent) + 'static) {
+        {
+            let mut inner = self.0.borrow_mut();
+            let Some(n) = inner.nodes.get_mut(id) else {
+                return;
+            };
+            n.on_key_capture = Some(Rc::new(f));
+        }
+        self.bump();
+    }
+
+    pub fn key_capture_handler(&self, id: ViewId) -> Option<KeyHandler> {
+        self.0
+            .borrow()
+            .nodes
+            .get(id)
+            .and_then(|n| n.on_key_capture.clone())
     }
 
     pub fn set_on_focus_change(&self, id: ViewId, f: impl Fn(bool) + 'static) {

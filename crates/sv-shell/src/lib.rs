@@ -743,17 +743,19 @@ impl ApplicationHandler<UserEvent> for App {
                 is_synthetic,
                 ..
             } => {
-                // is_synthetic:X11 窗口获焦时合成的按下事件,不过滤会误触发;
-                // v0 只派发 keydown(keyup 留给拖拽/游戏后议)
-                if is_synthetic || event.state != ElementState::Pressed {
+                // is_synthetic:X11 窗口获焦时合成的按下事件,不过滤会误触发
+                if is_synthetic {
                     return;
                 }
+                let released = event.state == ElementState::Released;
                 if let Some(e) = map_key(
                     &event.logical_key,
                     event.text.as_deref(),
                     event.repeat,
                     self.mods,
-                ) {
+                )
+                .map(|e| if released { e.released() } else { e })
+                {
                     // 路由(冒泡/编辑/导航/激活/快捷键)在 sv-ui,离屏可测。
                     // 没人消费才轮到几何相关的编辑动作 —— 多行输入的上下行
                     // 移动要知道视觉行在哪,那是排版的产物,模型层不该猜

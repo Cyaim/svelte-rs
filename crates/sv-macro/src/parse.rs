@@ -177,6 +177,7 @@ fn parse_attrs(input: ParseStream) -> Result<Vec<Attr>> {
             "style" => AttrKind::Style,
             "on_click" => AttrKind::OnClick,
             "on_key_down" => AttrKind::OnKeyDown,
+            "on_key_up" => AttrKind::OnKeyUp,
             "on_focus" => AttrKind::OnFocus,
             "on_blur" => AttrKind::OnBlur,
             "placeholder" => AttrKind::Placeholder,
@@ -190,7 +191,7 @@ fn parse_attrs(input: ParseStream) -> Result<Vec<Attr>> {
                 return Err(Error::new(
                     name.span(),
                     format!(
-                        "未知属性 `{other}`:仅支持 style/on_click/on_key_down/on_focus/on_blur/placeholder/bind_value/on_input/on_submit/on_scroll/bind_scroll_y/aria_label"
+                        "未知属性 `{other}`:仅支持 style/on_click/on_key_down/on_key_up/on_focus/on_blur/placeholder/bind_value/on_input/on_submit/on_scroll/bind_scroll_y/aria_label"
                     ),
                 ));
             }
