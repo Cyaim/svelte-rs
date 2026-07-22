@@ -2459,32 +2459,53 @@ cd",
     /// 这里只设灾难性回归上限;`cargo test --release -- layout_30k --nocapture` 看真值
     #[test]
     fn layout_30k_full_tree_budget_probe() {
-        let doc = Doc::new();
-        let (_, _scope) = create_root(|| {
-            for _ in 0..6000 {
-                let row = doc.create_view();
-                doc.update_style(row, |s| s.direction = sv_ui::Direction::Row);
-                doc.append(doc.root(), row);
-                for j in 0..5 {
-                    let t = doc.create_text(if j % 2 == 0 { "标签" } else { "value" });
-                    doc.append(row, t);
+        // **两个探针,因为量尺本身会骗人**:文本 measure 走 text.rs 的两代缓存,
+        // 而缓存键是(文本, 字号, 折行宽)。全树共享两种串时,30000 个叶子只产生
+        // 两个 distinct 键 —— 缓存永远命中,量到的是"没有 measure 成本的布局",
+        // 比真实界面乐观三倍以上。真实界面每行文本都不一样。
+        // 两个都留着:差值本身就是"measure 到底占多少"的读数。
+        let build = |distinct: bool| {
+            let doc = Doc::new();
+            let (_, scope) = create_root(|| {
+                for i in 0..6000 {
+                    let row = doc.create_view();
+                    doc.update_style(row, |s| s.direction = sv_ui::Direction::Row);
+                    doc.append(doc.root(), row);
+                    for j in 0..5 {
+                        let t = if distinct {
+                            doc.create_text(&format!("第 {i} 行第 {j} 列"))
+                        } else {
+                            doc.create_text(if j % 2 == 0 { "标签" } else { "value" })
+                        };
+                        doc.append(row, t);
+                    }
                 }
-            }
-        });
-        let t = std::time::Instant::now();
-        let _ = layout_tree_full(&doc, 1920.0, 1080.0);
-        let cold = t.elapsed().as_secs_f64() * 1000.0;
-        let t = std::time::Instant::now();
-        let layout = layout_tree_full(&doc, 1920.0, 1080.0);
-        let ms = t.elapsed().as_secs_f64() * 1000.0;
+            });
+            (doc, scope)
+        };
+        let measure = |doc: &Doc| {
+            let _ = layout_tree_full(doc, 1920.0, 1080.0);
+            let t = std::time::Instant::now();
+            let layout = layout_tree_full(doc, 1920.0, 1080.0);
+            (t.elapsed().as_secs_f64() * 1000.0, layout)
+        };
+
+        let (shared_doc, _s1) = build(false);
+        let (shared_ms, shared_layout) = measure(&shared_doc);
+        let (distinct_doc, _s2) = build(true);
+        let (distinct_ms, distinct_layout) = measure(&distinct_doc);
+
         println!(
-            "[probe] 30k 全量 build+layout:冷 {cold:.2}ms / 热 {ms:.2}ms(2ms 触发线已越,增量升级列档 B)"
+            "[probe] 30k 全量热布局:共享文本 {shared_ms:.2}ms / 逐行唯一 {distinct_ms:.2}ms\n             [probe] 差值即 measure 成本;逐行唯一才是真实界面的口径"
         );
-        assert!(layout.placed.len() > 30_000);
+        assert!(shared_layout.placed.len() > 30_000);
+        assert!(distinct_layout.placed.len() > 30_000);
         if cfg!(not(debug_assertions)) {
+            // 上限按"灾难性回归"设,不是性能目标 —— 这台机器上跑间抖动能到 2 倍,
+            // 卡紧了只会变成一条随机红的测试。真正的性能追踪在 membench + CI bench job
             assert!(
-                ms <= 500.0,
-                "30k 全量布局 {ms:.2}ms 出现灾难性回归(基线 ~130–160ms)"
+                distinct_ms <= 800.0,
+                "30k 逐行唯一文本布局 {distinct_ms:.2}ms 出现灾难性回归"
             );
         }
     }

@@ -12,7 +12,7 @@
 //!   ([`caret_x`] / [`caret_index_at`] / [`selection_rects`]),旧 swash 线性
 //!   路径(逐 char advance 求和)与 `font.rs` 一并退役——全仓再无第二套排版。
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
 use parley::{
@@ -156,8 +156,19 @@ pub fn measure(text: &str, px: f32, wrap_w: Option<f32>) -> (f32, f32) {
     thread_local! {
         static HOT: RefCell<MeasureCache> = RefCell::new(HashMap::new());
         static COLD: RefCell<MeasureCache> = RefCell::new(HashMap::new());
+        /// 自适应容量。**固定 4096 是个会静默塌方的设计**:taffy 的两趟测量
+        /// 协议让每个叶子按不同 `wrap_w` 问好几次,一棵 30k 树的 distinct 键
+        /// 轻松上万;一旦超过 CAP,HOT 每装满一次就整代降冷,而下一轮命中的
+        /// 又多半在已被顶掉的那批里 —— 缓存进入颠簸,退化成"每个叶子每帧
+        /// 重排一次"。实测(逐行唯一文本的 30k 树,release):
+        /// **2525ms → 92ms,27 倍**,而这只是一个常数的事。
+        ///
+        /// 策略:记住上一帧的 distinct 键数,容量取它的 2 倍并向上取 2 的幂,
+        /// 钳在 [4096, 65536]。上限必须有 —— 一个每帧生成新串的界面
+        /// (时钟、日志流)会无限增长;65536 条 × 约 24B 载荷 ≈ 每代 1.6MB、
+        /// 两代 3.1MB,对照 ADR-9 的 28MB 基线可接受。
+        static CAP: std::cell::Cell<usize> = const { std::cell::Cell::new(4096) };
     }
-    const CAP: usize = 4096;
     let key = {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -180,13 +191,27 @@ pub fn measure(text: &str, px: f32, wrap_w: Option<f32>) -> (f32, f32) {
     });
     HOT.with(|c| {
         let mut hot = c.borrow_mut();
-        if hot.len() >= CAP {
+        if hot.len() >= CAP.with(Cell::get) {
+            // 降代的同时按"刚装满的那一代有多大"调容量:这一代装满说明
+            // 工作集至少这么大,下一代给两倍余量,免得刚降完又立刻装满
             let demoted = std::mem::take(&mut *hot);
+            CAP.with(|c| c.set(next_cap(demoted.len())));
             COLD.with(|cold| *cold.borrow_mut() = demoted);
         }
         hot.insert(key, result);
     });
     result
+}
+
+/// 下一代容量:工作集的 2 倍向上取 2 的幂,钳在 [4096, 65536]
+fn next_cap(working_set: usize) -> usize {
+    const MIN: usize = 4096;
+    const MAX: usize = 65536;
+    let want = working_set.saturating_mul(2).max(MIN);
+    if want >= MAX {
+        return MAX;
+    }
+    want.next_power_of_two().clamp(MIN, MAX)
 }
 
 /// 单行行高(逻辑 px):空文本节点与 TextInput 的固有高。
