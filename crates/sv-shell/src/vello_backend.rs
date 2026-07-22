@@ -279,7 +279,7 @@ impl VelloWin {
 
     /// 渲染一帧到窗口。返回 (布局结果, 是否已成功呈现);
     /// 未呈现(surface 过期/被遮挡等)时调用方应 request_redraw 重试
-    pub fn render(&mut self, doc: &Doc, scale: f32) -> (Vec<Placed>, bool) {
+    pub fn render(&mut self, doc: &Doc, scale: f32) -> (std::rc::Rc<crate::render::Layout>, bool) {
         self.render_cached(doc, scale, false)
     }
 
@@ -289,16 +289,14 @@ impl VelloWin {
         doc: &Doc,
         scale: f32,
         scene_unchanged: bool,
-    ) -> (Vec<Placed>, bool) {
+    ) -> (std::rc::Rc<crate::render::Layout>, bool) {
         let width = self.surface.config.width;
         let height = self.surface.config.height;
         let layout =
             crate::render::layout_full_cached(doc, width as f32 / scale, height as f32 / scale);
-        let placed = layout.placed;
-
         if !scene_unchanged {
             self.painter.scene.reset();
-            paint_tree(doc, &placed, &mut self.painter, scale);
+            paint_tree(doc, &layout.placed, &mut self.painter, scale);
             crate::render::paint_scrollbars(doc, &layout.scroll_areas, &mut self.painter, scale);
         }
 
@@ -316,26 +314,26 @@ impl VelloWin {
             },
         ) {
             eprintln!("sv-shell: vello render_to_texture 失败: {e}");
-            return (placed, false);
+            return (layout, false);
         }
 
         let surface_texture = match self.surface.surface.get_current_texture() {
             CurrentSurfaceTexture::Success(t) => t,
             CurrentSurfaceTexture::Outdated | CurrentSurfaceTexture::Suboptimal(_) => {
                 self.context.configure_surface(&self.surface);
-                return (placed, false);
+                return (layout, false);
             }
             CurrentSurfaceTexture::Occluded | CurrentSurfaceTexture::Timeout => {
-                return (placed, false);
+                return (layout, false);
             }
             CurrentSurfaceTexture::Lost => {
                 eprintln!("sv-shell: vello surface 丢失,尝试重建配置");
                 self.context.configure_surface(&self.surface);
-                return (placed, false);
+                return (layout, false);
             }
             CurrentSurfaceTexture::Validation => {
                 eprintln!("sv-shell: vello surface 校验错误,跳过本帧");
-                return (placed, false);
+                return (layout, false);
             }
         };
 
@@ -356,7 +354,7 @@ impl VelloWin {
         device_handle.queue.submit([encoder.finish()]);
         surface_texture.present();
         let _ = device_handle.device.poll(wgpu::PollType::Poll);
-        (placed, true)
+        (layout, true)
     }
 }
 
@@ -537,9 +535,9 @@ fn render_offscreen_frame(
 
     let layout =
         crate::render::layout_full_cached(doc, width as f32 / scale, height as f32 / scale);
-    let placed = layout.placed;
+    let placed = &layout.placed;
     let mut painter = VelloPainter::new();
-    paint_tree(doc, &placed, &mut painter, scale);
+    paint_tree(doc, placed, &mut painter, scale);
     crate::render::paint_scrollbars(doc, &layout.scroll_areas, &mut painter, scale);
 
     if let Err(e) = renderer.render_to_texture(

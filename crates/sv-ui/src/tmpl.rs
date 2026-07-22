@@ -514,7 +514,38 @@ mod tests {
         let b = Doc::new();
         let (_, _sb) = create_root(|| stamp(&b, b.root(), &TPL, &[]));
 
-        assert_eq!(a.dump(), b.dump(), "数据面建出的树应与命令式逐字节相同");
+        // dump() **不含样式/回调/focusable**(只有种类+文本+checked+层级),
+        // 单靠它对拍会把"样式没设上"这类错放过去 —— 所以再逐节点比 Style
+        assert_eq!(a.dump(), b.dump(), "结构与文本应逐字节相同");
+        assert_eq!(
+            full_shape(&a),
+            full_shape(&b),
+            "样式也必须一致(dump 看不见样式,这条才是真正的等价性断言)"
+        );
+    }
+
+    /// 结构 + 每节点完整 `Style` 的快照。`dump()` 覆盖不到样式,而数据面
+    /// 最容易出错的恰恰是"StyleDecl 没被应用 / 应用顺序不对"
+    fn full_shape(doc: &Doc) -> String {
+        fn walk(inner: &crate::DocumentInner, id: crate::ViewId, depth: usize, out: &mut String) {
+            let n = &inner.nodes[id];
+            out.push_str(&format!(
+                "{}{:?} text={:?} style={:?}
+",
+                "  ".repeat(depth),
+                n.kind,
+                n.text,
+                n.style
+            ));
+            for c in &n.children {
+                walk(inner, *c, depth + 1, out);
+            }
+        }
+        doc.read(|inner| {
+            let mut out = String::new();
+            walk(inner, inner.root, 0, &mut out);
+            out
+        })
     }
 
     /// 动态位:文本/样式/点击三种高频槽都要真的接上响应式

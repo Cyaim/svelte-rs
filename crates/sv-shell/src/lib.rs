@@ -174,7 +174,7 @@ struct App {
     _scope: Option<RootHandle>,
     backend: Backend,
     win: Option<WinState>,
-    layout: Layout,
+    layout: std::rc::Rc<Layout>,
     cursor: (f64, f64),
     hovered: Option<ViewId>,
     pressed: Option<ViewId>,
@@ -912,7 +912,7 @@ pub fn run_app(
         _scope: None,
         backend: select_backend(),
         win: None,
-        layout: Layout::default(),
+        layout: std::rc::Rc::new(Layout::default()),
         cursor: (0.0, 0.0),
         hovered: None,
         pressed: None,
@@ -2920,8 +2920,8 @@ cd",
             let t = doc.create_text("你好,sv!");
             doc.append(doc.root(), t);
         });
-        let (pixmap, placed) = render_frame(&doc, 200, 100, 1.0);
-        assert!(!placed.is_empty());
+        let (pixmap, layout) = render_frame(&doc, 200, 100, 1.0);
+        assert!(!layout.placed.is_empty());
         // 画了黑色文字,不应全是白色像素
         let non_white = pixmap.pixels().iter().filter(|p| p.red() < 250).count();
         assert!(non_white > 10, "文字应该被光栅化出来,non_white={non_white}");

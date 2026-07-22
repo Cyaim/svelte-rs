@@ -9,6 +9,7 @@
 //! 再无第二套 shaping,旧线性 advance 路径与 `font.rs` 已退役。
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use tiny_skia::Pixmap;
 
@@ -487,10 +488,16 @@ fn walk_taffy(
 /// 静止帧的 O(n) measure/place 归零(细粒度更新模型下,静止是常态)。
 /// 滚动改 offset → bump 版本 → 键自然失效(滚动帧 = 全树重布局,
 /// 大全量树靠 virtual_list 兜底,ADR-9)
-pub fn layout_full_cached(doc: &Doc, logical_w: f32, logical_h: f32) -> Layout {
+/// 返回 **`Rc<Layout>`** 而不是 `Layout`:命中时只拷指针。
+///
+/// 以前命中返回 `layout.clone()` —— 深拷三个 Vec。而每帧**要调两次**
+/// (`render_frame` 内部一次、事件循环存 `self.layout` 一次;vello 路径同理),
+/// 30k 档一份 Layout ≈1.4MB,于是静止帧也在跑 1.4MB × 2 × 帧率的纯 memcpy。
+/// 这条浪费藏在"缓存命中"这个听起来已经很快的路径里,谁也不会去看它。
+pub fn layout_full_cached(doc: &Doc, logical_w: f32, logical_h: f32) -> Rc<Layout> {
     use std::cell::RefCell;
     /// (Doc 身份, 版本, 宽位, 高位, 上帧布局)
-    type CacheSlot = Option<(usize, u64, u32, u32, Layout)>;
+    type CacheSlot = Option<(usize, u64, u32, u32, Rc<Layout>)>;
     thread_local! {
         static CACHE: RefCell<CacheSlot> = const { RefCell::new(None) };
     }
@@ -505,10 +512,10 @@ pub fn layout_full_cached(doc: &Doc, logical_w: f32, logical_h: f32) -> Layout {
         if let Some((id, ver, w, h, layout)) = slot.as_ref()
             && (*id, *ver, *w, *h) == key
         {
-            return layout.clone();
+            return Rc::clone(layout);
         }
-        let layout = layout_tree_full(doc, logical_w, logical_h);
-        *slot = Some((key.0, key.1, key.2, key.3, layout.clone()));
+        let layout = Rc::new(layout_tree_full(doc, logical_w, logical_h));
+        *slot = Some((key.0, key.1, key.2, key.3, Rc::clone(&layout)));
         layout
     })
 }
@@ -1003,8 +1010,9 @@ pub fn paint_tree(doc: &Doc, placed: &[Placed], painter: &mut dyn Painter, scale
     });
 }
 
-/// 渲染一帧:布局(逻辑坐标)+ 绘制(物理坐标)。返回像素与命中测试用的布局
-pub fn render_frame(doc: &Doc, phys_w: u32, phys_h: u32, scale: f32) -> (Pixmap, Vec<Placed>) {
+/// 渲染一帧:布局(逻辑坐标)+ 绘制(物理坐标)。返回像素与命中测试用的布局。
+/// 布局是 `Rc`:调用方多半还要再存一份(事件循环的命中测试),不该再拷一次
+pub fn render_frame(doc: &Doc, phys_w: u32, phys_h: u32, scale: f32) -> (Pixmap, Rc<Layout>) {
     let logical_w = phys_w as f32 / scale;
     let logical_h = phys_h as f32 / scale;
     let layout = layout_full_cached(doc, logical_w, logical_h);
@@ -1023,7 +1031,7 @@ pub fn render_frame(doc: &Doc, phys_w: u32, phys_h: u32, scale: f32) -> (Pixmap,
     paint_tree(doc, &layout.placed, &mut painter, scale);
     paint_scrollbars(doc, &layout.scroll_areas, &mut painter, scale);
 
-    (pixmap, layout.placed)
+    (pixmap, layout)
 }
 
 /// 点击命中 TextInput 时:窗口逻辑坐标 → 值内字节偏移(含 padding/border 内缩)。
