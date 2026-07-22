@@ -316,6 +316,155 @@ mod tests {
         });
     }
 
+    /// 线程契约:future 在 worker 线程跑,完成回调必须回到 **UI 线程**
+    /// (回调里写 signal,而响应式图是 `!Send` 的单线程模型);
+    /// 且回调只在 [`pump`] 里跑,不会在后台线程提前触发。
+    /// 防的退化:图省事在 worker 线程里直接调回调
+    #[test]
+    fn completion_callback_runs_on_ui_thread_at_pump() {
+        let ui = std::thread::current().id();
+        let got: Rc<RefCell<Option<(std::thread::ThreadId, std::thread::ThreadId)>>> =
+            Rc::default();
+        let g = got.clone();
+        spawn(
+            async { std::thread::current().id() },
+            move |worker: std::thread::ThreadId| {
+                *g.borrow_mut() = Some((worker, std::thread::current().id()));
+            },
+        );
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(got.borrow().is_none(), "pump 之前回调不该跑");
+        assert!(pump_until_idle(Duration::from_secs(5)));
+        let (worker, cb) = got.borrow().expect("应已回调");
+        assert_eq!(cb, ui, "完成回调必须在 UI 线程执行");
+        assert_ne!(worker, ui, "future 本身应在后台线程执行");
+    }
+
+    /// `pending_count` 是 `$effect.pending()` 的实现,必须是**反应式**的:
+    /// 派发时推高、完成时落回,两次都要惊动下游。
+    /// 防的退化:把它改成普通 Cell/裸计数——加载骨架屏就再也不会自己收起来
+    #[test]
+    fn pending_count_drives_effects() {
+        let log: Rc<RefCell<Vec<usize>>> = Rc::default();
+        let l = log.clone();
+        let (_, root) = create_root(move || {
+            effect(move || l.borrow_mut().push(pending_count()));
+        });
+        assert_eq!(*log.borrow(), vec![0]);
+        spawn(async { 1u8 }, |_| {});
+        assert_eq!(*log.borrow(), vec![0, 1], "派发应立刻推高在途数");
+        assert!(pump_until_idle(Duration::from_secs(5)));
+        assert_eq!(*log.borrow(), vec![0, 1, 0], "完成应落回 0 并通知下游");
+        root.dispose();
+    }
+
+    /// 组件卸载时在途任务必须被撤掉:回调要写的 `value` signal 已随作用域销毁,
+    /// 真让它跑起来就是 "signal 已随作用域销毁" 的 panic(而且是在 pump 里炸,
+    /// 离现场很远)。这条测试与时序无关——任务是否已完成,取消都该兜住
+    #[test]
+    fn scope_dispose_cancels_inflight_await() {
+        let doc = Doc::new();
+        let (_, root) = create_root(|| {
+            await_block(
+                &doc,
+                doc.root(),
+                || async {
+                    std::thread::sleep(Duration::from_millis(120));
+                    7i32
+                },
+                |d, p| {
+                    let t = d.create_text("加载中");
+                    d.append(p, t);
+                },
+                |d, p, v: &i32| {
+                    let t = d.create_text(&format!("结果 {v}"));
+                    d.append(p, t);
+                },
+            );
+        });
+        assert_eq!(pending_count(), 1);
+        root.dispose();
+        assert_eq!(pending_count(), 0, "卸载应撤掉在途任务");
+        assert!(
+            pump_until_idle(Duration::from_secs(5)),
+            "已取消任务的完成值应被静默丢弃"
+        );
+        assert!(!doc.dump().contains("结果"), "卸载后不该再改场景树");
+    }
+
+    /// `pending` 是 `usize`:多减一次在 debug 下直接整数下溢 panic。
+    /// 重复取消、取消已完成的任务都必须是安全的 no-op
+    #[test]
+    fn cancel_is_idempotent_and_never_underflows_pending() {
+        let id = spawn(async { 1u8 }, |_| {});
+        assert_eq!(pending_count(), 1);
+        assert!(cancel(id));
+        assert_eq!(pending_count(), 0);
+        assert!(!cancel(id), "重复取消应如实报告没取消到");
+        assert_eq!(pending_count(), 0);
+
+        let done = spawn(async { 2u8 }, |_| {});
+        assert!(pump_until_idle(Duration::from_secs(5)));
+        assert!(!cancel(done), "已完成的任务无从取消");
+        assert_eq!(pending_count(), 0);
+    }
+
+    /// worker 完成后要拍醒事件循环:少了这一脚,窗口要等到下一次输入事件
+    /// 才会 pump,异步结果看起来就是"卡住不刷新"
+    #[test]
+    fn worker_completion_wakes_event_loop() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let hits = Arc::new(AtomicUsize::new(0));
+        let h = hits.clone();
+        set_waker(move || {
+            h.fetch_add(1, Ordering::SeqCst);
+        });
+        spawn(async { 1u8 }, |_| {});
+        assert!(pump_until_idle(Duration::from_secs(5)));
+        // wake_ui 在 send 之后调用,可能比 pump 晚一点,给它一个宽限
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while hits.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(
+            hits.load(Ordering::SeqCst) >= 1,
+            "worker 完成后应拍醒 UI 事件循环"
+        );
+    }
+
+    /// `{#await}` 依赖变化重启时,旧任务的回调必须撤掉:否则(一)在途数只涨
+    /// 不落,`$effect.pending()` 永远为真;(二)旧结果后到会盖掉新结果(经典竞态)
+    #[test]
+    fn await_restart_cancels_previous_task() {
+        let doc = Doc::new();
+        let (_, root) = create_root(|| {
+            let base = state(1i32);
+            await_block(
+                &doc,
+                doc.root(),
+                move || {
+                    let b = base.get();
+                    async move {
+                        std::thread::sleep(Duration::from_millis(60));
+                        b * 10
+                    }
+                },
+                |_, _| {},
+                |d, p, v: &i32| {
+                    let t = d.create_text(&format!("结果 {v}"));
+                    d.append(p, t);
+                },
+            );
+            assert_eq!(pending_count(), 1);
+            base.set(2);
+            assert_eq!(pending_count(), 1, "重启不该把在途任务堆起来");
+            assert!(pump_until_idle(Duration::from_secs(5)));
+            assert!(doc.dump().contains("结果 20"), "\n{}", doc.dump());
+        });
+        root.dispose();
+    }
+
     #[test]
     fn await_block_result_catch() {
         let doc = Doc::new();

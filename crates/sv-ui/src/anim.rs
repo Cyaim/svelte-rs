@@ -174,4 +174,112 @@ mod tests {
         doc.remove(t);
         assert!(!pump(10.0), "节点销毁后动画应被丢弃");
     }
+
+    /// 多个动画并存时各按各的时长推进,先到期的单独出队。
+    /// 防的退化:pump 里图省事"有一个完成就整体收尾/整体保留"——
+    /// 列表逐项淡入(错峰进场)会立刻穿帮
+    #[test]
+    fn multiple_animations_advance_independently() {
+        let doc = Doc::new();
+        let fast = doc.create_text("快");
+        doc.append(doc.root(), fast);
+        let slow = doc.create_text("慢");
+        doc.append(doc.root(), slow);
+        transition_in_fade(&doc, fast, 100);
+        transition_in_fade(&doc, slow, 400);
+
+        assert!(pump(0.0));
+        assert!(pump(100.0), "慢的没完,应继续排帧");
+        assert_eq!(opacity_of(&doc, fast), 1.0, "快的应已到终点");
+        let mid = opacity_of(&doc, slow);
+        assert!(mid > 0.0 && mid < 1.0, "慢的应还在半路:{mid}");
+        assert!(!pump(400.0), "都完成后应停排帧");
+        assert_eq!(opacity_of(&doc, slow), 1.0);
+        assert!(!active());
+    }
+
+    /// 同一节点上 opacity 与 ScrollY 是两条独立通道:滚动重定向按
+    /// (node, channel) 匹配。防的退化:匹配时漏掉 channel——那么给一个
+    /// 正在淡入的容器发滚动,会把它的淡入动画改成"透明度滚到 100"
+    #[test]
+    fn scroll_and_opacity_channels_coexist_on_same_node() {
+        let doc = Doc::new();
+        let list = doc.create_view();
+        doc.append(doc.root(), list);
+        transition_in_fade(&doc, list, 200);
+        scroll_y_to(&doc, list, 100.0);
+        assert_eq!(scroll_y_target(&doc, list), 100.0, "滚动通道应独立记目标");
+
+        assert!(pump(0.0));
+        assert!(pump(100.0));
+        let (op, sy) = (opacity_of(&doc, list), doc.scroll_of(list).1);
+        assert!(op > 0.0 && op < 1.0, "淡入应在半路:{op}");
+        assert!(sy > 0.0 && sy < 100.0, "滚动应在半路:{sy}");
+        assert!(!pump(500.0));
+        assert_eq!(opacity_of(&doc, list), 1.0);
+        assert_eq!(doc.scroll_of(list).1, 100.0);
+    }
+
+    /// 连续滚轮:同一容器重复 `scroll_y_to` 只改目标+重置起点,不叠动画。
+    /// 叠出两个动画的话它们每帧互相覆写(后写的赢),而 `scroll_y_target`
+    /// 读到的是**第一个**的旧目标 —— 快速滚动就会累加错、看起来回弹
+    #[test]
+    fn scroll_retarget_reuses_single_animation() {
+        let doc = Doc::new();
+        let list = doc.create_view();
+        doc.append(doc.root(), list);
+        scroll_y_to(&doc, list, 50.0);
+        assert!(pump(0.0));
+        assert!(pump(70.0));
+        let half = doc.scroll_of(list).1;
+        assert!(half > 0.0 && half < 50.0, "应滚到一半:{half}");
+
+        scroll_y_to(&doc, list, 120.0); // 半路改目标
+        assert_eq!(scroll_y_target(&doc, list), 120.0, "目标应就地改写");
+        assert!(pump(80.0), "改目标后从当前位置重新计时");
+        assert!(doc.scroll_of(list).1 >= half, "不该跳回起点");
+        assert!(
+            !pump(80.0 + SCROLL_MS as f64),
+            "只该剩一个动画,一次收尾就结束"
+        );
+        assert_eq!(doc.scroll_of(list).1, 120.0);
+        assert!(!active());
+    }
+
+    /// 收尾帧写**精确目标**:缓动在 t=1 数学上等于 to,浮点上却可能差一点,
+    /// 留下半像素错位(滚到底时最明显——底部永远差一丝)
+    #[test]
+    fn scroll_snaps_exactly_to_target_on_final_frame() {
+        let doc = Doc::new();
+        let list = doc.create_view();
+        doc.append(doc.root(), list);
+        // 这对数值是挑过的:f32 下 `from + (to - from)` 恰好落不到 to 上
+        doc.set_scroll(list, 0.0, 21.91);
+        scroll_y_to(&doc, list, 101.766);
+        assert!(pump(0.0));
+        assert!(!pump(SCROLL_MS as f64 + 1.0));
+        assert_eq!(doc.scroll_of(list).1, 101.766, "收尾必须落在精确目标上");
+    }
+
+    /// 目标与当前位置差得可以忽略时直接返回:既不开动画也不催帧。
+    /// 防的退化:去掉这道阈值——滚到边界后每个滚轮事件都开一个零位移动画,
+    /// shell 就永远停不下来重绘(白耗一核)
+    #[test]
+    fn scroll_to_current_position_is_noop() {
+        let doc = Doc::new();
+        let list = doc.create_view();
+        doc.append(doc.root(), list);
+        doc.set_scroll(list, 0.0, 40.0);
+        let v0 = doc.version();
+        scroll_y_to(&doc, list, 40.2);
+        assert!(!active(), "微小差值不该开动画");
+        assert_eq!(doc.version(), v0, "也不该催重绘");
+        assert_eq!(
+            scroll_y_target(&doc, list),
+            40.0,
+            "没有在途动画时,目标就是当前偏移"
+        );
+        scroll_y_to(&doc, list, 41.0);
+        assert!(active(), "超过阈值才开动画");
+    }
 }

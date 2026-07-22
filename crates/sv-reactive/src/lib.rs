@@ -1587,4 +1587,387 @@ mod tests {
         );
         root.dispose();
     }
+
+    // -- 图一致性(glitch-free)与剪枝 ---------------------------------------
+
+    /// 菱形只数"跑了几次"是不够的:真正的 glitch 是**跑的那一次读到半新半旧**
+    /// (b 已更新、c 还是旧值)。push-pull 里 effect 一律等到 flush 才跑、
+    /// derived 一律读时才 pull,才能保证每次快照自洽。
+    /// 防的退化:任何"写 signal 时顺手推算 derived / 立刻跑部分 effect"的改写
+    #[test]
+    fn diamond_effect_never_sees_intermediate_state() {
+        let a = state(1);
+        let b = derived(move || a.get() * 2);
+        let c = derived(move || a.get() + 10);
+        let seen: Rc<RefCell<Vec<(i32, i32, i32)>>> = Rc::default();
+        let s = seen.clone();
+        effect(move || s.borrow_mut().push((a.get(), b.get(), c.get())));
+        a.set(2);
+        a.set(7);
+        for (av, bv, cv) in seen.borrow().iter() {
+            assert_eq!(
+                (*bv, *cv),
+                (av * 2, av + 10),
+                "effect 读到了不自洽的快照:a={av} b={bv} c={cv}"
+            );
+        }
+        assert_eq!(seen.borrow().len(), 3, "每次写入只该产生一个快照");
+    }
+
+    /// 相等剪枝要在 **derived → derived** 这一段也成立:上游重算出同样的值时,
+    /// 下游停在 Check 上原地转 Clean,不该重算。
+    /// 防的退化:derived 重算后无条件把下游标 Dirty(等于剪枝只对 effect 生效),
+    /// 那么"a 变 → 只有极少数派生真的变"的常见形态会全图重算
+    #[test]
+    fn derived_equality_cuts_downstream_recompute() {
+        let a = state(1);
+        let parity = derived(move || a.get() % 2);
+        let computes = Rc::new(RefCell::new(0));
+        let c = computes.clone();
+        let label = derived(move || {
+            *c.borrow_mut() += 1;
+            parity.get() * 100
+        });
+        assert_eq!(label.get(), 100);
+        assert_eq!(*computes.borrow(), 1);
+        a.set(3); // 变了,但 parity 还是 1
+        assert_eq!(label.get(), 100);
+        assert_eq!(*computes.borrow(), 1, "上游派生值未变,下游不该重算");
+        a.set(2);
+        assert_eq!(label.get(), 0);
+        assert_eq!(*computes.borrow(), 2);
+    }
+
+    /// signal 与 derived 的语义差别:**signal 写即通知,不做相等剪枝**。
+    /// 防的退化:有人"顺手"给 signal 加上值相等剪枝——那么靠 `update` 触发
+    /// 副作用(容器原地改内容、强制重新渲染)的代码会静默失效
+    #[test]
+    fn signal_write_notifies_even_when_value_unchanged() {
+        let a = state(1);
+        let runs = Rc::new(RefCell::new(0));
+        let r = runs.clone();
+        effect(move || {
+            a.get();
+            *r.borrow_mut() += 1;
+        });
+        a.set(1); // 同值
+        assert_eq!(*runs.borrow(), 2, "signal 写同值也应通知下游");
+        a.update(|_| {}); // 原地什么都没改
+        assert_eq!(*runs.borrow(), 3, "update 无条件通知");
+    }
+
+    // -- 清理顺序与作用域回收 ------------------------------------------------
+
+    /// 清理的两条顺序契约:①子作用域先于父作用域清理(父的 cleanup 常在拆
+    /// 子作用域赖以存在的东西,顺序反了就是 use-after-free 式的逻辑错);
+    /// ②清理跑在**重跑之前**,不是之后(否则新一轮刚建好的订阅/节点会被自己清掉)
+    #[test]
+    fn cleanup_order_children_first_then_self_then_body() {
+        let a = state(0);
+        let log: Rc<RefCell<Vec<&'static str>>> = Rc::default();
+        let l = log.clone();
+        effect(move || {
+            a.get();
+            l.borrow_mut().push("外层跑");
+            let li = l.clone();
+            effect(move || {
+                let li = li.clone();
+                on_cleanup(move || li.borrow_mut().push("内层清理"));
+            });
+            let lo = l.clone();
+            on_cleanup(move || lo.borrow_mut().push("外层清理"));
+        });
+        a.set(1);
+        assert_eq!(
+            *log.borrow(),
+            vec!["外层跑", "内层清理", "外层清理", "外层跑"]
+        );
+    }
+
+    /// `RootHandle::dispose` 是组件卸载的基石:挂在**根作用域本身**上的
+    /// on_cleanup(不是挂在某个 effect 上)也必须跑,且子作用域先跑。
+    /// 防的退化:dispose 只递归销毁子节点、忘了执行自己的 cleanups
+    #[test]
+    fn root_dispose_runs_scope_cleanups_child_first() {
+        let log: Rc<RefCell<Vec<&'static str>>> = Rc::default();
+        let l = log.clone();
+        let (_, root) = create_root(move || {
+            let li = l.clone();
+            effect(move || {
+                let li = li.clone();
+                on_cleanup(move || li.borrow_mut().push("effect 清理"));
+            });
+            on_cleanup(move || l.borrow_mut().push("根清理"));
+        });
+        assert!(log.borrow().is_empty(), "dispose 之前不该清理");
+        root.dispose();
+        assert_eq!(*log.borrow(), vec!["effect 清理", "根清理"]);
+    }
+
+    /// 组件卸载不能漏节点:root 下的 signal/derived/嵌套 effect 全部回收,
+    /// 节点数回到建根之前。防的退化:dispose 只摘链不 remove(arena 泄漏),
+    /// 或递归只下一层(嵌套 effect 的子节点留着)
+    #[test]
+    fn root_dispose_reclaims_whole_subtree() {
+        let base = debug_node_count();
+        let (_, root) = create_root(|| {
+            let a = state(0);
+            let d = derived(move || a.get() + 1);
+            effect(move || {
+                d.get();
+                effect(move || {
+                    a.get();
+                });
+            });
+        });
+        assert!(
+            debug_node_count() >= base + 5,
+            "至少建了 root/signal/derived/两个 effect"
+        );
+        root.dispose();
+        assert_eq!(debug_node_count(), base, "root 销毁后应无残留节点");
+    }
+
+    /// 死循环保护数的是 **flush 轮数**,不是 effect 执行次数。
+    /// 防的退化:把计数挪进内层循环——那样"一个 signal 挂了上千个 effect"
+    /// (长列表逐行绑定的常态)会被误判成死循环而 panic
+    #[test]
+    fn flush_guard_counts_passes_not_effect_runs() {
+        let n = MAX_FLUSH_PASSES + 100;
+        let a = state(0);
+        let runs = Rc::new(RefCell::new(0usize));
+        let ro = runs.clone();
+        let (_, root) = create_root(move || {
+            for _ in 0..n {
+                let r = ro.clone();
+                effect(move || {
+                    a.get();
+                    *r.borrow_mut() += 1;
+                });
+            }
+        });
+        assert_eq!(*runs.borrow(), n);
+        a.set(1); // 一次写入 = 一轮,哪怕这一轮里跑了 n 个 effect
+        assert_eq!(*runs.borrow(), 2 * n);
+        root.dispose();
+    }
+
+    // -- untrack / detached 边界 --------------------------------------------
+
+    /// untrack 只摘掉**当前** observer;它内部新建的 effect 有自己的追踪上下文,
+    /// 照常收集依赖。防的退化:把 untrack 实现成全局"追踪开关",
+    /// 那么 `untrack(|| effect(..))` 建出来的 effect 会一辈子不重跑
+    #[test]
+    fn untrack_does_not_disable_nested_effect_tracking() {
+        let a = state(0);
+        let runs = Rc::new(RefCell::new(0));
+        let r = runs.clone();
+        let (_, root) = create_root(move || {
+            untrack(move || {
+                effect(move || {
+                    a.get();
+                    *r.borrow_mut() += 1;
+                });
+            });
+        });
+        assert_eq!(*runs.borrow(), 1);
+        a.set(1);
+        assert_eq!(
+            *runs.borrow(),
+            2,
+            "untrack 内建的 effect 仍应追踪自己的依赖"
+        );
+        untrack(|| a.set(2)); // 写入不受 untrack 影响,照常通知
+        assert_eq!(*runs.borrow(), 3, "untrack 只管读,不该屏蔽写通知");
+        root.dispose();
+    }
+
+    /// `detached` 的正牌用途(tasks 桥的 pending 计数):线程级单例信号可能在
+    /// **某个 effect 运行期间**被惰性初始化。若不游离创建,它会成为那个 effect
+    /// 的子节点,下一次重跑就把它销毁了——之后再读直接 panic。
+    /// 防的退化:detached 只 take observer、忘了 take owner
+    #[test]
+    fn detached_node_survives_owner_rerun() {
+        let dep = state(0);
+        let holder: Rc<RefCell<Option<Signal<i32>>>> = Rc::default();
+        let h = holder.clone();
+        effect(move || {
+            dep.get();
+            if h.borrow().is_none() {
+                let s = detached(|| state(7));
+                *h.borrow_mut() = Some(s);
+            }
+        });
+        dep.set(1);
+        dep.set(2);
+        let s = holder.borrow().expect("首跑应已创建");
+        assert_eq!(s.get_untracked(), 7, "游离节点不该随宿主 effect 重跑被销毁");
+    }
+
+    /// detached 同时也不建立依赖(它把 observer 一并摘掉):
+    /// 桥内部读自己的计数不该把调用方 effect 绑上去
+    #[test]
+    fn detached_read_does_not_subscribe() {
+        let a = state(0);
+        let runs = Rc::new(RefCell::new(0));
+        let r = runs.clone();
+        effect(move || {
+            detached(|| a.get());
+            *r.borrow_mut() += 1;
+        });
+        a.set(1);
+        assert_eq!(*runs.borrow(), 1, "detached 内的读取不该建立依赖");
+    }
+
+    // -- 所有权与 context 的组合 --------------------------------------------
+
+    /// keyed each 的行作用域契约(`with_owner`):行挂**宿主 root** 名下,
+    /// 所以活得过列表 effect 的重跑;同时 owner 链没被切断,行内仍能取到组件层
+    /// context。防的退化:用 detached 代替 with_owner(行活了但 context 断链),
+    /// 或忘了替换 owner(行成了列表 effect 的子节点,重跑即被销毁)
+    #[test]
+    fn with_owner_rows_survive_rerun_and_keep_context() {
+        struct Theme(&'static str);
+        let dep = state(0);
+        let rows: Rc<RefCell<Vec<Signal<i32>>>> = Rc::default();
+        let themes: Rc<RefCell<Vec<&'static str>>> = Rc::default();
+        let (rw, th) = (rows.clone(), themes.clone());
+        let (_, root) = create_root(move || {
+            provide_context(Theme("dark"));
+            // 宿主建在列表 effect 之外,行才不会被 effect 的重跑清理连坐
+            let (_, host) = create_root(|| {});
+            effect(move || {
+                let n = dep.get();
+                let (sig, theme) = with_owner(&host, || {
+                    (state(n), use_context::<Theme>().map_or("取不到", |t| t.0))
+                });
+                rw.borrow_mut().push(sig);
+                th.borrow_mut().push(theme);
+            });
+        });
+        dep.set(1);
+        let first = rows.borrow()[0];
+        assert_eq!(
+            first.get_untracked(),
+            0,
+            "宿主作用域下的行不该随列表 effect 重跑被销毁"
+        );
+        assert_eq!(
+            *themes.borrow(),
+            vec!["dark", "dark"],
+            "with_owner 内 owner 链应完好,context 仍可达"
+        );
+        root.dispose();
+    }
+
+    /// 重跑要把上一轮 provide 的 context 一并清掉:本轮走了别的分支、没再
+    /// provide,后代却还读到上一轮的值,是最难查的一类陈旧状态 bug
+    #[test]
+    fn context_dropped_when_not_reprovided_on_rerun() {
+        struct Theme(&'static str);
+        let flag = state(true);
+        let seen: Rc<RefCell<Vec<&'static str>>> = Rc::default();
+        let s = seen.clone();
+        let (_, root) = create_root(move || {
+            effect(move || {
+                if flag.get() {
+                    provide_context(Theme("dark"));
+                }
+                s.borrow_mut()
+                    .push(use_context::<Theme>().map_or("无", |t| t.0));
+            });
+        });
+        assert_eq!(*seen.borrow(), vec!["dark"]);
+        flag.set(false);
+        assert_eq!(
+            *seen.borrow(),
+            vec!["dark", "无"],
+            "本轮没再 provide,不该读到上一轮的陈旧 context"
+        );
+        root.dispose();
+    }
+
+    // -- 读取重入 ------------------------------------------------------------
+
+    /// `with` 是"偷值"读取:值被 take 出来交给闭包,期间同一节点再读会撞空。
+    /// 这条钉住它 panic 而不是静默给出错值/默认值
+    #[test]
+    #[should_panic(expected = "重入读取")]
+    fn reentrant_read_of_same_signal_panics() {
+        let a = state(1);
+        a.with(|_| a.get());
+    }
+
+    /// 反面:偷值读取期间**不持有 RefCell 借用**,闭包里访问别的响应式值必须自如
+    /// (`{#each}` 的行渲染就是在一个 with 里读一堆别的 signal)。
+    /// 防的退化:把 with 改成"借用期间执行闭包"——那会变成 BorrowMutError
+    #[test]
+    fn with_allows_reading_other_nodes() {
+        let a = state(1);
+        let b = state(2);
+        let d = derived(move || b.get() * 10);
+        assert_eq!(a.with(|x| x + b.get() + d.get()), 23);
+        // 写别的 signal 同样允许(读 a 的过程中改 b)
+        a.with(|_| b.set(5));
+        assert_eq!(b.get(), 5);
+    }
+
+    // -- 帧对齐的边界(ADR-6) ----------------------------------------------
+
+    /// 催帧回调就是渲染壳的 `request_redraw`,壳里顺手写 signal 很正常
+    /// (同步窗口尺寸/dpi)。所以 maybe_flush 必须在**放开 RT 借用之后**才调它,
+    /// 否则这里直接 BorrowMutError;并且回调里的写入应并进同一帧,不重复催帧
+    #[test]
+    fn frame_scheduler_callback_may_write_state() {
+        let (_, root) = create_root(|| {
+            let a = state(0);
+            let mirror = state(0);
+            let runs = Rc::new(RefCell::new(0));
+            let r = runs.clone();
+            effect(move || {
+                a.get();
+                mirror.get();
+                *r.borrow_mut() += 1;
+            });
+            let wakes = Rc::new(RefCell::new(0));
+            let w = wakes.clone();
+            set_frame_scheduler(move || {
+                *w.borrow_mut() += 1;
+                mirror.set(mirror.get_untracked() + 1);
+            });
+
+            a.set(1);
+            assert_eq!(mirror.get_untracked(), 1, "催帧回调里的写入应生效");
+            assert_eq!(*wakes.borrow(), 1, "回调内的写入不该再催一帧");
+            assert_eq!(*runs.borrow(), 1, "两处写入都只入队");
+            tick();
+            assert_eq!(*runs.borrow(), 2, "帧前统一冲刷成一轮");
+            clear_frame_scheduler();
+        });
+        root.dispose();
+    }
+
+    /// 帧对齐推迟的只有 **effect 冲刷**:derived 是 pull 语义,读到就地算最新;
+    /// 新建 effect 也照旧同步首跑(ADR-1),不然刚挂载的组件会空一帧。
+    /// 防的退化:把"帧对齐"理解成"整个图冻结到下一帧"
+    #[test]
+    fn frame_aligned_keeps_derived_pull_and_sync_first_run() {
+        let (_, root) = create_root(|| {
+            let a = state(1);
+            let d = derived(move || a.get() * 10);
+            assert_eq!(d.get_untracked(), 10);
+            set_frame_scheduler(|| {});
+            a.set(2);
+            assert_eq!(d.get_untracked(), 20, "derived 是 pull,读时即最新");
+            let runs = Rc::new(RefCell::new(0));
+            let r = runs.clone();
+            effect(move || {
+                a.get();
+                *r.borrow_mut() += 1;
+            });
+            assert_eq!(*runs.borrow(), 1, "帧对齐下新建 effect 仍同步首跑");
+            clear_frame_scheduler();
+        });
+        root.dispose();
+    }
 }

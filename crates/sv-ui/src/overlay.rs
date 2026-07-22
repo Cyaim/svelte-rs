@@ -283,3 +283,475 @@ pub fn tooltip(doc: &Doc, target: ViewId, delay_ms: u64, build: impl Fn(&Doc, Vi
         build,
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+    use std::collections::HashSet;
+
+    use sv_reactive::{Signal, create_root, state};
+
+    use super::*;
+
+    /// 注册表快照:overlays 的顺序**就是**叠序(渲染壳按它追加 Placed)
+    fn overlay_roots(doc: &Doc) -> Vec<ViewId> {
+        doc.read(|inner| inner.overlays.iter().map(|e| e.root).collect())
+    }
+
+    /// 建一个只含一行文本的弹层,返回它的 open 信号
+    fn text_overlay(doc: &Doc, label: &'static str, opts: OverlayOpts) -> Signal<bool> {
+        let open = state(false);
+        overlay_block(
+            doc,
+            move || open.get(),
+            || Anchor::Point(0.0, 0.0),
+            opts,
+            move |d, root| {
+                let t = d.create_text(label);
+                d.append(root, t);
+            },
+        );
+        open
+    }
+
+    /// 叠序=注册序(打开序),重开会重新排到最上层——菜单再次打开必须盖住
+    /// 先开的东西。同时钉住弹层根是**游离子树**(不挂 doc.root,传送门语义),
+    /// 以及 dump 的弹层段序与注册序一致
+    #[test]
+    fn registration_order_is_stacking_order() {
+        let doc = Doc::new();
+        let (_, scope) = create_root(|| {
+            let a = text_overlay(&doc, "甲", OverlayOpts::default());
+            let b = text_overlay(&doc, "乙", OverlayOpts::default());
+            let c = text_overlay(&doc, "丙", OverlayOpts::default());
+            a.set(true);
+            b.set(true);
+            c.set(true);
+            let roots = overlay_roots(&doc);
+            assert_eq!(roots.len(), 3);
+            for r in &roots {
+                assert!(
+                    doc.read(|inner| inner.nodes[*r].parent.is_none()),
+                    "弹层根应是游离子树"
+                );
+            }
+            // 关中间再开:重新入队到末尾 = 变成最上层
+            b.set(false);
+            assert_eq!(overlay_roots(&doc).len(), 2);
+            b.set(true);
+            let after = overlay_roots(&doc);
+            assert_eq!(after[0], roots[0]);
+            assert_eq!(after[1], roots[2], "丙 应升为第二层");
+            assert_ne!(after[2], roots[2], "重开的乙 应排到最上层");
+
+            let dump = doc.dump();
+            let at = |s: &str| dump.find(s).unwrap_or_else(|| panic!("dump 缺 {s}:{dump}"));
+            assert!(at("== overlay") < at("甲"), "弹层段应在基础层之后");
+            assert!(
+                at("甲") < at("丙") && at("丙") < at("乙"),
+                "dump 段序=注册序"
+            );
+        });
+        scope.dispose();
+    }
+
+    /// Esc 的判据是"有没有 on_dismiss",不是 [`CloseBehavior`]:后者只管指针手势。
+    /// 防的退化:把两件事合并成一个开关——那么 `close: None` 的模态对话框会
+    /// 变成 Esc 也关不掉,或者不可交互的 tooltip 反倒把 Esc 吞了
+    #[test]
+    fn esc_lifo_follows_on_dismiss_not_close_behavior() {
+        let doc = Doc::new();
+        let (_, scope) = create_root(|| {
+            let menu = state(true);
+            overlay_block(
+                &doc,
+                move || menu.get(),
+                || Anchor::Point(0.0, 0.0),
+                OverlayOpts {
+                    close: CloseBehavior::OnClickOutside,
+                    on_dismiss: Some(Rc::new(move || menu.set(false))),
+                    ..Default::default()
+                },
+                |d, root| {
+                    let t = d.create_text("菜单");
+                    d.append(root, t);
+                },
+            );
+            let dialog = state(true);
+            overlay_block(
+                &doc,
+                move || dialog.get(),
+                || Anchor::WindowCenter,
+                OverlayOpts {
+                    modal: true,
+                    close: CloseBehavior::None, // 点外不关,但 Esc 该关
+                    on_dismiss: Some(Rc::new(move || dialog.set(false))),
+                    ..Default::default()
+                },
+                |d, root| {
+                    let t = d.create_text("对话框");
+                    d.append(root, t);
+                },
+            );
+            let tip = state(true);
+            overlay_block(
+                &doc,
+                move || tip.get(),
+                || Anchor::Point(1.0, 1.0),
+                OverlayOpts {
+                    layer: OverlayLayer::Tooltip,
+                    close: CloseBehavior::OnAnyClick,
+                    on_dismiss: None, // 没有关闭手势的弹层
+                    ..Default::default()
+                },
+                |d, root| {
+                    let t = d.create_text("提示");
+                    d.append(root, t);
+                },
+            );
+            assert_eq!(overlay_roots(&doc).len(), 3);
+
+            assert!(doc.dismiss_topmost_overlay());
+            assert!(
+                !dialog.get_untracked(),
+                "Esc 应越过没有 on_dismiss 的 tooltip,关掉 close=None 的模态"
+            );
+            assert!(tip.get_untracked(), "tooltip 不该被 Esc 关掉");
+            assert!(doc.dismiss_topmost_overlay());
+            assert!(!menu.get_untracked(), "Esc 逐层往下关");
+            assert!(
+                !doc.dismiss_topmost_overlay(),
+                "只剩没有 on_dismiss 的弹层时不该假装消费掉 Esc(否则 Esc 被黑洞吞掉)"
+            );
+        });
+        scope.dispose();
+    }
+
+    /// on_dismiss 是**单一数据源**的关键:它只回写 signal,拆除一律走
+    /// `open` 翻假那条路。防的退化:让 dismiss 顺手把弹层拆了——那样 signal
+    /// 还是 true,状态与画面就此分叉(再次 set(true) 也打不开)
+    #[test]
+    fn dismiss_only_writes_signal_teardown_follows_open() {
+        let doc = Doc::new();
+        let (_, scope) = create_root(|| {
+            let open = state(true);
+            let hits = Rc::new(Cell::new(0));
+            let h = hits.clone();
+            overlay_block(
+                &doc,
+                move || open.get(),
+                || Anchor::WindowCenter,
+                OverlayOpts {
+                    on_dismiss: Some(Rc::new(move || h.set(h.get() + 1))),
+                    ..Default::default()
+                },
+                |d, root| {
+                    let t = d.create_text("内容");
+                    d.append(root, t);
+                },
+            );
+            let root0 = overlay_roots(&doc)[0];
+
+            assert!(doc.dismiss_overlay(root0));
+            assert_eq!(hits.get(), 1);
+            assert_eq!(
+                overlay_roots(&doc),
+                vec![root0],
+                "on_dismiss 不该自己拆弹层"
+            );
+            // 真正翻假才拆,且游离子树被回收
+            open.set(false);
+            assert!(overlay_roots(&doc).is_empty());
+            assert!(
+                doc.read(|inner| inner.nodes.get(root0).is_none()),
+                "拆除应回收游离子树,否则节点表只涨不落"
+            );
+            // 已不在注册表:两个 dismiss 入口都应如实报告"没人消费"
+            assert!(!doc.dismiss_overlay(root0));
+            assert!(!doc.dismiss_topmost_overlay());
+            assert_eq!(hits.get(), 1);
+        });
+        scope.dispose();
+    }
+
+    /// 子菜单场景:内层 overlay_block 建在外层的 build 里。外层关闭时内层的
+    /// entry 必须跟着消失,否则注册表里留下指向已销毁子树的幽灵条目
+    /// (渲染壳照着它布局 = 悬空菜单)
+    #[test]
+    fn nested_overlay_unregisters_with_outer() {
+        let doc = Doc::new();
+        let (_, scope) = create_root(|| {
+            let outer = state(false);
+            let inner = state(true); // 外层一建,内层跟着建
+            overlay_block(
+                &doc,
+                move || outer.get(),
+                || Anchor::Point(0.0, 0.0),
+                OverlayOpts::default(),
+                move |d, root| {
+                    let t = d.create_text("外层");
+                    d.append(root, t);
+                    overlay_block(
+                        d,
+                        move || inner.get(),
+                        || Anchor::Point(5.0, 5.0),
+                        OverlayOpts::default(),
+                        |d2, r2| {
+                            let t = d2.create_text("内层");
+                            d2.append(r2, t);
+                        },
+                    );
+                },
+            );
+            assert!(overlay_roots(&doc).is_empty());
+            outer.set(true);
+            assert_eq!(overlay_roots(&doc).len(), 2, "内层应随外层一起注册");
+            assert!(doc.dump().contains("内层"));
+            outer.set(false);
+            assert!(
+                overlay_roots(&doc).is_empty(),
+                "外层拆除应连带拆掉内层 entry"
+            );
+            assert!(!doc.dump().contains("内层"));
+        });
+        scope.dispose();
+    }
+
+    /// 组件卸载(外层作用域销毁)必须带走弹层:注册表与节点表都不能留残骸。
+    /// 防的退化:只在 `open` 翻假时拆,忘了 on_cleanup 那条路
+    #[test]
+    fn owner_scope_dispose_tears_down_overlay() {
+        let doc = Doc::new();
+        let open = state(true); // 建在根作用域外,销毁后仍可读
+        let (_, scope) = create_root(|| {
+            overlay_block(
+                &doc,
+                move || open.get(),
+                || Anchor::WindowCenter,
+                OverlayOpts {
+                    modal: true,
+                    ..Default::default()
+                },
+                |d, root| {
+                    let t = d.create_text("对话框");
+                    d.append(root, t);
+                },
+            );
+        });
+        let root0 = overlay_roots(&doc)[0];
+        assert!(doc.dump().contains("对话框"));
+        scope.dispose();
+        assert!(overlay_roots(&doc).is_empty(), "组件卸载应带走弹层注册");
+        assert!(doc.read(|inner| inner.nodes.get(root0).is_none()));
+        assert!(!doc.dump().contains("对话框"));
+    }
+
+    /// 锚点变化走**原地更新**:不重建子树(重建 = 弹层里的输入/选中态被清空),
+    /// 变了要 bump 版本让壳重新布局,没变则不 bump(防止每帧无谓重绘)
+    #[test]
+    fn anchor_change_updates_entry_in_place() {
+        let doc = Doc::new();
+        let builds = Rc::new(Cell::new(0));
+        let b = builds.clone();
+        let (_, scope) = create_root(|| {
+            let open = state(true);
+            let x = state(10.0f32);
+            overlay_block(
+                &doc,
+                move || open.get(),
+                move || Anchor::Point(x.get(), 0.0),
+                OverlayOpts::default(),
+                move |d, root| {
+                    b.set(b.get() + 1);
+                    let t = d.create_text("内容");
+                    d.append(root, t);
+                },
+            );
+            let root0 = overlay_roots(&doc)[0];
+            assert_eq!(builds.get(), 1);
+
+            let v0 = doc.version();
+            x.set(200.0);
+            assert_eq!(overlay_roots(&doc), vec![root0], "锚点变化不该重建弹层");
+            assert_eq!(builds.get(), 1, "build 不该重跑");
+            assert_eq!(
+                doc.read(|inner| inner.overlays[0].anchor),
+                Anchor::Point(200.0, 0.0)
+            );
+            assert!(doc.version() > v0, "锚点变了要 bump,否则壳不会重新布局");
+
+            let v1 = doc.version();
+            x.set(200.0); // 同值
+            assert_eq!(doc.version(), v1, "锚点没变不该催重绘");
+        });
+        scope.dispose();
+    }
+
+    /// build 里读 signal 是家常便饭(初值、条件分支)。它跑在 `untrack` 下,
+    /// 这些读取不能记到驱动 effect 头上——否则那个 signal 一变,驱动 effect
+    /// 重跑,弹层的子作用域被连带销毁(弹层还在,里面的绑定已经死了)
+    #[test]
+    fn build_reads_are_untracked() {
+        let doc = Doc::new();
+        let deaths = Rc::new(Cell::new(0));
+        let d = deaths.clone();
+        let label = state("初始");
+        let (_, scope) = create_root(|| {
+            let open = state(true);
+            overlay_block(
+                &doc,
+                move || open.get(),
+                || Anchor::WindowCenter,
+                OverlayOpts::default(),
+                move |doc, root| {
+                    let t = doc.create_text(label.get());
+                    doc.append(root, t);
+                    let d = d.clone();
+                    on_cleanup(move || d.set(d.get() + 1));
+                },
+            );
+        });
+        assert_eq!(deaths.get(), 0);
+        label.set("改了");
+        assert_eq!(
+            deaths.get(),
+            0,
+            "build 内的读取不该成为驱动 effect 的依赖(弹层子作用域被误销毁)"
+        );
+        assert_eq!(overlay_roots(&doc).len(), 1);
+        scope.dispose();
+    }
+
+    /// 菜单方向键导航(O4)靠 `overlay_layer_of` 判断"焦点在不在弹层里":
+    /// 上溯要能穿过任意深度,基础层节点必须如实返回 None(否则基础层的
+    /// ArrowDown 会被当成菜单导航吃掉)
+    #[test]
+    fn overlay_layer_of_walks_up_to_owning_overlay() {
+        let doc = Doc::new();
+        let base_btn = doc.create_button("底");
+        doc.append(doc.root(), base_btn);
+        let deep = Rc::new(Cell::new(None));
+        let tip_node = Rc::new(Cell::new(None));
+        let (dp, tp) = (deep.clone(), tip_node.clone());
+        let open = state(true);
+        let (_, scope) = create_root(|| {
+            overlay_block(
+                &doc,
+                move || open.get(),
+                || Anchor::WindowCenter,
+                OverlayOpts::default(),
+                move |d, root| {
+                    let mid = d.create_view();
+                    d.append(root, mid);
+                    let btn = d.create_button("深");
+                    d.append(mid, btn);
+                    dp.set(Some(btn));
+                },
+            );
+            overlay_block(
+                &doc,
+                move || open.get(),
+                || Anchor::Point(0.0, 0.0),
+                OverlayOpts {
+                    layer: OverlayLayer::Tooltip,
+                    ..Default::default()
+                },
+                move |d, root| {
+                    let t = d.create_text("提示");
+                    d.append(root, t);
+                    tp.set(Some(t));
+                },
+            );
+        });
+        assert_eq!(
+            doc.overlay_layer_of(deep.get().unwrap()),
+            Some(OverlayLayer::Popup),
+            "隔了一层容器也要能上溯到弹层根"
+        );
+        assert_eq!(
+            doc.overlay_layer_of(tip_node.get().unwrap()),
+            Some(OverlayLayer::Tooltip)
+        );
+        assert_eq!(doc.overlay_layer_of(base_btn), None, "基础层不是弹层");
+        assert_eq!(doc.overlay_layer_of(doc.root()), None);
+        scope.dispose();
+    }
+
+    /// 嵌套模态:焦点陷阱跟着**最上层** modal 走,逐层关闭时焦点逐层回退
+    /// (对话框里再弹确认框是常态)。防的退化:陷阱认第一个/任意一个 modal,
+    /// 或关闭时把焦点直接丢回基础层
+    #[test]
+    fn nested_modal_traps_focus_in_topmost_and_restores_layer_by_layer() {
+        let doc = Doc::new();
+        let base = doc.create_button("底层");
+        doc.append(doc.root(), base);
+        let a_btns: Rc<RefCell<Vec<ViewId>>> = Rc::default();
+        let b_btns: Rc<RefCell<Vec<ViewId>>> = Rc::default();
+        let (aa, bb) = (a_btns.clone(), b_btns.clone());
+        let open_a = state(false);
+        let open_b = state(false);
+        let modal = || OverlayOpts {
+            modal: true,
+            close: CloseBehavior::None,
+            ..Default::default()
+        };
+        let (_, scope) = create_root(|| {
+            overlay_block(
+                &doc,
+                move || open_a.get(),
+                || Anchor::WindowCenter,
+                modal(),
+                move |d, root| {
+                    for label in ["A1", "A2"] {
+                        let b = d.create_button(label);
+                        d.append(root, b);
+                        aa.borrow_mut().push(b);
+                    }
+                },
+            );
+            overlay_block(
+                &doc,
+                move || open_b.get(),
+                || Anchor::WindowCenter,
+                modal(),
+                move |d, root| {
+                    for label in ["B1", "B2"] {
+                        let b = d.create_button(label);
+                        d.append(root, b);
+                        bb.borrow_mut().push(b);
+                    }
+                },
+            );
+        });
+        doc.focus(base);
+        open_a.set(true);
+        assert_eq!(
+            doc.focused(),
+            Some(a_btns.borrow()[0]),
+            "打开 modal 应把焦点移进弹层"
+        );
+        open_b.set(true);
+        assert_eq!(doc.focused(), Some(b_btns.borrow()[0]), "陷阱应跟到最上层");
+
+        let mut seen = HashSet::new();
+        for _ in 0..4 {
+            seen.insert(doc.focused().unwrap());
+            doc.focus_next();
+        }
+        assert_eq!(
+            seen,
+            b_btns.borrow().iter().copied().collect::<HashSet<_>>(),
+            "Tab 环应只在最上层 modal 内循环"
+        );
+
+        open_b.set(false);
+        assert_eq!(
+            doc.focused(),
+            Some(a_btns.borrow()[0]),
+            "关掉上层 modal 应回到下层 modal 的焦点"
+        );
+        open_a.set(false);
+        assert_eq!(doc.focused(), Some(base), "全关后回到底层原焦点");
+        scope.dispose();
+    }
+}
