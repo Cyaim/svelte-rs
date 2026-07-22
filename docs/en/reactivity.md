@@ -30,6 +30,29 @@ assignment reactivity (`count += 1` triggering updates) and deep proxy reactivit
 plain Rust you call `set`/`update` explicitly; the `.sv` compiler front-end restores the
 implicit syntax via source transform.
 
+## `#[derive(Store)]`: field-level signals
+
+A `Signal<WholeStruct>` is too coarse — changing one field wakes effects that only read
+other fields. Svelte solves this with a Proxy; here it happens at compile time: **one
+`Signal` per field**.
+
+```rust
+use sv_macro::Store;
+
+#[derive(Store, Clone, PartialEq)]
+struct Settings { theme: String, volume: f32 }
+
+let s = Settings { theme: "dark".into(), volume: 0.8 }.into_store();
+s.volume.set(0.5);                  // wakes only the readers of `volume`
+let snap: Settings = s.snapshot();  // whole value back (subscribes to *every* field)
+s.apply(next);                      // write the whole value, touching only changed fields
+```
+
+The generated `SettingsStore` is `Copy` (its fields are `Signal` handles), so it drops into
+closures freely. Requirements: named fields, no generics, field types `Clone + PartialEq +
+'static`. **No nested stores**: an inner struct stays one signal — derive on the inner type
+too if you want finer granularity, rather than having recursion guess for you.
+
 ## state
 
 ```rust

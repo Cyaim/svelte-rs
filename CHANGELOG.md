@@ -20,6 +20,9 @@ sv-shell),按依赖序推送;`examples/` 不发布。
 
 ### 新增
 
+- **`#[derive(Store)]`(sv-macro)**:结构体 → 字段级信号 store
+  (ADR-1 里 Proxy 深层响应的替代品);改一个字段不再叫醒只读别的字段的 effect。
+
 - **无障碍增量推送(调研 24 P6)**:语义树只推内容变动的节点,不再每次全量。
 
 - **R3 弹层体系**:离散层(Base→Popup→Tooltip)+ `overlay_block` 原语 +

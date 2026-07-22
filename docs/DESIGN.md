@@ -488,7 +488,11 @@ sv-compiler / sv-macro / sv-build)**空闲**;`runa`、`sylph` 被占。
   触摸事件 → 真机 IME/VSync 验证;窄窗口 trait 落地;hvigorw CI;
   另加 accesskit-ohos 桥(调研 05 估 2–4 人周)。
 - **M4 遗留独立项**(不阻塞商用分档):热重载(模板数据化后接 subsecond 路线);
-  `#[derive(Store)]`;错误恢复解析 + LSP(及格线 9–16 人周,调研 07);
+  ~~`#[derive(Store)]`~~ ——**✅ 2026-07-22 落地**:derive 生成 `XxxStore`
+  (每字段一个 `Signal`,句柄 `Copy`)+ `snapshot()` 整值读 + `apply()` 整值写
+  **只写变了的字段**;要求具名字段/无泛型/字段 `Clone + PartialEq`。
+  **不做嵌套 store**——内层想更细就给内层也 derive 一次,自动递归会让类型与
+  所有权难以预料;错误恢复解析 + LSP(及格线 9–16 人周,调研 07);
   ~~性能基准 CI 化~~ ——**✅ 2026-07-22 落地**:CI 跑 membench 两场景
   (3k 全量树 / 100k 虚拟化)解析 `READY` 行的 p99 并卡预算,结果进
   step summary。**门槛故意宽**(120ms / 60ms,本地实测 19ms / 5.4ms):

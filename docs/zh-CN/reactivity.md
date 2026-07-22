@@ -28,6 +28,28 @@
 触发更新)与 Proxy 深层响应。裸 Rust 里用显式 `set`/`update`;`.sv` 编译器前端
 则通过源变换把隐式写法找回来。
 
+## `#[derive(Store)]`:字段级信号
+
+`Signal<整个结构体>` 粒度太粗——改一个字段会把只读别的字段的 effect 一起叫醒。
+Svelte 用 Proxy 做深层响应,这里走编译期:**每个字段一个 `Signal`**。
+
+```rust
+use sv_macro::Store;
+
+#[derive(Store, Clone, PartialEq)]
+struct Settings { theme: String, volume: f32 }
+
+let s = Settings { theme: "dark".into(), volume: 0.8 }.into_store();
+s.volume.set(0.5);                  // 只叫醒读 volume 的 effect
+let snap: Settings = s.snapshot();  // 读回整值(会订阅**所有**字段)
+s.apply(next);                      // 整体写回,只写值变了的字段
+```
+
+生成的 `SettingsStore` 是 `Copy` 的(字段都是 `Signal` 句柄),可以随手塞进闭包。
+要求:具名字段、无泛型、字段类型 `Clone + PartialEq + 'static`。
+**不做嵌套 store**:内层结构体仍是一个整体信号,想更细就给内层也 derive 一次
+——自动递归会让类型与所有权难以预料。
+
 ## state
 
 ```rust

@@ -14,6 +14,7 @@ use proc_macro::TokenStream;
 mod codegen;
 mod ir;
 mod parse;
+mod store;
 
 /// 把 Svelte 风味模板编译成 sv-ui 场景树构建 + 绑定代码,返回 `()`。
 ///
@@ -38,4 +39,31 @@ mod parse;
 pub fn view(input: TokenStream) -> TokenStream {
     let input = syn::parse_macro_input!(input as ir::ViewInput);
     codegen::generate(&input).into()
+}
+
+/// `#[derive(Store)]`:给结构体生成**字段级信号** store `XxxStore`
+/// (ADR-1 里 Proxy 深层响应的替代品)。
+///
+/// `Signal<整个结构体>` 粒度太粗——改一个字段会把只读别的字段的 effect 一起
+/// 叫醒。这个 derive 让每个字段各持一个 `Signal`:
+///
+/// ```ignore
+/// #[derive(Store, Clone, PartialEq)]
+/// struct Settings { theme: String, volume: f32 }
+///
+/// let s = Settings { theme: "dark".into(), volume: 0.8 }.into_store();
+/// s.volume.set(0.5);                 // 只叫醒读 volume 的 effect
+/// let snap: Settings = s.snapshot(); // 读全部字段(会订阅全部)
+/// s.apply(next);                     // 整体写回,只写值变了的字段
+/// ```
+///
+/// 要求:具名字段结构体、无泛型、字段类型 `Clone + PartialEq + 'static`。
+/// **不做嵌套 store**:内层想更细就给内层也 derive 一次。
+#[proc_macro_derive(Store)]
+pub fn derive_store(input: TokenStream) -> TokenStream {
+    let input = syn::parse_macro_input!(input as syn::DeriveInput);
+    match store::derive(input) {
+        Ok(ts) => ts.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
 }
