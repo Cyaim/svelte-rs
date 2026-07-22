@@ -23,7 +23,7 @@ pub use a11y::{A11yCache, build_tree_update, dispatch_action, incremental_tree_u
 // 因为它的参数类型 `&[PathCmd]` 叫不出名字。`tests/public_api.rs` 现在守着这条
 pub use paint::{
     GlyphKey, GlyphPos, LineCap, LineJoin, PaintCmd, Painter, PainterCaps, PathCmd, PathFill,
-    RecordingPainter, StrokeStyle, TinySkiaPainter,
+    PixelImage, RecordingPainter, StrokeStyle, TinySkiaPainter,
 };
 pub use render::{
     Layout, OverlayRegion, Placed, Rect, ScrollArea, hit_click_target, ime_caret_rect,
