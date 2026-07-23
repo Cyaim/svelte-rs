@@ -1,8 +1,8 @@
 # sv-lsp
 
-`.sv` 单文件组件的语言服务器(LSP),**最小可用版**。
+`.svelte` 单文件组件的语言服务器(LSP),**最小可用版**。
 
-编辑器每次打开 / 改动 `.sv`,把全文交给 `sv_compiler::compile_sv` 编译一遍,
+编辑器每次打开 / 改动 `.svelte`,把全文交给 `sv_compiler::compile_sv` 编译一遍,
 编译前端报的错(未知标签、非法属性、runes 改写失败、样式语法……)实时变成
 波浪线(`textDocument/publishDiagnostics`)。
 
@@ -11,7 +11,7 @@
 - **sv-lsp**:编译**前端**能立刻算出的错,快、不落盘、每次击键都能重算 ——
   编辑期最高频的一档。textDocumentSync = Full。
 - **`sv check`**(sv-compiler 的二进制):跑 `cargo check` 拿 **rustc** 的类型错,
-  按 source map 搬回 `.sv`。给 `tasks.json` 的 problemMatcher 用,一次一遍。
+  按 source map 搬回 `.svelte`。给 `tasks.json` 的 problemMatcher 用,一次一遍。
 
 两者互补:LSP 管"语法/结构立即错",`sv check` 管"类型/借用等 rustc 才知道的错"。
 
@@ -29,4 +29,4 @@ LSP = `Content-Length` 分帧 + JSON-RPC,都手写:协议解析复用
 
 ## 接入(VS Code 等)
 
-把 `sv-lsp` 二进制配成 `.sv` 的 language server,走 stdio 通道即可。
+把 `sv-lsp` 二进制配成 `.svelte` 的 language server,走 stdio 通道即可。

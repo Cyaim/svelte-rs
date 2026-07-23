@@ -4,7 +4,7 @@
 
 `sv-reactive` is a fine-grained reactive kernel modeled on Svelte 5 runes, sized for a
 single-threaded desktop UI. It is the bottom layer of the stack: templates (whether the
-`view!` macro or `.sv` files, see [sv-components](./sv-components.md)) compile down to
+`view!` macro or `.svelte` files, see [sv-components](./sv-components.md)) compile down to
 `state`/`derived`/`effect` calls that mutate a retained scene tree — no virtual DOM, no
 runtime diff (see [architecture](./architecture.md)). This is an exploratory prototype;
 APIs churn.
@@ -27,7 +27,7 @@ APIs churn.
 
 Deliberately dropped (per ADR-1 in [DESIGN.md](../DESIGN.md) (Chinese)): implicit
 assignment reactivity (`count += 1` triggering updates) and deep proxy reactivity. In
-plain Rust you call `set`/`update` explicitly; the `.sv` compiler front-end restores the
+plain Rust you call `set`/`update` explicitly; the `.svelte` compiler front-end restores the
 implicit syntax via source transform.
 
 ## `#[derive(Store)]`: field-level signals

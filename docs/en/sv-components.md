@@ -1,12 +1,12 @@
 [中文](../zh-CN/sv-components.md) | **English**
 
-# Authoring UI with `.sv` Components
+# Authoring UI with `.svelte` Components
 
-svelte-rs has two template front ends that compile to the same target — pinpoint update calls against the retained scene tree in `sv-ui` (no virtual DOM, no runtime diff): **`.sv` single-file components**, compiled by `sv-compiler` from your `build.rs` (this page's focus), and **the `view!` proc-macro** from `sv-macro` (last section).
+svelte-rs has two template front ends that compile to the same target — pinpoint update calls against the retained scene tree in `sv-ui` (no virtual DOM, no runtime diff): **`.svelte` single-file components**, compiled by `sv-compiler` from your `build.rs` (this page's focus), and **the `view!` proc-macro** from `sv-macro` (last section).
 
 This is an exploratory prototype; APIs churn. The per-feature status of every Svelte 5 construct lives in the support matrix [../SVELTE-SUPPORT.md](../SVELTE-SUPPORT.md) (Chinese) — when this page and the matrix disagree, the matrix wins.
 
-## Anatomy of a `.sv` file
+## Anatomy of a `.svelte` file
 
 Up to three blocks: `<script>` (plain Rust plus runes, must be the first block), the markup (Svelte template syntax over a closed element set), and an optional `<style>` block (scoped classes, conventionally last). The element set is closed: `<view>`, `<text>`, `<button>`, `<checkbox>` (a leaf — must self-close). Unknown lowercase tags are compile errors; capitalized tags like `<TodoItem />` are component calls.
 
@@ -25,7 +25,7 @@ let double = $derived(count * 2);
 </view>
 ```
 
-Each `.sv` file compiles to one human-readable Rust file (formatted with `prettyplease`) exporting `pub fn <fn_name>(doc, parent[, props])`; the function name is the file stem, snake_cased (`Counter.sv` → `counter`, `TodoItem.sv` → `todo_item`). Compile errors carry the 1-based line/column of the `.sv` source. Full runnable examples: `examples/counter-sfc`, `examples/todo-sfc`, `examples/showcase`.
+Each `.svelte` file compiles to one human-readable Rust file (formatted with `prettyplease`) exporting `pub fn <fn_name>(doc, parent[, props])`; the function name is the file stem, snake_cased (`Counter.svelte` → `counter`, `TodoItem.svelte` → `todo_item`). Compile errors carry the 1-based line/column of the `.svelte` source. Full runnable examples: `examples/counter-sfc`, `examples/todo-sfc`, `examples/showcase`.
 
 ## The runes source transform
 
@@ -176,7 +176,7 @@ Only the enter direction exists, so `transition:fade` and `in:fade` are equivale
 
 ## Components
 
-Component tags are PascalCase and resolve to the snake_case function of the matching `.sv` file — no import statement inside `.sv` files, because `sv_compiler::build` scans the whole source dir and registers every `$props` signature in a first pass (all generated files must then be `include!`-d into one Rust scope, see below).
+Component tags are PascalCase and resolve to the snake_case function of the matching `.svelte` file — no import statement inside `.svelte` files, because `sv_compiler::build` scans the whole source dir and registers every `$props` signature in a first pass (all generated files must then be `include!`-d into one Rust scope, see below).
 
 ### Declaring props with `$props`
 
@@ -196,7 +196,7 @@ This generates a `pub struct TodoItemProps` and adds a `props` parameter to the 
 ### Two-way props: `$bindable`
 
 ```svelte
-<!-- Stepper.sv (callee) -->
+<!-- Stepper.svelte (callee) -->
 <script>
 $props { value: $bindable(i32), step: i32 = 1 }
 </script>
@@ -214,7 +214,7 @@ $props { value: $bindable(i32), step: i32 = 1 }
 ### `children` and snippet props
 
 ```svelte
-<!-- Card.sv (callee) -->
+<!-- Card.svelte (callee) -->
 <script>
 $props { title: String, children: sv_ui::Snippet }
 </script>
@@ -235,7 +235,7 @@ Exactly as in `examples/counter-sfc` — build dependency `sv-compiler`; runtime
 ```rust
 // build.rs
 fn main() {
-    // 扫描 src/ 下所有 .sv,编译成 $OUT_DIR/<组件名>.rs
+    // 扫描 src/ 下所有 .svelte,编译成 $OUT_DIR/<组件名>.rs
     sv_compiler::build("src");
 }
 ```
@@ -249,22 +249,22 @@ fn main() {
 }
 ```
 
-`sv_compiler::build("src")` recursively collects `*.sv`, registers all `$props` signatures, then compiles each file to `$OUT_DIR/<fn_name>.rs`, emitting `cargo::rerun-if-changed` per file; a compile failure panics with `file:line:col: message`. Multi-component apps `include!` every generated file into one scope — e.g. `examples/todo-sfc/src/main.rs` includes both `todo.rs` and `todo_item.rs`.
+`sv_compiler::build("src")` recursively collects `*.svelte`, registers all `$props` signatures, then compiles each file to `$OUT_DIR/<fn_name>.rs`, emitting `cargo::rerun-if-changed` per file; a compile failure panics with `file:line:col: message`. Multi-component apps `include!` every generated file into one scope — e.g. `examples/todo-sfc/src/main.rs` includes both `todo.rs` and `todo_item.rs`.
 
 ```sh
 cargo run -p counter-sfc                    # windowed
 cargo run -p counter-sfc -- --png out.png   # render one frame offscreen, no window
 ```
 
-## `sv check`: make rustc errors point back at the `.sv`
+## `sv check`: make rustc errors point back at the `.svelte`
 
-A `.sv` compiles to a `.rs` under `$OUT_DIR`, and **rustc has no `#line` directive** —
+A `.svelte` compiles to a `.rs` under `$OUT_DIR`, and **rustc has no `#line` directive** —
 so type errors naturally land on the generated file, with generated-file line/columns.
 rust-analyzer *already* indexes the generated files under `OUT_DIR` and reports
 diagnostics at the right place there; what is left is purely **position mapping**.
 
 That is what `sv check` does: it runs `cargo check --message-format=json`, relocates
-diagnostics that land on generated files back to `.sv` line/columns, and prints them
+diagnostics that land on generated files back to `.svelte` line/columns, and prints them
 rustc-style.
 
 ```sh
@@ -273,7 +273,7 @@ cargo run -p sv-compiler --bin sv-check -- -p counter-sfc
 ```
 
 ```text
-examples/counter-sfc/src/Counter.sv:12:38: error[E0277]: cannot add `&str` to `i32`
+examples/counter-sfc/src/Counter.svelte:12:38: error[E0277]: cannot add `&str` to `i32`
      |
   12 |   <text font-size="20">Count: {count + "x"} · 双倍 = {double}</text>
      |                                      ^
@@ -288,11 +288,11 @@ straight in the VS Code Problems panel.
 
 **What it maps, and where it stops** (all measured, not claimed):
 
-- Coverage is about **80%** (281 of 349 user-written Rust tokens across 10 `.sv` files
+- Coverage is about **80%** (281 of 349 user-written Rust tokens across 10 `.svelte` files
   get an exact mapping).
 - When it cannot map, it **never drops the diagnostic** — it emits the generated-file
   position verbatim plus one line saying why the mapping failed (five distinct reasons:
-  no map, corrupt map, stale map, `.sv` missing, anchor table blown). Swallowing a
+  no map, corrupt map, stale map, `.svelte` missing, anchor table blown). Swallowing a
   diagnostic is much worse than not relocating it.
 - Diagnostics landing on runes-rewrite output (glue code) cannot be mapped back. That is
   a design boundary: `count += 1` becomes `let __sv_rhs = 1; count.update(..)`, moving
@@ -302,7 +302,7 @@ straight in the VS Code Problems panel.
   so no interpolation happens across statements — it degrades to "unmapped" instead.
 
 Style-domain and template-domain errors are reported by the compiler itself and already
-carry `.sv` line/columns; they never go through this path.
+carry `.svelte` line/columns; they never go through this path.
 
 ## The `view!` macro route
 
@@ -321,7 +321,7 @@ view! { doc, root =>
 }
 ```
 
-|  | `.sv` (sv-compiler) | `view!` (sv-macro) |
+|  | `.svelte` (sv-compiler) | `view!` (sv-macro) |
 |---|---|---|
 | Template syntax | Svelte (`{#if}`, `{#each}`, `onclick`, …) | Rust-native (`if`/`else if`/`else`, `for item, i in expr`) |
 | Reactivity | implicit (runes source transform) | explicit `.get()` / `.set()` / `.update()` |

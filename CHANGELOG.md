@@ -26,7 +26,7 @@ sv-shell),按依赖序推送;`examples/` 不发布。
   29ms → 滚动帧 0.66ms)。C 类(结构)变更仍整棵重建。差分 fuzz 对拍全量重算。
 
 - **`sv check`**:`cargo check --message-format=json` → 源码映射 → rustc 风格输出,
-  把 `.sv` 编译错误的行列指回 `.sv` 源(而非生成的 `.rs`);附 `.vscode/tasks.json`
+  把 `.svelte` 编译错误的行列指回 `.svelte` 源(而非生成的 `.rs`);附 `.vscode/tasks.json`
   的 problemMatcher。映射覆盖率实测 80.5%(胶水/runes 改写产物退到行级近似)。
 
 - **三种动画格式(解析 + 像素,独立 crate)**:
@@ -42,11 +42,11 @@ sv-shell),按依赖序推送;`examples/` 不发布。
   是三种动画格式的共同地基;`ElementKind::Animation` 单一 kind 装所有格式,
   `set_anim_frame` 定级 Paint(一秒 60 次换帧零布局)。
 
-- **`.sv` 的 `<animation>` 叶子标签**:`<animation src="..." loop autoplay
+- **`.svelte` 的 `<animation>` 叶子标签**:`<animation src="..." loop autoplay
   label="..." />`,建 `ElementKind::Animation` 节点(标签名描述用途、不绑格式)。
   素材经壳侧 `register_vector`/`register_frames` 接入。`view!` 宏按 ADR-2 冻结策略不加。
 
-- **`sv-lsp`——`.sv` 语言服务器(LSP MVP)**:打开/改动 `.sv` 即把编译前端诊断
+- **`sv-lsp`——`.svelte` 语言服务器(LSP MVP)**:打开/改动 `.svelte` 即把编译前端诊断
   (未知标签、非法属性、runes 改写失败、样式语法)实时变成编辑器波浪线
   (`textDocument/publishDiagnostics`,Full 同步)。零外部依赖(手写 `Content-Length`
   分帧 + JSON-RPC)。与 `sv check` 分工:LSP 管编辑期高频的前端错,`sv check` 管
@@ -86,7 +86,7 @@ sv-shell),按依赖序推送;`examples/` 不发布。
 - **无障碍增量推送(调研 24 P6)**:语义树只推内容变动的节点,不再每次全量。
 
 - **R3 弹层体系**:离散层(Base→Popup→Tooltip)+ `overlay_block` 原语 +
-  `.sv` 的 `<overlay>` 内建元素;锚定四侧 + 越界翻转、关闭策略三值 + Esc LIFO、
+  `.svelte` 的 `<overlay>` 内建元素;锚定四侧 + 越界翻转、关闭策略三值 + Esc LIFO、
   模态区间阻断与焦点陷阱、tooltip 悬停延时、Popup 内方向键导航。
 - **R3 无障碍**:AccessKit 接入(`build_tree_update` 纯函数树映射 +
   accesskit_winit 懒激活适配器 + 动作回派)。

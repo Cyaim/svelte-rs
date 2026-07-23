@@ -235,7 +235,7 @@ fn mask_rust_source(content: &str) -> String {
 /// 从 script 内容里摘出 `$props { ... }` 声明,原位置替换为等长空白
 /// (保持行列不变,syn 错误定位不漂移)。定位与花括号配平都在掩码文本上做,
 /// 注释/字符串里的 `$props` 不会被误认。
-/// `sv_base` = 该 script 内容在 `.sv` 全文里的起始字节;`None` 表示"只要签名,
+/// `sv_base` = 该 script 内容在 `.svelte` 全文里的起始字节;`None` 表示"只要签名,
 /// 不建映射"(build() 的第一遍扫描)。
 pub fn extract_props(
     content: &str,
@@ -824,7 +824,7 @@ fn path_single_ident(e: &Expr) -> Option<String> {
 /// 为什么需要:下面三处改写(`.set` / `.update` / `.get`)会**重造**用户变量名,
 /// 用 `format_ident!` 造出来的是 `Span::call_site()`,在 fallback 下就是
 /// `line=1 / byte_range=0..0` —— 恰好等于 source map 判定"胶水"的那个值。
-/// 于是每一次对反应式变量的读/写(`.sv` 里最常见、也最常出类型错误的 token)
+/// 于是每一次对反应式变量的读/写(`.svelte` 里最常见、也最常出类型错误的 token)
 /// provenance 都会被无声丢弃(全示例实测 98 处)。用原 span 重造即可保住。
 fn path_single_ident_spanned(e: &Expr) -> Option<(String, proc_macro2::Span)> {
     if let Expr::Path(p) = e

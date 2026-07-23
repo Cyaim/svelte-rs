@@ -12,7 +12,7 @@ research reports — is currently Chinese-only and linked as-is.
 | [Getting started](en/getting-started.md) | [快速上手](zh-CN/getting-started.md) | Install, run the examples, repo tour |
 | [Architecture](en/architecture.md) | [架构](zh-CN/architecture.md) | Layers, data flow, no-VDOM design |
 | [Reactivity](en/reactivity.md) | [响应式](zh-CN/reactivity.md) | `state`/`derived`/`effect`, context, async bridge |
-| [.sv components](en/sv-components.md) | [.sv 组件](zh-CN/sv-components.md) | Template syntax, props, build.rs integration |
+| [.svelte components](en/sv-components.md) | [.svelte 组件](zh-CN/sv-components.md) | Template syntax, props, build.rs integration |
 | [Styling](en/styling.md) | [样式](zh-CN/styling.md) | The compiled CSS subset, `:hover`, variables |
 | [Render backends](en/rendering-backends.md) | [渲染后端](zh-CN/rendering-backends.md) | Painter trait, CPU/vello, env knobs |
 | [Performance](en/performance.md) | [性能](zh-CN/performance.md) | `virtual_list`, membench, measured numbers |
@@ -35,10 +35,10 @@ Twenty-seven internet-verified research reports (Chinese) that back the ADRs, 20
 | 03 | [HarmonyOS self-rendering feasibility](research/03-harmonyos.md) |
 | 04 | [Compiler strategy (proc-macro vs external file)](research/04-compiler-strategy.md) |
 | 05 | [Rendering/text/layout/a11y stack selection](research/05-rendering-stack.md) |
-| 06 | [.sv build integration (build.rs/OUT_DIR)](research/06-sv-build-integration.md) |
-| 07 | [.sv IDE/LSP strategy (Volar-style forwarding)](research/07-sv-ide-lsp.md) |
+| 06 | [.svelte build integration (build.rs/OUT_DIR)](research/06-sv-build-integration.md) |
+| 07 | [.svelte IDE/LSP strategy (Volar-style forwarding)](research/07-sv-ide-lsp.md) |
 | 08 | [Runes source-transform semantics & soundness](research/08-sv-runes-transform.md) |
-| 09 | [.sv format design + hot-reload architecture](research/09-sv-sfc-format-hotreload.md) |
+| 09 | [.svelte format design + hot-reload architecture](research/09-sv-sfc-format-hotreload.md) |
 | 10 | [Hands-on dual-route comparison](research/10-route-comparison-hands-on.md) |
 | 11 | [Industry CSS strategies + Rust infrastructure](research/11-css-industry-strategies.md) |
 | 12 | [CSS semantics item-by-item mapping](research/12-css-semantics-mapping.md) |

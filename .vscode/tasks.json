@@ -1,6 +1,6 @@
 {
   // `sv check`:跑 cargo check,把落在生成 .rs 上的 rustc 诊断按 source map
-  // 搬回 .sv,以 rustc 风格单行输出。下面的 problemMatcher 把那一行变成
+  // 搬回 .svelte,以 rustc 风格单行输出。下面的 problemMatcher 把那一行变成
   // Problems 面板条目 + 编辑器波浪线 —— **不需要写任何 VS Code 扩展**。
   //
   // 用法:Ctrl+Shift+B(默认 build task),或 Ctrl+Shift+P → Tasks: Run Task。

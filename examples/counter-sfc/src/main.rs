@@ -1,6 +1,6 @@
-//! 计数器示例(编译器路线:`.sv` 单文件组件)。
+//! 计数器示例(编译器路线:`.svelte` 单文件组件)。
 //!
-//! UI 定义在 `src/Counter.sv`,由 build.rs 里的 sv-compiler 编译成
+//! UI 定义在 `src/Counter.svelte`,由 build.rs 里的 sv-compiler 编译成
 //! `$OUT_DIR/counter.rs`(人类可读的 Rust),这里 include 进来。
 //!
 //! 运行:`cargo run -p counter-sfc`
@@ -27,7 +27,7 @@ mod tests {
     use super::*;
     use sv_ui::{Doc, ElementKind};
 
-    /// .sv 编译产物的端到端行为:点击 → runes 写入 → 精准更新 → {#if} 翻转
+    /// .svelte 编译产物的端到端行为:点击 → runes 写入 → 精准更新 → {#if} 翻转
     #[test]
     fn sfc_counter_behaves() {
         let doc = Doc::new();
@@ -53,7 +53,7 @@ mod tests {
     }
 
     /// R1 键盘闭环(调研 20 验收):Tab 树序落焦 → Enter/Space 激活 →
-    /// Shift+Tab 环绕 → 按钮免费获得键盘可达性,零 .sv 改动
+    /// Shift+Tab 环绕 → 按钮免费获得键盘可达性,零 .svelte 改动
     #[test]
     fn sfc_counter_keyboard_roundtrip() {
         use sv_ui::{Key, KeyEvent, Mods, dispatch_key};

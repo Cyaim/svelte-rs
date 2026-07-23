@@ -3,7 +3,7 @@
 # 响应式:runes 内核(sv-reactive)
 
 `sv-reactive` 是按 Svelte 5 runes 建模的细粒度响应式内核,面向单线程桌面 UI。
-它是整个栈的最底层:模板(不论 `view!` 宏还是 `.sv` 文件,见
+它是整个栈的最底层:模板(不论 `view!` 宏还是 `.svelte` 文件,见
 [sv-components](./sv-components.md))最终都编译成 `state`/`derived`/`effect`
 调用,直接精准修改保留模式场景树——没有虚拟 DOM,运行时不做 diff(见
 [architecture](./architecture.md))。本项目是探索原型,API 随时可能变。
@@ -25,7 +25,7 @@
 | `untrack` | `untrack` | |
 
 刻意放弃的特性(见 [DESIGN.md](../DESIGN.md) ADR-1):隐式赋值响应(`count += 1`
-触发更新)与 Proxy 深层响应。裸 Rust 里用显式 `set`/`update`;`.sv` 编译器前端
+触发更新)与 Proxy 深层响应。裸 Rust 里用显式 `set`/`update`;`.svelte` 编译器前端
 则通过源变换把隐式写法找回来。
 
 ## `#[derive(Store)]`:字段级信号

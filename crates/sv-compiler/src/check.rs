@@ -1,5 +1,5 @@
 //! `sv check` 的引擎:跑 `cargo check --message-format=json`,把落在生成
-//! `.rs` 上的诊断按 source map 搬回 `.sv`,以 rustc 风格单行输出
+//! `.rs` 上的诊断按 source map 搬回 `.svelte`,以 rustc 风格单行输出
 //! (`路径:行:列: level[code]: 消息`),让 VS Code 的 problemMatcher 直接能吃。
 //!
 //! **铁律:输入 N 条诊断,输出必须 N 条。** "我映射不了所以我不说了"是最坏的
@@ -23,10 +23,10 @@
 //! - 我们的输出:与 rustc 同口径,即 1-based 字符列。
 //!
 //! 所以本模块**只用行列**与 rustc 交换位置,`byte_start` 字段不碰:行列是
-//! rustc 输出里最稳的一对,而且 `.sv` 与生成 `.rs` 两边的换算都收敛到
+//! rustc 输出里最稳的一对,而且 `.svelte` 与生成 `.rs` 两边的换算都收敛到
 //! `sourcemap::{byte_to_line_col, line_col_to_byte}` 这一对函数里。
 //!
-//! **为什么不 feature gate**(本模块只服务 `sv-check` 二进制,却进了每个 `.sv`
+//! **为什么不 feature gate**(本模块只服务 `sv-check` 二进制,却进了每个 `.svelte`
 //! 消费者的 build-dependency):实测(2026-07-22,增量,取 5 次稳态)
 //! `cargo build -p sv-compiler --lib` 带本模块 0.76s、去掉 0.71s,**差 ~0.05s**,
 //! 而 sv-compiler 的 build-dep 树里 syn + prettyplease 是数量级更大的项。
@@ -268,7 +268,7 @@ pub struct GenSpan {
     pub col_end: usize,
 }
 
-/// 生成文件的 (1-based 行, 1-based 字符列) → `.sv` 的 (行, 列)。
+/// 生成文件的 (1-based 行, 1-based 字符列) → `.svelte` 的 (行, 列)。
 ///
 /// 返回 `None` = **映射不到**。调用方必须降级成"原样透出生成文件的位置 + 一句
 /// 说明",绝不能把诊断吞掉。
@@ -284,7 +284,7 @@ pub fn relocate(
     // 而 `lookup` 的"诊断区间跨过右锚点"那一档要靠 end 判断
     let end = end.max(start + 1);
     let hit = map.lookup(start, end)?;
-    // 两锚点之间那段 .sv 文本通常是 ` + ` 这种带空白的,掐掉前导空白才能让
+    // 两锚点之间那段 .svelte 文本通常是 ` + ` 这种带空白的,掐掉前导空白才能让
     // 插入符落在真正的运算符上(招牌用例 `{count + "x"}` 就靠这一下)
     let mut at = hit.sv_start;
     if hit.kind == MapKind::Between {
@@ -306,31 +306,31 @@ pub fn relocate(
     })
 }
 
-/// 为什么这条诊断没能落到 `.sv` 上——**必须**跟着诊断一起说出来。
+/// 为什么这条诊断没能落到 `.svelte` 上——**必须**跟着诊断一起说出来。
 ///
 /// 每一条都要能被**构造出来**:一个永远打不出来的分支等于没写,而用户会拿到
 /// 另一条(错的)解释。`degrade_notes_are_all_reachable` 守这条。
 pub fn degrade_note(kind: DegradeKind) -> &'static str {
     match kind {
         DegradeKind::Glue => {
-            "该位置落在 sv-compiler 生成的胶水代码上,未能映射回 .sv(通常是 runes 改写的产物;\
-             请按上面的生成文件坐标定位,并附 .sv 源码上报)"
+            "该位置落在 sv-compiler 生成的胶水代码上,未能映射回 .svelte(通常是 runes 改写的产物;\
+             请按上面的生成文件坐标定位,并附 .svelte 源码上报)"
         }
         DegradeKind::NoMap => {
             "旁边的 .svmap 读不出或解析不了(版本不认识 / 文件被截断 / 生成文件读不到),\
              诊断保持生成文件坐标"
         }
         DegradeKind::MissingSv => {
-            "map 记的 .sv 原文读不到(文件被删/改名,或这份 map 是在另一台机器上构建的——\
+            "map 记的 .svelte 原文读不到(文件被删/改名,或这份 map 是在另一台机器上构建的——\
              map 存的是构建机上的绝对路径),诊断保持生成文件坐标"
         }
         DegradeKind::StaleMap => {
-            "span map 与 .sv 内容对不上(.sv 改了但 build.rs 没重跑?),\
+            "span map 与 .svelte 内容对不上(.svelte 改了但 build.rs 没重跑?),\
              为免报错位置骗人,诊断保持生成文件坐标"
         }
         DegradeKind::NoAnchors => {
-            "该文件的锚点并行走整表作废,这个 .sv 的**所有**诊断都回不到源码——\
-             不是你这一行的问题,是映射机制失配了,请连同 .sv 上报;原因"
+            "该文件的锚点并行走整表作废,这个 .svelte 的**所有**诊断都回不到源码——\
+             不是你这一行的问题,是映射机制失配了,请连同 .svelte 上报;原因"
         }
     }
 }
@@ -341,9 +341,9 @@ pub enum DegradeKind {
     Glue,
     /// `.svmap` 在,但读不出/解析不了;或生成文件本身读不到
     NoMap,
-    /// map 指向的 `.sv` 原文读不到
+    /// map 指向的 `.svelte` 原文读不到
     MissingSv,
-    /// map 与 `.sv` 内容对不上
+    /// map 与 `.svelte` 内容对不上
     StaleMap,
     /// 建图时保险丝熔断(`SourceMap::blown`):整张表作废,与"落在胶水上"
     /// 是**完全不同**的成因,不能共用一句话
@@ -400,7 +400,7 @@ impl Maps {
         let Ok(sv_source) = std::fs::read_to_string(&map.sv_path) else {
             return MapState::Broken(DegradeKind::MissingSv);
         };
-        // 廉价一致性校验:.sv 换了内容而 build.rs 没重跑时,宁可不映射
+        // 廉价一致性校验:.svelte 换了内容而 build.rs 没重跑时,宁可不映射
         if sourcemap::fnv1a(sv_source.as_bytes()) != map.sv_hash || gen_source.len() != map.gen_len
         {
             return MapState::Broken(DegradeKind::StaleMap);
@@ -600,20 +600,20 @@ fn display_width(c: char) -> usize {
 // 编译器域错误(build.rs 里的 panic)—— 它根本不进 JSON 流
 // ---------------------------------------------------------------------------
 
-/// 从 cargo 的 stderr 里捞 `.sv` 编译器域错误。
+/// 从 cargo 的 stderr 里捞 `.svelte` 编译器域错误。
 ///
 /// `build()` 的编译失败走 `panic!`,只出现在 cargo stderr 的 panic dump 里,
-/// **不进 `--message-format=json` 的 compiler-message**。用户改 `.sv` 时语法错
+/// **不进 `--message-format=json` 的 compiler-message**。用户改 `.svelte` 时语法错
 /// 的频率远高于类型错,这条路不能不管。
 pub fn scrape_build_script_error(stderr_line: &str) -> Option<String> {
     let rest = stderr_line.trim_start().strip_prefix("--> ")?;
-    // 形如 `--> src\Counter.sv:19:15: 属性 `fg`:颜色 `#zzz` 不是合法十六进制`
-    let (path, tail) = rest.split_once(".sv:")?;
+    // 形如 `--> src\Counter.svelte:19:15: 属性 `fg`:颜色 `#zzz` 不是合法十六进制`
+    let (path, tail) = rest.split_once(".svelte:")?;
     let mut it = tail.splitn(3, ':');
     let line: usize = it.next()?.trim().parse().ok()?;
     let col: usize = it.next()?.trim().parse().ok()?;
     let msg = it.next()?.trim();
-    Some(format!("{path}.sv:{line}:{col}: error: {msg}"))
+    Some(format!("{path}.svelte:{line}:{col}: error: {msg}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -668,8 +668,8 @@ impl Session {
         Line::Diag(Box::new(r))
     }
 
-    /// 喂一行 cargo stderr:捞 `.sv` 编译器域错误(build.rs 的 panic dump)。
-    /// 捞到的**计入 errors**,否则 `.sv` 语法错会以退出码 0 收场。
+    /// 喂一行 cargo stderr:捞 `.svelte` 编译器域错误(build.rs 的 panic dump)。
+    /// 捞到的**计入 errors**,否则 `.svelte` 语法错会以退出码 0 收场。
     pub fn feed_stderr(&mut self, line: &str) -> Option<String> {
         let d = scrape_build_script_error(line)?;
         self.total += 1;
@@ -739,7 +739,7 @@ mod tests {
         assert!(json::parse("not json").is_none());
     }
 
-    /// 生成侧 `count.get()`,.sv 侧 `count`:落在 `get` 上的诊断退到
+    /// 生成侧 `count.get()`,.svelte 侧 `count`:落在 `get` 上的诊断退到
     /// "两锚点之间",落在 `count` 上的精确命中
     #[test]
     fn relocate_maps_gen_line_col_to_sv_line_col() {
@@ -853,46 +853,46 @@ mod tests {
     #[test]
     fn build_script_error_is_scraped_from_panic_dump() {
         let got = scrape_build_script_error(
-            "  --> src\\Counter.sv:19:15: 属性 `fg`:颜色 `#zzz` 不是合法十六进制",
+            "  --> src\\Counter.svelte:19:15: 属性 `fg`:颜色 `#zzz` 不是合法十六进制",
         );
         assert_eq!(
             got.as_deref(),
-            Some("src\\Counter.sv:19:15: error: 属性 `fg`:颜色 `#zzz` 不是合法十六进制")
+            Some("src\\Counter.svelte:19:15: error: 属性 `fg`:颜色 `#zzz` 不是合法十六进制")
         );
         // build() 现在报绝对路径:盘符自带冒号,分割逻辑不能按第一个 `:` 来
         let got = scrape_build_script_error(
-            r"  --> E:\WorkSpaces\svelte-rs\examples\counter-sfc\src\Counter.sv:19:15: 颜色不合法",
+            r"  --> E:\WorkSpaces\svelte-rs\examples\counter-sfc\src\Counter.svelte:19:15: 颜色不合法",
         );
         assert_eq!(
             got.as_deref(),
             Some(
-                r"E:\WorkSpaces\svelte-rs\examples\counter-sfc\src\Counter.sv:19:15: error: 颜色不合法"
+                r"E:\WorkSpaces\svelte-rs\examples\counter-sfc\src\Counter.svelte:19:15: error: 颜色不合法"
             )
         );
         assert_eq!(scrape_build_script_error("thread 'main' panicked"), None);
         assert_eq!(
-            scrape_build_script_error("  --> src/main.rs:1:1: 不是 .sv"),
+            scrape_build_script_error("  --> src/main.rs:1:1: 不是 .svelte"),
             None,
-            "只认 .sv 的编译器域错误"
+            "只认 .svelte 的编译器域错误"
         );
     }
 
-    /// `.sv` 的编译器域错误从 stderr 一路走到**退出码**。
+    /// `.svelte` 的编译器域错误从 stderr 一路走到**退出码**。
     ///
     /// bin 里那条链(stderr 线程 → scrape → 计入 errors → 退出码)以前一行
-    /// 测试都没有,而它是"改 `.sv` 写错语法"的主路径——比类型错常见得多。
+    /// 测试都没有,而它是"改 `.svelte` 写错语法"的主路径——比类型错常见得多。
     /// `Session` 存在的理由就是把这条链拉进单测射程。
     #[test]
     fn check_surfaces_build_script_error() {
         let mut s = Session::new();
         assert_eq!(s.feed_stderr("   Compiling counter-sfc v0.1.0"), None);
         let got = s.feed_stderr(
-            "  --> E:\\ws\\examples\\counter-sfc\\src\\Counter.sv:19:15: 属性 `fg` 不是合法十六进制",
+            "  --> E:\\ws\\examples\\counter-sfc\\src\\Counter.svelte:19:15: 属性 `fg` 不是合法十六进制",
         );
         assert_eq!(
             got.as_deref(),
             Some(
-                "E:\\ws\\examples\\counter-sfc\\src\\Counter.sv:19:15: error: 属性 `fg` 不是合法十六进制"
+                "E:\\ws\\examples\\counter-sfc\\src\\Counter.svelte:19:15: error: 属性 `fg` 不是合法十六进制"
             )
         );
         assert_eq!((s.total, s.errors), (1, 1), "编译器域错误必须计入");
@@ -951,7 +951,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let gen_file = dir.join("g.rs");
         std::fs::write(&gen_file, "fn f() {}\n").unwrap();
-        let sv_file = dir.join("G.sv");
+        let sv_file = dir.join("G.svelte");
         let diag = |kind: &str| {
             format!(
                 r#"{{"level":"error","message":"boom","spans":[{{"file_name":"{}","line_start":1,"column_start":1,"column_end":2,"is_primary":true}}],"children":[],"k":"{kind}"}}"#,
@@ -969,7 +969,7 @@ mod tests {
         assert!(h.contains(degrade_note(NoMap)), "{h}");
         assert!(h.contains("boom"), "降级不许弄丢诊断内容: {h}");
 
-        // MissingSv:map 指的 .sv 不存在(换了构建机 / 文件被删)
+        // MissingSv:map 指的 .svelte 不存在(换了构建机 / 文件被删)
         let base = format!(
             "svmap 1\nsvlen 3\nsvhash {:016x}\ngenlen 10\nsv {}\n",
             sourcemap::fnv1a(b"abc"),
@@ -978,7 +978,7 @@ mod tests {
         let h = headline(&base);
         assert!(h.contains(degrade_note(MissingSv)), "{h}");
 
-        // StaleMap:.sv 在,但内容对不上
+        // StaleMap:.svelte 在,但内容对不上
         std::fs::write(&sv_file, "改过了").unwrap();
         let h = headline(&base);
         assert!(h.contains(degrade_note(StaleMap)), "{h}");
@@ -1001,7 +1001,7 @@ mod tests {
     /// **落在胶水上的 suggestion 绝不能透出去。**
     ///
     /// rustc 的 `suggested_replacement` 是**生成文件**里的文本(`count.get()`
-    /// 这种),位置又映射不回 `.sv`;照抄给用户等于教他往 `.sv` 里粘一段
+    /// 这种),位置又映射不回 `.svelte`;照抄给用户等于教他往 `.svelte` 里粘一段
     /// 编译器胶水。当前实现干脆一条 suggestion 都不输出,这条测试把
     /// "至少胶水档不许输出"钉住——以后给精确命中加 suggestion 时,
     /// 它会拦住顺手把降级档也放出去的写法。
@@ -1017,7 +1017,7 @@ mod tests {
         assert!(all.contains("no method named `foo`"), "{all}");
         assert!(
             !all.contains("__el1"),
-            "生成侧的 suggestion 文本不许出现在给 .sv 作者看的输出里:\n{all}"
+            "生成侧的 suggestion 文本不许出现在给 .svelte 作者看的输出里:\n{all}"
         );
         assert!(!all.contains("suggested_replacement"), "{all}");
     }

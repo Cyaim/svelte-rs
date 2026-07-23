@@ -18,7 +18,7 @@ effect(move || println!("{}", double.get()));  // $effect
 count.set(1);                                  // 精准触发,无 diff
 ```
 
-同一件事的 `.sv` 单文件组件写法——原汁 Svelte 模板语法 + 真 Rust 表达式
+同一件事的 `.svelte` 单文件组件写法——原汁 Svelte 模板语法 + 真 Rust 表达式
 (script 里的 `count += 1` 会被编译器自动改写成句柄操作):
 
 ```text
@@ -38,7 +38,7 @@ let double = $derived(count * 2);
 
 - **Rust 版 runes 内核** — `state` / `derived`(可写)/ `effect` / `batch` /
   `untrack` / context,push-pull 三态脏标记,effect 所有权树。
-- **双编译前端、同一目标** — `view!` 宏与 `.sv` 单文件组件编译器(build.rs 集成)
+- **双编译前端、同一目标** — `view!` 宏与 `.svelte` 单文件组件编译器(build.rs 集成)
   产物都是对场景树绑定原语的调用。
 - **真 CSS、编译期解决** — 真实 CSS 语法的封闭子集(`:hover`、`:root` 变量、
   嵌套、继承)在构建期全部求解,零运行时选择器引擎。
@@ -53,7 +53,7 @@ let double = $derived(count * 2);
 cargo test                    # 全部测试
 cargo run -p showcase         # 特性橱窗(推荐先看)
 cargo run -p counter          # 计数器(view! 宏路线)
-cargo run -p counter-sfc      # 计数器(.sv 编译器路线,UI 在 src/Counter.sv)
+cargo run -p counter-sfc      # 计数器(.svelte 编译器路线,UI 在 src/Counter.svelte)
 cargo run -p showcase -- --png out.png  # 离屏渲染一帧(无需窗口)
 ```
 
@@ -70,7 +70,7 @@ cargo run -p showcase -- --png out.png  # 离屏渲染一帧(无需窗口)
 | [快速上手](docs/zh-CN/getting-started.md) | 安装、跑示例、仓库导览 |
 | [架构](docs/zh-CN/architecture.md) | 分层、数据流、为什么没有 VDOM |
 | [响应式](docs/zh-CN/reactivity.md) | runes 内核使用指南 |
-| [.sv 组件](docs/zh-CN/sv-components.md) | 模板语法、props、构建集成 |
+| [.svelte 组件](docs/zh-CN/sv-components.md) | 模板语法、props、构建集成 |
 | [样式](docs/zh-CN/styling.md) | 编译期 CSS 子集 |
 | [渲染后端](docs/zh-CN/rendering-backends.md) | Painter trait、CPU/vello、开关 |
 | [性能](docs/zh-CN/performance.md) | virtual_list、membench、实测数字 |
@@ -87,15 +87,15 @@ cargo run -p showcase -- --png out.png  # 离屏渲染一帧(无需窗口)
 | `crates/sv-reactive` | runes 响应式内核 |
 | `crates/sv-ui` | retained 场景树 + 细粒度绑定原语 |
 | `crates/sv-macro` | `view!` 宏前端 |
-| `crates/sv-compiler` | `.sv` 单文件组件编译器前端(含 `sv check`) |
+| `crates/sv-compiler` | `.svelte` 单文件组件编译器前端(含 `sv check`) |
 | `crates/sv-shell` | winit 窗口壳 + CPU/vello 渲染器 |
 | `crates/sv-vap` · `sv-pag` · `sv-lottie` | 动画格式解析器(VAP / PAG / Lottie) |
-| `crates/sv-lsp` | `.sv` 语言服务器(LSP):实时编译诊断 |
+| `crates/sv-lsp` | `.svelte` 语言服务器(LSP):实时编译诊断 |
 | `examples/` | showcase · counter(-sfc) · todo-sfc · settings-sfc · input-demo · overlay-demo · membench · vap-gift |
 
 ## 现状
 
-M0 探索已完成:signal 到像素的完整闭环(中文渲染、HiDPI、命中测试)、`.sv`
+M0 探索已完成:signal 到像素的完整闭环(中文渲染、HiDPI、命中测试)、`.svelte`
 编译器覆盖 Svelte 5 主要语法面(77 项矩阵 ✅43)、双渲染后端、百万控件虚拟化
 实测达标。这是原型——API 会变,布局/文本整形/帧调度等子系统是占位实现,
 替换计划见 [docs/DESIGN.md](docs/DESIGN.md) 的路线图与 ADR。

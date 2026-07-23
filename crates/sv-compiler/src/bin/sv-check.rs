@@ -1,4 +1,4 @@
-//! `sv check` —— 跑 `cargo check`,把落在生成 `.rs` 上的 rustc 诊断搬回 `.sv`。
+//! `sv check` —— 跑 `cargo check`,把落在生成 `.rs` 上的 rustc 诊断搬回 `.svelte`。
 //!
 //! 用法:
 //! ```sh
@@ -20,7 +20,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "-h" || a == "--help") {
         eprintln!(
-            "sv check —— 把 rustc 落在生成 .rs 上的诊断搬回 .sv\n\n\
+            "sv check —— 把 rustc 落在生成 .rs 上的诊断搬回 .svelte\n\n\
              用法: sv-check [cargo check 的参数...]\n\
              不给参数时等价于 `cargo check --workspace`。"
         );
@@ -49,7 +49,7 @@ fn run(args: &[String]) -> i32 {
     };
 
     // stderr 单开一条线程:一边原样转发(用户要看 cargo 的进度与链接错误),
-    // 一边留下 build.rs 里 `.sv` 编译器域错误的 panic dump —— 那条路根本不进
+    // 一边留下 build.rs 里 `.svelte` 编译器域错误的 panic dump —— 那条路根本不进
     // JSON 流(见 check.rs 头部)。`Session` 不跨线程,所以这里只筛不判:
     // 真正的计数与措辞回主线程做(那一半才有单测)
     let err_pipe = child.stderr.take().expect("stderr 已接管");

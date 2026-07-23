@@ -1,4 +1,4 @@
-//! 待办示例:.sv 特性大集合。
+//! 待办示例:.svelte 特性大集合。
 //!
 //! 覆盖:组件 + $props(必填/默认值/闭包 prop)、{#each}{:else}、{@const}、
 //! {#key}、style: 指令、$inspect、$derived、onclick(Svelte 5 事件属性)。
@@ -28,7 +28,7 @@ fn main() {
         println!("已渲染到 {path}");
         return;
     }
-    sv_shell::run_app("sv 待办(.sv 特性演示)", todo).expect("运行失败");
+    sv_shell::run_app("sv 待办(.svelte 特性演示)", todo).expect("运行失败");
 }
 
 /// 按文档顺序找第一个匹配文本的按钮并点击(--png 演示与测试共用)

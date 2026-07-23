@@ -22,7 +22,7 @@ text { color: #223344; }   /* 元素规则:给组件内所有 <text> 打底 */
 </style>
 ```
 
-规则**按组件 scoped**,和 Svelte 一致:`Stepper.sv` 的 `.btn` 和 `Showcase.sv` 的 `.btn` 是两张互不相干的样式表。元素规则排在类规则之下(熟悉的"元素 < 类"直觉,靠应用顺序实现,不靠 specificity——见[级联](#级联声明序不是-specificity)一节)。同一组件内重复定义同名规则是编译错误。
+规则**按组件 scoped**,和 Svelte 一致:`Stepper.svelte` 的 `.btn` 和 `Showcase.svelte` 的 `.btn` 是两张互不相干的样式表。元素规则排在类规则之下(熟悉的"元素 < 类"直觉,靠应用顺序实现,不靠 specificity——见[级联](#级联声明序不是-specificity)一节)。同一组件内重复定义同名规则是编译错误。
 
 ## 在标记里用样式
 
@@ -153,7 +153,7 @@ view { color: #223344; }  /* 下面所有 text 未覆盖时都继承这个色 */
 
 C2 完成即定义为对 Svelte 开发者的"迁移无感线"(44/91 落地,覆盖高频面)。
 
-想看以上全部特性跑起来:`cargo run -p showcase`(或加 `-- --png out.png` 离屏渲染一帧)。样式源码在 `examples/showcase/src/Showcase.sv`、`Card.sv`、`Stepper.sv`、`TaskRow.sv`。
+想看以上全部特性跑起来:`cargo run -p showcase`(或加 `-- --png out.png` 离屏渲染一帧)。样式源码在 `examples/showcase/src/Showcase.svelte`、`Card.svelte`、`Stepper.svelte`、`TaskRow.svelte`。
 
 ## 相关阅读
 

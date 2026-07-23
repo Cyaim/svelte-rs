@@ -15,8 +15,8 @@
   taffy 陷阱一条不碰**(前提就是结构没变,从不 add_child/remove/reparent)。
   差分 fuzz(增量 vs 全量逐帧对拍)+ 定点测试(证明路径被走、树被复用、坐标逐个
   相同)双守。仍未做:结构变更的增量(那才是陷阱区,继续全量)、walk 优化(步骤 4)。
-- **`.sv` 语言服务器 `sv-lsp`(LSP MVP)**(此前"未实现",本轮实现):打开/改动
-  `.sv` → `compile_sv` → `publishDiagnostics` 波浪线。零外部依赖(手写 `Content-Length`
+- **`.svelte` 语言服务器 `sv-lsp`(LSP MVP)**(此前"未实现",本轮实现):打开/改动
+  `.svelte` → `compile_sv` → `publishDiagnostics` 波浪线。零外部依赖(手写 `Content-Length`
   分帧 + JSON-RPC,协议解析复用 `sv_compiler::check::json`)。纯函数 `Server::handle`
   有单测,stdio 端到端冒烟过。仍未做:补全/跳转/hover(要符号表)。
 - **PAG 差分帧重放 + WebP 解码(全链打通)**(此前"未实现",本轮实现):
@@ -104,12 +104,12 @@
 
 共同欠账:
 
-- ~~`<animation src>` 前端标签未做~~ **✅ 2026-07-23 `.sv` 侧已做**:
+- ~~`<animation src>` 前端标签未做~~ **✅ 2026-07-23 `.svelte` 侧已做**:
   `<animation src="..." loop autoplay label="..." />` 叶子标签,建
   `ElementKind::Animation` 节点(sv-compiler:template/codegen/emit/style +
   `animation_compiles` 测试)。素材经壳侧 `register_vector`/`register_frames`
   接入(与 sv-ui/sv-shell 分层一致,模板层只建节点)。`view!` 宏按 ADR-2
-  冻结策略不加(checkbox/textarea/overlay 同样只在 `.sv`)。仍缺:构建期
+  冻结策略不加(checkbox/textarea/overlay 同样只在 `.svelte`)。仍缺:构建期
   importer(把 `src` 转译+注册的胶水,与解码器决策同批)、play-loop 短路(§4.2)。
 - **动画帧仍整窗重绘**。分级只让布局归零(`set_anim_frame` 是 Paint 级),绘制端没有脏矩形。ADR-6 里那段"别指望零功耗自动成立"依然成立。
 - ~~`AnimSource::Vector` 恒返回 `None`~~ **✅ 2026-07-23 已接线**:壳侧新增

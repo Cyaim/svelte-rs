@@ -40,21 +40,21 @@ dev profile 为 UI 迭代做了调优:工作区代码 `opt-level = 1`、依赖 `
 ```sh
 cargo run -p showcase       # 特性橱窗 —— 从这里开始
 cargo run -p counter        # 计数器,view! 宏路线
-cargo run -p counter-sfc    # 计数器,.sv 单文件组件路线
-cargo run -p todo-sfc       # 待办,更大的 .sv 特性面
+cargo run -p counter-sfc    # 计数器,.svelte 单文件组件路线
+cargo run -p todo-sfc       # 待办,更大的 .svelte 特性面
 ```
 
 | 示例 | 前端 | 演示内容 |
 |---|---|---|
-| `showcase` | `.sv` 编译器 | **推荐先看**:`$bindable` 双向绑定、children snippet、`{#snippet}/{@render}`、keyed `{#each}`(重排保状态)、scoped `<style>`、`{#await}`、`in:fade` |
+| `showcase` | `.svelte` 编译器 | **推荐先看**:`$bindable` 双向绑定、children snippet、`{#snippet}/{@render}`、keyed `{#each}`(重排保状态)、scoped `<style>`、`{#await}`、`in:fade` |
 | `counter` | `view!` 宏 | 最小计数器,直接用 proc-macro 模板写在 Rust 里 |
-| `counter-sfc` | `.sv` 编译器 | 同一个计数器,UI 放在 `src/Counter.sv`,由 build.rs 编译成 `$OUT_DIR` 里人类可读的 Rust |
-| `todo-sfc` | `.sv` 编译器 | 组件 + `$props`、`{#each}{:else}`、`{@const}`、`{#key}`、`style:` 指令、`$inspect` |
+| `counter-sfc` | `.svelte` 编译器 | 同一个计数器,UI 放在 `src/Counter.svelte`,由 build.rs 编译成 `$OUT_DIR` 里人类可读的 Rust |
+| `todo-sfc` | `.svelte` 编译器 | 组件 + `$props`、`{#each}{:else}`、`{@const}`、`{#key}`、`style:` 指令、`$inspect` |
 | `membench` | 直接调 `sv-ui` API | 内存 / 帧时间基准测试台(不支持 `--png`,自带 CLI,见下文) |
 
 窗口以 480×400 逻辑尺寸打开,HiDPI 自适应。两个计数器示例用两条模板前端搭出同一个 UI——对照读它们的源码,能快速体会两条路线的手感。
 
-`.sv` 路线长这样(script 里的 `count += 1` 会被编译器自动改写成句柄操作):
+`.svelte` 路线长这样(script 里的 `count += 1` 会被编译器自动改写成句柄操作):
 
 ```text
 <script>
@@ -107,7 +107,7 @@ cargo run -p membench -- --windowed --mutate      # 真窗口模式,配合 SV_SH
 | `crates/sv-reactive` | runes 响应式内核:push-pull 三态脏标记、effect 所有权树 |
 | `crates/sv-ui` | retained 场景树(桌面版 DOM)+ 细粒度绑定原语 |
 | `crates/sv-macro` | `view!` proc-macro 模板前端 |
-| `crates/sv-compiler` | `.sv` 单文件组件编译器(runes 源变换 + Svelte 模板语法) |
+| `crates/sv-compiler` | `.svelte` 单文件组件编译器(runes 源变换 + Svelte 模板语法) |
 | `crates/sv-shell` | winit 窗口 + CPU 光栅壳;可选 vello/wgpu 后端在 `backend-vello` feature 后面 |
 | `examples/*` | 上面列出的五个示例 |
 
@@ -148,7 +148,7 @@ SV_RENDERER=vello SV_SHOW_FPS=1 cargo run -p showcase --features backend-vello
 
 - [架构](./architecture.md) —— crate 分层与无 VDOM 数据流
 - [响应式](./reactivity.md) —— `state` / `derived` / `effect` 与单线程运行时规则
-- [.sv 组件](./sv-components.md) —— 单文件组件格式与 build.rs 集成
+- [.svelte 组件](./sv-components.md) —— 单文件组件格式与 build.rs 集成
 - [渲染后端](./rendering-backends.md) —— CPU 栈、vello 与迁移计划
 - [DESIGN.md](../DESIGN.md) —— ADR 决策记录、路线图、风险清单
 - [SVELTE-SUPPORT.md](../SVELTE-SUPPORT.md) —— 77 项 Svelte 5 语法支持矩阵

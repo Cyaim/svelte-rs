@@ -1,10 +1,10 @@
-//! source map(生成 `.rs` → `.sv` 位置回映)的验收。
+//! source map(生成 `.rs` → `.svelte` 位置回映)的验收。
 //!
 //! 分三层,越往下越贵、也越接近用户真正看到的东西:
 //! 1. **纯函数**:`SourceMap::lookup` / `check::relocate` 的查表与降级
 //!    (在 `src/sourcemap.rs` 与 `src/check.rs` 的 `mod tests` 里);
-//! 2. **建图**:对真实 `.sv` 建图后逐段自校验 + 完整性断言(本文件主体);
-//! 3. **端到端**:临时 crate 里真跑 `cargo check`,断言诊断落在 `.sv` 的正确行
+//! 2. **建图**:对真实 `.svelte` 建图后逐段自校验 + 完整性断言(本文件主体);
+//! 3. **端到端**:临时 crate 里真跑 `cargo check`,断言诊断落在 `.svelte` 的正确行
 //!    (本文件末尾,`#[ignore]`——它要现编 sv-ui/sv-reactive,分钟级)。
 //!
 //! 为什么第 2 层的"逐段自校验"不够、必须有完整性断言:逐段校验只检查
@@ -22,7 +22,7 @@ fn fixtures_dir() -> PathBuf {
 }
 
 fn compile(src: &str) -> sv_compiler::Compiled {
-    sv_compiler::compile_sv_mapped(src, "probe", &PropsRegistry::new(), "probe.sv")
+    sv_compiler::compile_sv_mapped(src, "probe", &PropsRegistry::new(), "probe.svelte")
         .expect("fixture 应能编译")
 }
 
@@ -38,17 +38,17 @@ let double = $derived(count * 2);
 </view>
 "##;
 
-/// 所有能拿到的真实 `.sv`:金样 fixture + 仓库里的示例组件
+/// 所有能拿到的真实 `.svelte`:金样 fixture + 仓库里的示例组件
 fn all_sv_sources() -> Vec<(String, String)> {
     let mut out = Vec::new();
-    for name in ["wide.sv", "child.sv", "parent.sv"] {
+    for name in ["wide.svelte", "child.svelte", "parent.svelte"] {
         let p = fixtures_dir().join(name);
         out.push((
             name.to_string(),
             std::fs::read_to_string(&p).expect("读 fixture 失败"),
         ));
     }
-    // examples/ 下的 .sv 是"真实用法"的最好样本;不存在就跳过(不让本测试
+    // examples/ 下的 .svelte 是"真实用法"的最好样本;不存在就跳过(不让本测试
     // 依赖别人名下的目录结构)
     let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
     let mut stack = vec![examples];
@@ -104,7 +104,7 @@ fn map_segments_are_verbatim() {
         for s in &c.map.segs {
             let a = src.get(s.sv_start..s.sv_end).unwrap_or_else(|| {
                 panic!(
-                    "{name}:.sv 区间 {}..{} 不在字符边界上",
+                    "{name}:.svelte 区间 {}..{} 不在字符边界上",
                     s.sv_start, s.sv_end
                 )
             });
@@ -136,7 +136,7 @@ fn map_is_sorted_and_disjoint() {
     }
 }
 
-/// **完整性闸**:`.sv` 里每一处反应式变量的引用都必须有映射。
+/// **完整性闸**:`.svelte` 里每一处反应式变量的引用都必须有映射。
 ///
 /// 这些引用在生成代码里是被 `Rewriter` 重造出来的
 /// (`x` → `x.get()`、`x = v` → `x.set(v)`、`x += v` → `x.update(…)`)。
@@ -162,7 +162,7 @@ fn map_covers_all_reactive_reads() {
             }
             assert!(
                 starts.contains(&pos),
-                "`{name}` 在 .sv {:?} 处没有映射段 —— provenance 被丢了",
+                "`{name}` 在 .svelte {:?} 处没有映射段 —— provenance 被丢了",
                 byte_to_line_col(COUNTER, pos)
             );
             found += 1;
@@ -175,7 +175,7 @@ fn map_covers_all_reactive_reads() {
 /// 旁路 parse 入口,单独守一道:它们的 token 若按胶水处理,诊断会静默降级
 #[test]
 fn map_covers_each_pattern_and_bind() {
-    let src = std::fs::read_to_string(fixtures_dir().join("wide.sv")).unwrap();
+    let src = std::fs::read_to_string(fixtures_dir().join("wide.svelte")).unwrap();
     let c = compile(&src);
     let mapped_at = |pos: usize| c.map.segs.iter().any(|s| s.sv_start == pos);
     // `{#each items as it (it.0)}`:模式 `it` 与 key 表达式里的 `it`
@@ -229,15 +229,15 @@ let count = $state(0i32);
     assert_eq!(byte_to_line_col(src, seg.sv_start), (6, 54));
 }
 
-/// **覆盖率地板**:`.sv` 里用户写的 Rust token 有多大比例拿到了精确映射。
+/// **覆盖率地板**:`.svelte` 里用户写的 Rust token 有多大比例拿到了精确映射。
 ///
-/// 阈值不是拍脑袋定的:2026-07-22 在仓库全部 10 个可独立编译的 `.sv` 上实测
+/// 阈值不是拍脑袋定的:2026-07-22 在仓库全部 10 个可独立编译的 `.svelte` 上实测
 /// **281/349 = 80.5%**(wide 84% / InputDemo 86% / Counter 76% / Card 57%)。
 /// 地板取 70%,留出加新语法时的余量;掉到地板以下说明某个 parse 入口的
 /// provenance 断了,而 `map_segments_are_verbatim` 那种 soundness 断言
 /// **抓不到这种"该记却没记"**。
 ///
-/// 剩下的 ~20% 缺口是已知的:`{#snippet}` 参数类型没有 `.sv` 偏移可用、
+/// 剩下的 ~20% 缺口是已知的:`{#snippet}` 参数类型没有 `.svelte` 偏移可用、
 /// 样式值编译期折叠成字面量、`{@render}` / 块头部的部分 token。
 #[test]
 fn map_coverage_floor() {
@@ -272,7 +272,7 @@ fn map_coverage_floor() {
     );
 }
 
-/// 粗略切出 `.sv` 里的"用户 Rust 文本":script 块 + 模板里的 `{...}`。
+/// 粗略切出 `.svelte` 里的"用户 Rust 文本":script 块 + 模板里的 `{...}`。
 /// 刻意粗糙——它只服务覆盖率这一个统计量,不参与任何正确性判断。
 fn user_rust_regions(src: &str) -> Vec<(usize, String)> {
     let mut out = Vec::new();
@@ -334,7 +334,7 @@ fn anchor_offsets(ts: proc_macro2::TokenStream) -> Vec<usize> {
 // CRLF 与非 ASCII
 // ---------------------------------------------------------------------------
 
-/// 仓库在 Windows 上,`.sv` 很可能被 git 按 CRLF 检出。
+/// 仓库在 Windows 上,`.svelte` 很可能被 git 按 CRLF 检出。
 /// 行号靠数 `\n`、列靠往回数到 `\n` 为止的**字符**数,`\r` 落在上一行末尾,
 /// 两者都不受影响 —— 这条测试把这句话钉住。
 #[test]
@@ -396,9 +396,9 @@ fn tmp_dir(tag: &str) -> PathBuf {
     d
 }
 
-/// 造一份"生成文件 + .svmap + .sv"三件套,模拟 OUT_DIR 的现场
+/// 造一份"生成文件 + .svmap + .svelte"三件套,模拟 OUT_DIR 的现场
 fn stage(dir: &Path, sv_src: &str) -> (PathBuf, sv_compiler::Compiled) {
-    let sv_path = dir.join("Probe.sv");
+    let sv_path = dir.join("Probe.svelte");
     std::fs::write(&sv_path, sv_src).unwrap();
     let c = sv_compiler::compile_sv_mapped(
         sv_src,
@@ -432,10 +432,10 @@ fn check_remaps_type_error_to_sv() {
     let v = sv_compiler::check::json::parse(&diag_json(&gen_file, gl, gc, gc + 5)).unwrap();
     let r = sv_compiler::check::render(&v, &mut sv_compiler::check::Maps::default());
 
-    let want = format!("{}:7:17: error[E0425]", dir.join("Probe.sv").display());
+    let want = format!("{}:7:17: error[E0425]", dir.join("Probe.svelte").display());
     assert!(
         r.headline.starts_with(&want),
-        "诊断没被搬回 .sv:\n  实得 {}\n  期望前缀 {want}",
+        "诊断没被搬回 .svelte:\n  实得 {}\n  期望前缀 {want}",
         r.headline
     );
 
@@ -444,10 +444,10 @@ fn check_remaps_type_error_to_sv() {
     let (pl, pc) = byte_to_line_col(&c.code, plus);
     let v = sv_compiler::check::json::parse(&diag_json(&gen_file, pl, pc, pc + 1)).unwrap();
     let r = sv_compiler::check::render(&v, &mut sv_compiler::check::Maps::default());
-    let want = format!("{}:7:23:", dir.join("Probe.sv").display());
+    let want = format!("{}:7:23:", dir.join("Probe.svelte").display());
     assert!(
         r.headline.starts_with(&want),
-        "落在 `+` 上的诊断没落到 .sv 的 `+`:\n  实得 {}\n  期望前缀 {want}",
+        "落在 `+` 上的诊断没落到 .svelte 的 `+`:\n  实得 {}\n  期望前缀 {want}",
         r.headline
     );
     let _ = std::fs::remove_dir_all(&dir);
@@ -459,7 +459,7 @@ fn check_remaps_type_error_to_sv() {
 fn check_degrades_on_glue_without_dropping() {
     let dir = tmp_dir("glue");
     let (gen_file, c) = stage(&dir, COUNTER);
-    // `__el1` 是纯胶水(codegen 的 fresh() 造出来的),不该有任何 .sv provenance
+    // `__el1` 是纯胶水(codegen 的 fresh() 造出来的),不该有任何 .svelte provenance
     let at = c.code.find("__el1").expect("生成代码里应有 __el1");
     let (gl, gc) = byte_to_line_col(&c.code, at);
     let v = sv_compiler::check::json::parse(&diag_json(&gen_file, gl, gc, gc + 5)).unwrap();
@@ -478,19 +478,19 @@ fn check_degrades_on_glue_without_dropping() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// map 与 `.sv` 对不上(改了 `.sv` 但 build.rs 没重跑)时宁可不映射:
+/// map 与 `.svelte` 对不上(改了 `.svelte` 但 build.rs 没重跑)时宁可不映射:
 /// 给一个"像样但错误"的行号比不给更糟
 #[test]
 fn check_rejects_stale_map() {
     let dir = tmp_dir("stale");
     let (gen_file, c) = stage(&dir, COUNTER);
-    std::fs::write(dir.join("Probe.sv"), format!("\n\n{COUNTER}")).unwrap();
+    std::fs::write(dir.join("Probe.svelte"), format!("\n\n{COUNTER}")).unwrap();
     let at = c.code.find("count.get()").unwrap();
     let (gl, gc) = byte_to_line_col(&c.code, at);
     let v = sv_compiler::check::json::parse(&diag_json(&gen_file, gl, gc, gc + 5)).unwrap();
     let r = sv_compiler::check::render(&v, &mut sv_compiler::check::Maps::default());
     assert!(
-        r.headline.contains("span map 与 .sv 内容对不上"),
+        r.headline.contains("span map 与 .svelte 内容对不上"),
         "过期 map 应触发降级: {}",
         r.headline
     );
@@ -563,8 +563,9 @@ fn check_leaves_plain_rust_diagnostics_alone() {
 /// `None`,诊断走"原样透出"。这条模拟那个场景。
 #[test]
 fn empty_map_degrades_instead_of_panicking() {
-    let m = SourceMap::parse_text("svmap 1\nsvlen 0\nsvhash 0000000000000000\ngenlen 0\nsv x.sv\n")
-        .expect("空表也应能解析");
+    let m =
+        SourceMap::parse_text("svmap 1\nsvlen 0\nsvhash 0000000000000000\ngenlen 0\nsv x.svelte\n")
+            .expect("空表也应能解析");
     assert!(m.segs.is_empty());
     assert_eq!(m.lookup(0, 1), None);
 }
@@ -572,7 +573,7 @@ fn empty_map_degrades_instead_of_panicking() {
 /// 空表**不等于**"这里全是胶水":保险丝烧了要说自己烧了。
 ///
 /// 这两种情形 `lookup` 都返回 `None`,但给用户的解释完全不同——
-/// 说成"落在 runes 改写的胶水上"会把人支去查自己的 `.sv`,而真实原因是
+/// 说成"落在 runes 改写的胶水上"会把人支去查自己的 `.svelte`,而真实原因是
 /// 映射机制整表作废、这个文件的**每一条**诊断都回不去。
 #[test]
 fn blown_fuse_is_not_reported_as_glue() {
@@ -611,7 +612,7 @@ fn blown_fuse_is_not_reported_as_glue() {
 
 /// **锚点并行走必须是全的**(`lsp-spike.md` P0 验收项 `map_anchor_walk_is_total`)。
 ///
-/// 仓库里全部真实 `.sv` 上,保险丝一次都不许烧:烧了就意味着 prettyplease 换了
+/// 仓库里全部真实 `.svelte` 上,保险丝一次都不许烧:烧了就意味着 prettyplease 换了
 /// 打印策略 / 某个 parse 入口的 provenance 断了,那个文件的诊断会整批回不去。
 /// `map_segments_are_verbatim` 的 `!segs.is_empty()` 是弱替代——它对"熔断后
 /// 恰好还剩几段"这种情形无感,而现在熔断是**显式**状态,可以直接断言。
@@ -624,7 +625,7 @@ fn map_anchor_walk_is_total() {
         let c = compile(&src);
         assert_eq!(
             c.map.blown, None,
-            "{name}:锚点并行走熔断了(整张表作废,该文件所有诊断都回不到 .sv)"
+            "{name}:锚点并行走熔断了(整张表作废,该文件所有诊断都回不到 .svelte)"
         );
         assert!(!c.map.segs.is_empty(), "{name}:一段映射都没建出来");
     }
@@ -634,10 +635,10 @@ fn map_anchor_walk_is_total() {
 ///
 /// region 的粒度如果是"整个 script 块一个包络"(计划 §6 批准的第一版降级),
 /// 插值会跨语句:实测 `let double = …` 那条语句的 `let`(runes 改写后已是胶水)
-/// 被插到上一条语句末尾的 `);` 上,报出 `.sv` 第 2 行——而它在第 3 行。
+/// 被插到上一条语句末尾的 `);` 上,报出 `.svelte` 第 2 行——而它在第 3 行。
 /// 这正是本 crate 自己写的"宁可不映射,也不给像样但错误的位置"要挡的东西,
-/// 所以 region 取到**行**。这条测试在全部真实 `.sv` 上钉住不变量:
-/// `Between` 命中的那段 `.sv` 间隙里**不含换行**。
+/// 所以 region 取到**行**。这条测试在全部真实 `.svelte` 上钉住不变量:
+/// `Between` 命中的那段 `.svelte` 间隙里**不含换行**。
 #[test]
 fn between_interpolation_never_crosses_a_line() {
     for (name, src) in all_sv_sources() {
@@ -657,7 +658,7 @@ fn between_interpolation_never_crosses_a_line() {
             let gap = &src[h.sv_start..h.sv_end];
             assert!(
                 !gap.contains('\n'),
-                "{name}:生成侧 {:?} 的插值跨了 .sv 的行 —— 间隙 {gap:?} @ {:?}",
+                "{name}:生成侧 {:?} 的插值跨了 .svelte 的行 —— 间隙 {gap:?} @ {:?}",
                 byte_to_line_col(&c.code, i),
                 byte_to_line_col(&src, h.sv_start)
             );
@@ -680,7 +681,7 @@ fn glue_let_in_script_degrades_instead_of_pointing_at_previous_statement() {
         let (l, _) = byte_to_line_col(COUNTER, h.sv_start);
         assert_ne!(
             l, 2,
-            "被插值到了上一条语句(.sv 第 2 行),`let double` 在第 3 行"
+            "被插值到了上一条语句(.svelte 第 2 行),`let double` 在第 3 行"
         );
     }
 }
@@ -705,8 +706,8 @@ fn lookup_kinds_are_distinguishable() {
 // 端到端:临时 crate 里真跑 cargo check
 // ---------------------------------------------------------------------------
 
-/// 造一个**故意写错**的 `.sv`(引用了不存在的变量),真跑 `cargo check`,
-/// 断言 `sv check` 把诊断报在 `.sv` 的正确行列上。
+/// 造一个**故意写错**的 `.svelte`(引用了不存在的变量),真跑 `cargo check`,
+/// 断言 `sv check` 把诊断报在 `.svelte` 的正确行列上。
 ///
 /// `#[ignore]`:它要在独立 target 目录里现编 sv-ui / sv-reactive / syn 全家桶,
 /// 分钟级。跑法:
@@ -755,7 +756,7 @@ fn e2e_bad_sv_reports_on_sv_line() {
                \x20 <text>计数中文:{count}</text>\n\
                \x20 <text>坏的中文:{nope}</text>\n\
                </view>\n";
-    std::fs::write(root.join("src/Bad.sv"), bad).unwrap();
+    std::fs::write(root.join("src/Bad.svelte"), bad).unwrap();
     std::fs::write(
         root.join("src/main.rs"),
         "include!(concat!(env!(\"OUT_DIR\"), \"/bad.rs\"));\nfn main() {}\n",
@@ -775,16 +776,16 @@ fn e2e_bad_sv_reports_on_sv_line() {
     // `  <text>坏的中文:{nope}</text>`:2 + 6 + 5 个中文/全角字符 + `{` = 14,nope 从 15 起
     let pos = bad.find("nope").unwrap();
     assert_eq!(byte_to_line_col(bad, pos), (7, 15), "测试自身的期望算错了");
-    // map 里的路径是 canonicalize 过的,分隔符与 `join("src/Bad.sv")` 不同,
+    // map 里的路径是 canonicalize 过的,分隔符与 `join("src/Bad.svelte")` 不同,
     // 比较前先统一(Windows 上 rustc 自己吐的路径也是混用的)
     let norm = |s: &str| s.replace('\\', "/");
     let want = format!(
         "{}:7:15: error[E0425]",
-        norm(&root.join("src/Bad.sv").display().to_string())
+        norm(&root.join("src/Bad.svelte").display().to_string())
     );
     assert!(
         stdout.lines().any(|l| norm(l).starts_with(&want)),
-        "诊断没落在 .sv 的正确行列上,期望前缀:\n  {want}"
+        "诊断没落在 .svelte 的正确行列上,期望前缀:\n  {want}"
     );
     let _ = std::fs::remove_dir_all(&root);
 }

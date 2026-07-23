@@ -40,21 +40,21 @@ The dev profile is tuned for UI iteration: workspace code builds at `opt-level =
 ```sh
 cargo run -p showcase       # feature tour — start here
 cargo run -p counter        # counter, view! macro route
-cargo run -p counter-sfc    # counter, .sv single-file-component route
-cargo run -p todo-sfc       # todo app, wider .sv feature set
+cargo run -p counter-sfc    # counter, .svelte single-file-component route
+cargo run -p todo-sfc       # todo app, wider .svelte feature set
 ```
 
 | Example | Front end | What it demonstrates |
 |---|---|---|
-| `showcase` | `.sv` compiler | **Recommended tour**: `$bindable` two-way binding, children snippets, `{#snippet}/{@render}`, keyed `{#each}` (state survives reorder), scoped `<style>`, `{#await}`, `in:fade` |
+| `showcase` | `.svelte` compiler | **Recommended tour**: `$bindable` two-way binding, children snippets, `{#snippet}/{@render}`, keyed `{#each}` (state survives reorder), scoped `<style>`, `{#await}`, `in:fade` |
 | `counter` | `view!` macro | Minimal counter written directly in Rust with the proc-macro template |
-| `counter-sfc` | `.sv` compiler | Same counter, but the UI lives in `src/Counter.sv`, compiled by `build.rs` into readable Rust in `$OUT_DIR` |
-| `todo-sfc` | `.sv` compiler | Components + `$props`, `{#each}{:else}`, `{@const}`, `{#key}`, `style:` directive, `$inspect` |
+| `counter-sfc` | `.svelte` compiler | Same counter, but the UI lives in `src/Counter.svelte`, compiled by `build.rs` into readable Rust in `$OUT_DIR` |
+| `todo-sfc` | `.svelte` compiler | Components + `$props`, `{#each}{:else}`, `{@const}`, `{#key}`, `style:` directive, `$inspect` |
 | `membench` | direct `sv-ui` API | Memory/frame-time benchmark harness (no `--png`, own CLI — see below) |
 
 Windows open at a 480×400 logical size and are HiDPI-aware. The two counter examples build the same UI through the two template front ends — diff their sources for a feel of both routes.
 
-Where the `.sv` route looks like this (`count += 1` in the script is rewritten by the compiler into handle operations):
+Where the `.svelte` route looks like this (`count += 1` in the script is rewritten by the compiler into handle operations):
 
 ```text
 <script>
@@ -107,7 +107,7 @@ Output is a single machine-readable line: `READY backend=… mutate=… virtual=
 | `crates/sv-reactive` | Runes reactive core: push-pull three-state dirty marking, effect ownership tree |
 | `crates/sv-ui` | Retained scene tree (the "desktop DOM") + fine-grained binding primitives |
 | `crates/sv-macro` | `view!` proc-macro template front end |
-| `crates/sv-compiler` | `.sv` single-file-component compiler (runes source transform, Svelte template syntax) |
+| `crates/sv-compiler` | `.svelte` single-file-component compiler (runes source transform, Svelte template syntax) |
 | `crates/sv-shell` | winit window + CPU raster shell; optional vello/wgpu backend behind `backend-vello` |
 | `examples/*` | The five examples listed above |
 
@@ -148,7 +148,7 @@ More on backend architecture and the fallback chain in [rendering backends](./re
 
 - [Architecture](./architecture.md) — the crate layers and the no-VDOM data flow
 - [Reactivity](./reactivity.md) — `state` / `derived` / `effect` and the single-threaded runtime rules
-- [.sv components](./sv-components.md) — the single-file-component format and build.rs integration
+- [.svelte components](./sv-components.md) — the single-file-component format and build.rs integration
 - [Rendering backends](./rendering-backends.md) — CPU stack, vello, and the migration plan
 - [DESIGN.md](../DESIGN.md) (Chinese) — ADRs, roadmap, risk register
 - [SVELTE-SUPPORT.md](../SVELTE-SUPPORT.md) (Chinese) — the 77-item Svelte 5 syntax support matrix

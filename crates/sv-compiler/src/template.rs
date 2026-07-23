@@ -40,7 +40,7 @@ impl Tag {
 #[derive(Debug)]
 pub struct ExprSrc {
     pub src: String,
-    /// 在 .sv 全文中的字节偏移(错误定位)
+    /// 在 .svelte 全文中的字节偏移(错误定位)
     pub offset: usize,
 }
 

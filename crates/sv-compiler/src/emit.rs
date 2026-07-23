@@ -1,13 +1,13 @@
 //! 绑定原语调用词汇表 —— **双前端共享的 codegen 内核**(ADR-2 无悔三步 ①)
 //!
-//! 背景:`view!` 宏(sv-macro)与 `.sv` 编译器(本 crate)编译目标相同 ——
+//! 背景:`view!` 宏(sv-macro)与 `.svelte` 编译器(本 crate)编译目标相同 ——
 //! 都是 sv-ui 的绑定原语。两边曾各自手写同一套 `quote!`,于是"改一个原语签名
 //! 要同步改两处 codegen 与两处测试"(CLAUDE.md 里那条纪律就是这么来的)。
 //! 本模块把**调用形状与闭包协议**收成一份,两个前端都从这里发射。
 //!
 //! 边界(刻意不搬的东西):
 //! - **解析与 IR 留在各自前端**:`view!` 是 Rust token 语法(表达式带真 span),
-//!   `.sv` 是文本语法(表达式是带偏移的源码串,还要过 runes 改写)。硬合成
+//!   `.svelte` 是文本语法(表达式是带偏移的源码串,还要过 runes 改写)。硬合成
 //!   一份 IR 会把宏路径的 span 精度赔进去 —— 那正是 ADR-2 保留双前端的理由。
 //! - **属性名表与错误信息留在各自前端**:两边的表面语法本就不同
 //!   (`on_click(闭包)` vs `onclick={闭包}`)。
@@ -95,7 +95,7 @@ pub fn bind_text(el: &Ident, parts: &[TextPart]) -> TokenStream {
 }
 
 /// 重建闭包(if 分支 / key 块):`Fn(&Doc, ViewId)`。
-/// `prelude` 给前端插自己的东西(`.sv` 的普通变量预克隆);空体给
+/// `prelude` 给前端插自己的东西(`.svelte` 的普通变量预克隆);空体给
 /// `|_, _| {}` 免 unused 警告
 pub fn rebuild_closure(body: TokenStream, prelude: TokenStream) -> TokenStream {
     if body.is_empty() {
