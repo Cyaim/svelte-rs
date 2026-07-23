@@ -33,6 +33,8 @@ pub enum ElemKind {
     Button,
     Checkbox,
     TextInput,
+    /// 动画叶子:建一个 `ElementKind::Animation` 节点(素材由壳侧后续注册)
+    Animation,
 }
 
 /// `let #el = __doc.create_xxx(...);`
@@ -44,6 +46,10 @@ pub fn create(el: &Ident, kind: ElemKind, label: &str) -> TokenStream {
         ElemKind::Button => quote! { let #el = __doc.create_button(#label); },
         ElemKind::Checkbox => quote! { let #el = __doc.create_checkbox(); },
         ElemKind::TextInput => quote! { let #el = __doc.create_text_input(); },
+        // 占位载荷:素材由 `sv_shell::register_*` 后经 `set_anim_data(#el, ..)` 接入
+        ElemKind::Animation => {
+            quote! { let #el = __doc.create_animation(::sv_ui::AnimData::placeholder()); }
+        }
     }
 }
 
