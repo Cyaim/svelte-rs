@@ -1949,4 +1949,95 @@ let rows = $derived(vec![count; 3]);
         );
         syn::parse_file(&code).unwrap();
     }
+
+    /// **编译器不 panic 的差分 fuzz** —— 与 sv-vap/sv-pag 同款纪律,补上调研 19
+    /// 点名的"编译器/解析器无 fuzz"缺口。
+    ///
+    /// `compile_sv` 的契约是"畸形输入 → `Err(CompileError)`,**绝不 panic**":
+    /// `.sv` 是构建期跑的,一个坏文件应当给出可读的编译错误,而不是 `unwrap`
+    /// 崩掉 build.rs(那对用户是一句没有上下文的 `thread panicked at ...`)。
+    /// 但解析器里有几十处 `unwrap`/切片,没有测试守住这条契约。
+    ///
+    /// 这里不写用例,喂**语料**:合法样本从每个字节切一刀(截断在标签中间 /
+    /// 表达式中间 / `{#if}` 与 `{/if}` 之间 / `<script>` 与 `</script>` 之间),
+    /// 外加一批手写的对抗输入(不配对的括号/标签/块、深嵌套、孤立标点)。
+    /// 全部只准返回 `Ok`/`Err`,`catch_unwind` 逮到任何 panic 就报出是哪条输入。
+    #[test]
+    fn compile_never_panics_on_malformed_input() {
+        // 一个用到多数语法面的合法样本:script/插值/if/each/事件/输入/style
+        const RICH: &str = r##"<script>
+let count = $state(0i32);
+let items = $state(vec![String::from("甲")]);
+let note = $state(String::new());
+let double = $derived(count * 2);
+</script>
+<view style="direction:column; gap:8; padding:12">
+  <text>计数 {count} · 翻倍 {double}</text>
+  <button on:click={|| count += 1}>加</button>
+  <input bind:value={note} placeholder="备注" />
+  {#if count > 3}
+    <text fg="#f00">超过三</text>
+  {:else}
+    <text>还早</text>
+  {/if}
+  {#each items as it, i (i)}
+    <text>{i}: {it}</text>
+  {/each}
+</view>
+"##;
+
+        let mut corpus: Vec<String> = Vec::new();
+        // 1) 合法样本从每个字节切一刀(截断)——注意按**字符边界**切,避免制造
+        //    非法 UTF-8(那考的是别的东西);utf8 边界用 char_indices
+        for (cut, _) in RICH.char_indices() {
+            corpus.push(RICH[..cut].to_string());
+        }
+        corpus.push(RICH.to_string());
+        // 2) 手写对抗输入:不配对 / 孤立 / 深嵌套 / 空
+        let adversarial = [
+            "",
+            "<",
+            "<view",
+            "<view>",
+            "</view>",
+            "<view></nope>",
+            "<view>{",
+            "<view>{count",
+            "<view>{#if}</view>",
+            "<view>{#if x}{/each}</view>",
+            "<view>{#each}</view>",
+            "<script>let x = $state(",
+            "<script></script><view>{#if}",
+            "{@const x = }",
+            "<button on:click={>",
+            "<input rows=\"\" />",
+            "<view style=\"",
+            "<view style=\"padding:\">x</view>",
+            "<animation src=",
+            "<Comp",
+            "<自定义>",
+            "{{{{{{{{{{",
+            "}}}}}}}}}}",
+            "<view><view><view><view><view><view>",
+            "<script>\u{0}\u{0}</script>",
+        ];
+        corpus.extend(adversarial.iter().map(|s| s.to_string()));
+
+        let mut panicked: Vec<String> = Vec::new();
+        for input in &corpus {
+            let inp = input.clone();
+            // compile_sv 只吃 &str(UnwindSafe);catch_unwind 逮住任何 panic
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = compile_sv(&inp, "c");
+            }));
+            if r.is_err() {
+                panicked.push(input.chars().take(60).collect());
+            }
+        }
+        assert!(
+            panicked.is_empty(),
+            "compile_sv 对以下畸形输入 panic 了(应返回 Err 而非崩):\n{}",
+            panicked.join("\n")
+        );
+    }
 }
