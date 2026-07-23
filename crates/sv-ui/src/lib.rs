@@ -1252,6 +1252,29 @@ impl Doc {
         self.focus(next);
     }
 
+    /// 把焦点落到 `root` 子树里**第一个可焦点**节点(树序 DFS)。焦点确实移了返回
+    /// `true`,子树里没有可焦点节点则不动、返回 `false`。
+    ///
+    /// 菜单/下拉一打开就用它把焦点落到第一项——不然方向键导航(靠"焦点在弹层内")
+    /// 不生效,用户得先按一次 Tab 才能激活。模态弹层另走焦点陷阱(`focus_next` +
+    /// `focusables` 的 modal 限定),不用这条。
+    pub fn focus_first_in(&self, root: ViewId) -> bool {
+        fn first(inner: &DocumentInner, id: ViewId) -> Option<ViewId> {
+            let n = inner.nodes.get(id)?;
+            if n.focusable {
+                return Some(id);
+            }
+            n.children.iter().find_map(|c| first(inner, *c))
+        }
+        let target = self.read(|inner| first(inner, root));
+        if let Some(id) = target {
+            self.focus(id);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Shift+Tab:焦点移到树序上一个 focusable(环绕;无焦点时落到最后一个)
     pub fn focus_prev(&self) {
         let list = self.focusables();
