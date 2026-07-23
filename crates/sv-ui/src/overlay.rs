@@ -227,6 +227,11 @@ pub fn overlay_block(
                     // 焦点陷阱入口:焦点移入弹层(focusables 已按 modal 限定)
                     doc.blur();
                     doc.focus_next();
+                } else if opts.layer == OverlayLayer::Popup {
+                    // 非模态菜单/下拉:一打开就把焦点落到**第一项**,方向键立刻可用
+                    // (否则要先按一次 Tab 才激活;真机复核发现)。子树无可焦点项则
+                    // 不动(普通非交互 popover 安全)。Tooltip 层不抢焦点。
+                    doc.focus_first_in(root);
                 }
                 *slot.borrow_mut() = Some((root, scope, prev_focus));
             }
@@ -755,6 +760,49 @@ mod tests {
     /// 嵌套模态:焦点陷阱跟着**最上层** modal 走,逐层关闭时焦点逐层回退
     /// (对话框里再弹确认框是常态)。防的退化:陷阱认第一个/任意一个 modal,
     /// 或关闭时把焦点直接丢回基础层
+    #[test]
+    fn popup_menu_focuses_first_item_on_open_and_restores_on_close() {
+        // 真机复核(2026-07-23)发现:下拉菜单打开后不自动移焦进菜单 → 方向键导航
+        // 要先按一次 Tab 才生效。修复后:非模态 Popup 一打开就把焦点落到第一项。
+        let doc = Doc::new();
+        let opener = doc.create_button("打开菜单");
+        doc.append(doc.root(), opener);
+        let items: Rc<RefCell<Vec<ViewId>>> = Rc::default();
+        let it = items.clone();
+        let open = state(false);
+        let (_, scope) = create_root(|| {
+            overlay_block(
+                &doc,
+                move || open.get(),
+                || Anchor::WindowCenter,
+                OverlayOpts {
+                    layer: OverlayLayer::Popup,
+                    modal: false,
+                    close: CloseBehavior::OnClickOutside,
+                    ..Default::default()
+                },
+                move |d, root| {
+                    for label in ["新建", "打开", "保存"] {
+                        let b = d.create_button(label);
+                        d.append(root, b);
+                        it.borrow_mut().push(b);
+                    }
+                },
+            );
+        });
+        doc.focus(opener);
+        open.set(true);
+        let first_item = items.borrow()[0];
+        assert_eq!(
+            doc.focused(),
+            Some(first_item),
+            "菜单打开应把焦点落到第一项(否则方向键要先 Tab 才生效)"
+        );
+        open.set(false);
+        assert_eq!(doc.focused(), Some(opener), "关闭菜单应恢复原焦点");
+        scope.dispose();
+    }
+
     #[test]
     fn nested_modal_traps_focus_in_topmost_and_restores_layer_by_layer() {
         let doc = Doc::new();
