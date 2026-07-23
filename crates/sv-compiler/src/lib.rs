@@ -1202,6 +1202,39 @@ let note = $state(String::new());
     }
 
     #[test]
+    fn overlay_aria_label_sets_accessible_name() {
+        // 真机 C 复核发现:模态对话框读屏只读按钮、不读标题(Dialog 容器无 accessible
+        // name)。修复:<overlay aria-label={...}> 给弹层根发 set_accessible_label,
+        // a11y 层据此把它作为 Dialog 节点的名称播报。这里验发射;且 title 与正文里的
+        // {title} 争用同一普通变量时不该编译失败(借用而非 move)。
+        let src = r#"<script>
+let open = $state(true);
+let title = String::from("确认删除?");
+</script>
+<view>
+  <overlay open={open} anchor="center" modal aria-label={title}>
+    <text>{title}</text>
+    <text>正文</text>
+  </overlay>
+</view>
+"#;
+        let code = compile_sv(src, "c").expect("应编译成功(title 借用不与 {title} 冲突)");
+        assert!(
+            code.contains("set_accessible_label"),
+            "overlay 的 aria-label 应发 set_accessible_label:\n{code}"
+        );
+        syn::parse_file(&code).unwrap();
+
+        // 未知属性仍报错,且错误信息列出 aria-label
+        let err = compile_sv(
+            "<script>let o=$state(true);</script><view><overlay open={o} bogus=\"x\"><text>a</text></overlay></view>",
+            "c",
+        )
+        .expect_err("未知 overlay 属性应报错");
+        assert!(err.message.contains("aria-label"), "{}", err.message);
+    }
+
+    #[test]
     fn animation_compiles() {
         // <animation> 是叶子:建 Animation 节点,认 src/loop/autoplay/label
         let src = r#"<script></script>

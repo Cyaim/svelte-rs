@@ -259,9 +259,21 @@ pub fn overlay_block(
 
 /// tooltip 原语(调研 25 O5):悬停 `delay_ms` 后显示,离开即隐;
 /// "悬停代数计数"防延时期间进出错位(egui tooltip_delay 同构,
-/// grace_time 列 P2)。挂 Tooltip 层:恒最上、不可命中
-pub fn tooltip(doc: &Doc, target: ViewId, delay_ms: u64, build: impl Fn(&Doc, ViewId) + 'static) {
+/// grace_time 列 P2)。挂 Tooltip 层:恒最上、不可命中。
+///
+/// `description` 是 tooltip 的**无障碍替身**:视觉 tooltip 屏幕阅读器读不到,所以把
+/// 提示文本设成**目标控件的 aria-description**,读屏聚焦目标时补读这一句(真机 C
+/// 复核发现 tooltip 读不出)。不需要无障碍描述时传 `""`。
+pub fn tooltip(
+    doc: &Doc,
+    target: ViewId,
+    delay_ms: u64,
+    description: &str,
+    build: impl Fn(&Doc, ViewId) + 'static,
+) {
     use std::cell::Cell;
+    // 提示文本挂到目标控件上,读屏聚焦即可播报(视觉浮层它读不到)
+    doc.set_accessible_description(target, description);
     let open = sv_reactive::state(false);
     let generation: Rc<Cell<u64>> = Rc::new(Cell::new(0));
 
@@ -760,6 +772,30 @@ mod tests {
     /// 嵌套模态:焦点陷阱跟着**最上层** modal 走,逐层关闭时焦点逐层回退
     /// (对话框里再弹确认框是常态)。防的退化:陷阱认第一个/任意一个 modal,
     /// 或关闭时把焦点直接丢回基础层
+    #[test]
+    fn tooltip_sets_target_accessible_description() {
+        // 真机 C 复核发现:tooltip 内容读屏读不出。修复:tooltip 把提示文本设成目标
+        // 控件的 aria-description,读屏聚焦目标即补读(视觉浮层它读不到)。
+        let doc = Doc::new();
+        let btn = doc.create_button("悬停看提示");
+        doc.append(doc.root(), btn);
+        super::tooltip(&doc, btn, 400, "悬停 400ms 出现的提示", |_, _| {});
+        let desc = doc.read(|i| i.nodes[btn].accessible_description.clone());
+        assert_eq!(
+            desc.as_deref(),
+            Some("悬停 400ms 出现的提示"),
+            "tooltip 应把提示设成目标的无障碍描述"
+        );
+        // 空描述不设(不需要无障碍替身时)
+        let btn2 = doc.create_button("无描述");
+        doc.append(doc.root(), btn2);
+        super::tooltip(&doc, btn2, 400, "", |_, _| {});
+        assert_eq!(
+            doc.read(|i| i.nodes[btn2].accessible_description.clone()),
+            None
+        );
+    }
+
     #[test]
     fn popup_menu_focuses_first_item_on_open_and_restores_on_close() {
         // 真机复核(2026-07-23)发现:下拉菜单打开后不自动移焦进菜单 → 方向键导航

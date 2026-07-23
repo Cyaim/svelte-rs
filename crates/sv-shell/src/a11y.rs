@@ -145,6 +145,10 @@ fn collect(doc: &Doc, placed: &[Placed], scale: f32) -> (Vec<(NodeId, Node)>, No
                     }
                 }
             }
+            // 无障碍描述(aria-description):读屏读完名称后补读(tooltip 的替身)
+            if let Some(d) = &n.accessible_description {
+                node.set_description(d.clone());
+            }
             if n.kind == ElementKind::Checkbox {
                 node.set_toggled(if n.checked {
                     Toggled::True

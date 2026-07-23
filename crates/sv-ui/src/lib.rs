@@ -495,6 +495,10 @@ pub struct ViewNode {
     pub content_override: Option<(f32, f32)>,
     /// 无障碍名称覆盖(`aria-label`;None 时语义树取 text;调研 24 §4.1)
     pub accessible_label: Option<String>,
+    /// 无障碍描述(`aria-description`):读屏读完名称后补读的一句。tooltip 把提示
+    /// 文本设到目标控件上,读屏聚焦目标时就能播报——tooltip 的视觉内容读屏读不到,
+    /// 这条是它的无障碍替身(真机 C 复核发现 tooltip 读不出)。
+    pub accessible_description: Option<String>,
 }
 
 pub struct DocumentInner {
@@ -550,6 +554,7 @@ impl Doc {
             on_scroll: None,
             content_override: None,
             accessible_label: None,
+            accessible_description: None,
         });
         Doc(Rc::new(RefCell::new(DocumentInner {
             nodes,
@@ -627,6 +632,23 @@ impl Doc {
         self.bump(dirty::DirtyItem::Paint);
     }
 
+    /// 设无障碍描述(`aria-description`)。tooltip 用它把提示文本挂到目标控件上,
+    /// 读屏聚焦目标时补读这一句(视觉 tooltip 读屏读不到)。空串清除。
+    pub fn set_accessible_description(&self, id: ViewId, desc: &str) {
+        {
+            let mut inner = self.0.borrow_mut();
+            let Some(n) = inner.nodes.get_mut(id) else {
+                return;
+            };
+            let new = (!desc.is_empty()).then(|| desc.to_string());
+            if n.accessible_description == new {
+                return;
+            }
+            n.accessible_description = new;
+        }
+        self.bump(dirty::DirtyItem::Paint);
+    }
+
     /// 本树的身份标识(布局/绘制缓存键;同一棵树的所有 Doc 克隆同值)
     pub fn identity(&self) -> usize {
         Rc::as_ptr(&self.0) as usize
@@ -678,6 +700,7 @@ impl Doc {
             on_scroll: None,
             content_override: None,
             accessible_label: None,
+            accessible_description: None,
         });
         // **游离节点**:还没 append,不在任何父的 children 里,布局上什么都不做。
         // 显式定为 Paint 而不是漏掉,是因为一次 `{#each}` 建表会 create+append
