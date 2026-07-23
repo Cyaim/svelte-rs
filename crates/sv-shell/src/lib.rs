@@ -38,8 +38,8 @@ pub use paint::{
 pub use render::{
     Layout, OverlayRegion, Placed, Rect, ScrollArea, hit_click_target, ime_caret_rect,
     input_caret_at, input_caret_line_move, layout_full_cached, layout_tree, layout_tree_full,
-    overlay_click_gate, paint_scrollbars, paint_tree, render_frame, route_wheel, route_wheel_with,
-    scrollbar_drag_offset, scrollbar_grab, scrollbar_thumb,
+    overlay_click_gate, paint_scrollbars, paint_tree, render_frame, render_into, route_wheel,
+    route_wheel_with, scrollbar_drag_offset, scrollbar_grab, scrollbar_thumb,
 };
 pub use text::{
     FontHandle, caret_index_at, caret_index_at_point, caret_rect, caret_x, line_height,
@@ -213,6 +213,9 @@ struct App {
     /// 上一帧的 (版本, 宽, 高, scale位, 光标闪烁相):静止帧跳过重绘制。
     /// **闪烁相**只在有文本框获焦时进 key(否则每 530ms 白翻一次 key 触发重绘)
     last_frame_key: Option<(u64, u32, u32, u32, bool)>,
+    /// 常驻 framebuffer(CPU 后端):每帧复用,省掉每帧 W×H×4 的分配/释放
+    /// (脏矩形地基;尺寸变了才重分配)
+    frame_buf: Option<tiny_skia::Pixmap>,
     /// SV_SHOW_FPS=1:连续重绘 + 每 60 帧打印帧率(基准/诊断用)
     show_fps: bool,
     fps_frames: u32,
@@ -273,11 +276,26 @@ impl App {
         self.last_frame_key = Some(frame_key);
         match &mut ws.presenter {
             Presenter::Cpu { surface, .. } => {
-                // 直接用 render_frame 算好的那一份。以前这里又调了一次
-                // layout_full_cached —— 版本号相同、缓存命中,却仍然深拷了一整份
-                // Layout(30k 档 1.5MB)。**每帧两次白拷,藏在"命中"路径里**
-                let (pixmap, layout) = render_frame(&self.doc, size.width, size.height, scale);
-                self.layout = layout;
+                // 复用常驻 framebuffer(脏矩形地基):尺寸没变就重画进旧缓冲,省掉每帧
+                // 一次 W×H×4 的分配/释放(60fps 滚动时的真实 churn);尺寸变了才重分配。
+                let need_new = self
+                    .frame_buf
+                    .as_ref()
+                    .is_none_or(|p| p.width() != size.width || p.height() != size.height);
+                if need_new {
+                    self.frame_buf = tiny_skia::Pixmap::new(size.width.max(1), size.height.max(1));
+                }
+                let Some(pixmap) = self.frame_buf.as_mut() else {
+                    // 分配失败:丢帧,清帧键让下一帧重试(与 present 失败同款降级)
+                    log::warn!(
+                        "sv-shell: {}×{} framebuffer 分配失败,丢帧",
+                        size.width,
+                        size.height
+                    );
+                    self.last_frame_key = None;
+                    return;
+                };
+                self.layout = render_into(&self.doc, pixmap, scale);
 
                 let (Some(w), Some(h)) =
                     (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
@@ -985,6 +1003,7 @@ pub fn run_app(
         ime_allowed: false,
         epoch: std::time::Instant::now(),
         caret_blink_reset: std::time::Instant::now(),
+        frame_buf: None,
         last_frame_key: None,
         show_fps: std::env::var("SV_SHOW_FPS").is_ok_and(|v| v == "1"),
         fps_frames: 0,
@@ -1254,6 +1273,35 @@ mod tests {
             on.cmds.len(),
             off.cmds.len() + 1,
             "亮相应恰好比灭相多一条命令(光标竖线)"
+        );
+    }
+
+    /// 持久 framebuffer(脏矩形地基):复用缓冲的渲染必须与新分配**逐像素相同**,
+    /// 且重复画进同一缓冲**不残留**旧内容(清屏正确)。这是"没有画面残留"的守卫。
+    #[test]
+    fn render_into_matches_render_frame_and_leaves_no_residue() {
+        let doc = Doc::new();
+        let (txt, _scope) = create_root(|| {
+            let t = doc.create_text("持久缓冲 abc");
+            doc.append(doc.root(), t);
+            t
+        });
+        let (w, h, scale) = (200u32, 80u32, 1.0f32);
+
+        // 复用缓冲 == 新分配
+        let (fresh, _) = crate::render::render_frame(&doc, w, h, scale);
+        let mut reused = tiny_skia::Pixmap::new(w, h).unwrap();
+        crate::render::render_into(&doc, &mut reused, scale);
+        assert_eq!(fresh.data(), reused.data(), "复用缓冲应与新分配逐像素相同");
+
+        // 换内容后画进**同一旧缓冲** → 应等于该内容的新渲染(旧内容被清掉,无残留)
+        doc.set_text(txt, "换了内容 XYZ 更长的一段");
+        let (fresh2, _) = crate::render::render_frame(&doc, w, h, scale);
+        crate::render::render_into(&doc, &mut reused, scale);
+        assert_eq!(
+            fresh2.data(),
+            reused.data(),
+            "内容变更后复用旧缓冲不应残留上一帧"
         );
     }
 
