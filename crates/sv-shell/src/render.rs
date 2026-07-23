@@ -1409,13 +1409,30 @@ pub fn paint_tree(doc: &Doc, placed: &[Placed], painter: &mut dyn Painter, scale
     });
 }
 
-/// 渲染一帧:布局(逻辑坐标)+ 绘制(物理坐标)。返回像素与命中测试用的布局。
-/// 布局是 `Rc`:调用方多半还要再存一份(事件循环的命中测试),不该再拷一次
-pub fn render_frame(doc: &Doc, phys_w: u32, phys_h: u32, scale: f32) -> (Pixmap, Rc<Layout>) {
-    let logical_w = phys_w as f32 / scale;
-    let logical_h = phys_h as f32 / scale;
+/// 把一帧画进**已有的** pixmap(尺寸由 pixmap 决定):清屏 + 布局 + 绘制。
+/// 返回命中测试用的布局。
+///
+/// **这是"持久 framebuffer"的入口**(脏矩形地基,调研 22/DESIGN.md 绘制端瓶颈):
+/// 事件循环把 pixmap 常驻、每帧复用它,省掉每帧一次约 W×H×4 字节的分配 + 释放
+/// (60fps 滚动时那是实打实的分配churn)。产物与 [`render_frame`] **逐像素相同**
+/// (仍全屏清 + 全量重绘,只是不重新分配缓冲)——脏矩形的"只重画 damage"是下一步。
+pub fn render_into(doc: &Doc, pixmap: &mut Pixmap, scale: f32) -> Rc<Layout> {
+    let logical_w = pixmap.width() as f32 / scale;
+    let logical_h = pixmap.height() as f32 / scale;
     let layout = layout_full_cached(doc, logical_w, logical_h);
+    pixmap.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+    let mut painter = TinySkiaPainter::new(pixmap);
+    paint_tree(doc, &layout.placed, &mut painter, scale);
+    paint_scrollbars(doc, &layout.scroll_areas, &mut painter, scale);
+    layout
+}
 
+/// 渲染一帧:布局(逻辑坐标)+ 绘制(物理坐标)。返回像素与命中测试用的布局。
+/// 布局是 `Rc`:调用方多半还要再存一份(事件循环的命中测试),不该再拷一次。
+///
+/// **每次分配新 pixmap** —— 离屏(`--png`)与测试用它(一次性);事件循环用
+/// [`render_into`] 复用常驻缓冲。
+pub fn render_frame(doc: &Doc, phys_w: u32, phys_h: u32, scale: f32) -> (Pixmap, Rc<Layout>) {
     // 分配失败(尺寸超大/内存耗尽)退化成 1×1:调用方拿到的是一帧无用像素,
     // 而不是一个崩掉的进程(R4 去 panic,调研 25 §3.4)
     let mut pixmap = match Pixmap::new(phys_w.max(1), phys_h.max(1)) {
@@ -1425,11 +1442,7 @@ pub fn render_frame(doc: &Doc, phys_w: u32, phys_h: u32, scale: f32) -> (Pixmap,
             Pixmap::new(1, 1).expect("1×1 pixmap 分配不可能失败")
         }
     };
-    pixmap.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
-    let mut painter = TinySkiaPainter::new(&mut pixmap);
-    paint_tree(doc, &layout.placed, &mut painter, scale);
-    paint_scrollbars(doc, &layout.scroll_areas, &mut painter, scale);
-
+    let layout = render_into(doc, &mut pixmap, scale);
     (pixmap, layout)
 }
 
