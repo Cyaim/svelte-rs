@@ -7,6 +7,7 @@ $props {
 
 <view>
   <overlay open={open} anchor="center" modal ondismiss={|| open = false}
+           aria-label={title}
            style="padding:16; gap:12; bg:#ffffff; border:2px solid #d0d0dd; radius:10; min-width: 260">
     <text font-size="20">{title}</text>
     <text fg="#666677">这是一个模态对话框:底层不可点,Tab 焦点被困在框内。</text>

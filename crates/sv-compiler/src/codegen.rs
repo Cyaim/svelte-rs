@@ -1498,6 +1498,9 @@ impl Cg<'_> {
         let mut close: Option<String> = None;
         let mut dismiss_ts = quote! { None };
         let mut style_setters = TokenStream::new();
+        // 弹层根的无障碍名称(对话框/菜单靠它被读屏播报;真机 C 复核发现缺它)。
+        // 目标是弹层根 `__parent`(build 闭包里),故在 body 内发射。
+        let mut aria_ts = TokenStream::new();
         for attr in attrs {
             match attr.name.as_str() {
                 "open" => {
@@ -1586,12 +1589,26 @@ impl Cg<'_> {
                     };
                     style_setters.extend(style::parse_style(self.source, value, *offset)?);
                 }
+                // 无障碍名称:给对话框/菜单一个读屏能播报的标题(静态串或 {表达式})。
+                // **非反应式 + 借用**:标题在弹层生命周期内基本不变,且弹层根 `__parent`
+                // 与正文里的 `{title}` 会争用同一个普通变量——用 `&(…).to_string()` 只
+                // momentary 借用(不 move),正文闭包随后照常取用。反应式 `move` 闭包会
+                // 永久捕获它,和正文冲突(真机 C 复核时踩到)。
+                "aria-label" => {
+                    let val = match &attr.value {
+                        AttrValue::Str { value, .. } => quote! { #value },
+                        AttrValue::Expr(e) => self.expr(e, scope, false)?.to_token_stream(),
+                    };
+                    aria_ts = quote! {
+                        __doc.set_accessible_label(__parent, &(#val).to_string());
+                    };
+                }
                 other => {
                     return Err(CompileError::at_offset(
                         self.source,
                         attr.offset,
                         format!(
-                            "overlay 支持 open/anchor/gap/modal/close/ondismiss/style,收到 `{other}`"
+                            "overlay 支持 open/anchor/gap/modal/close/ondismiss/style/aria-label,收到 `{other}`"
                         ),
                     ));
                 }
@@ -1638,6 +1655,7 @@ impl Cg<'_> {
         let children_ts = self.emit_nodes(children, scope)?;
         let body = quote! {
             __doc.update_style(__parent, |s| { #style_setters });
+            #aria_ts
             #children_ts
         };
         let build = self.rebuild_closure(body, scope);
