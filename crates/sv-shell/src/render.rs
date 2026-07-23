@@ -1077,6 +1077,17 @@ fn input_scroll_x(display: &str, px: f32, caret_byte: usize, content_w: f32) -> 
     (caret - (content_w - 2.0)).max(0.0)
 }
 
+thread_local! {
+    // 光标闪烁的"亮"相。事件循环按时间设(见 sv-shell 的 about_to_wait/redraw);
+    // **默认恒亮** —— 离屏渲染(--png)与测试不设它,光标照常画(与原行为一致)。
+    static CARET_VISIBLE: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+/// 设光标闪烁相(仅事件循环调用)。`true` = 亮(画光标),`false` = 灭(不画)。
+pub fn set_caret_visible(on: bool) {
+    CARET_VISIBLE.with(|v| v.set(on));
+}
+
 /// 共享绘制遍历:对任意 Painter 后端发出同一命令流。
 /// 这是"可切换渲染后端"的支点(调研 14):后端只实现 Painter 三个动词
 pub fn paint_tree(doc: &Doc, placed: &[Placed], painter: &mut dyn Painter, scale: f32) {
@@ -1346,8 +1357,9 @@ pub fn paint_tree(doc: &Doc, placed: &[Placed], painter: &mut dyn Painter, scale
                         );
                     }
 
-                    // 光标竖线(仅焦点时):多行按行定位,单行占满内容高
-                    if focused {
+                    // 光标竖线(仅焦点时 + 闪烁"亮"相):多行按行定位,单行占满内容高。
+                    // CARET_VISIBLE 由事件循环按时间相位设(离屏/测试默认恒亮,不受影响)
+                    if focused && CARET_VISIBLE.with(|v| v.get()) {
                         let (cy, ch) = if input.multiline {
                             (text_y + caret_ly * scale, caret_lh * scale)
                         } else {

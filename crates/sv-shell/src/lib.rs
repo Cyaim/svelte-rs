@@ -207,8 +207,12 @@ struct App {
     /// IME 会话开关镜像(焦点落在 accepts_text 节点时开;避免重复系统调用)
     ime_allowed: bool,
     epoch: std::time::Instant,
-    /// 上一帧的 (版本, 宽, 高, scale位):静止帧跳过重绘制
-    last_frame_key: Option<(u64, u32, u32, u32)>,
+    /// 光标闪烁计时的**重置点**:每次编辑活动(打字/移光标/点击)刷新它,让光标
+    /// 活动后先"亮"再开始闪(浏览器/系统输入框同款手感)
+    caret_blink_reset: std::time::Instant,
+    /// 上一帧的 (版本, 宽, 高, scale位, 光标闪烁相):静止帧跳过重绘制。
+    /// **闪烁相**只在有文本框获焦时进 key(否则每 530ms 白翻一次 key 触发重绘)
+    last_frame_key: Option<(u64, u32, u32, u32, bool)>,
     /// SV_SHOW_FPS=1:连续重绘 + 每 60 帧打印帧率(基准/诊断用)
     show_fps: bool,
     fps_frames: u32,
@@ -246,7 +250,22 @@ impl App {
         let scale = ws.window.scale_factor() as f32;
         // 静止帧短路:版本/尺寸/缩放全没变 → 不重绘制(呈现内容仍在 surface 上)。
         // 细粒度更新模型下"静止"是常态,这一步把静止功耗归零
-        let frame_key = (self.doc.version(), size.width, size.height, scale.to_bits());
+        // 光标闪烁相:有文本框获焦(ime_allowed 恰是这个)时按 530ms 周期明灭;
+        // 无焦点时恒"亮"(不进 key、不额外重绘)。灭相时不画光标(见 render.rs)。
+        const CARET_BLINK_MS: u128 = 530;
+        let caret_phase = if self.ime_allowed {
+            (self.caret_blink_reset.elapsed().as_millis() / CARET_BLINK_MS).is_multiple_of(2)
+        } else {
+            true
+        };
+        render::set_caret_visible(caret_phase);
+        let frame_key = (
+            self.doc.version(),
+            size.width,
+            size.height,
+            scale.to_bits(),
+            caret_phase,
+        );
         let unchanged = self.last_frame_key == Some(frame_key);
         if unchanged && !animating && !self.show_fps {
             return;
@@ -679,6 +698,32 @@ impl ApplicationHandler<UserEvent> for App {
         }
     }
 
+    /// 事件处理完、循环即将挂起时:光标闪烁的**功耗感知调度**。
+    ///
+    /// 只在有文本框获焦(`ime_allowed`)时安排一个到"下一次明灭翻转"的定时唤醒
+    /// (约每 530ms 一次,不是 60fps 空转);翻转到了就请求一帧把光标明灭切过来。
+    /// 无文本框获焦则恢复默认 `Wait`(零功耗静止,动画另靠 request_redraw 驱动)。
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        use winit::event_loop::ControlFlow;
+        if !self.ime_allowed {
+            event_loop.set_control_flow(ControlFlow::Wait);
+            return;
+        }
+        const CARET_BLINK_MS: u128 = 530;
+        let elapsed = self.caret_blink_reset.elapsed().as_millis();
+        let phase_now = (elapsed / CARET_BLINK_MS).is_multiple_of(2);
+        // 相位自上帧翻转 → 请求重绘把光标明灭切过来(定时唤醒本身不重绘)
+        if self.last_frame_key.map(|k| k.4) != Some(phase_now)
+            && let Some(ws) = &self.win
+        {
+            ws.window.request_redraw();
+        }
+        // 安排下一次翻转时唤醒
+        let next_ms = ((elapsed / CARET_BLINK_MS) + 1) * CARET_BLINK_MS;
+        let wake = self.caret_blink_reset + std::time::Duration::from_millis(next_ms as u64);
+        event_loop.set_control_flow(ControlFlow::WaitUntil(wake));
+    }
+
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         // 每个 winit 事件先过 AccessKit 适配器(官方要求的接线形态)
         if let Some(ws) = &mut self.win {
@@ -767,6 +812,8 @@ impl ApplicationHandler<UserEvent> for App {
                 is_synthetic,
                 ..
             } => {
+                // 编辑活动 → 光标先"亮"再重新开始闪(打字时不该闪没)
+                self.caret_blink_reset = std::time::Instant::now();
                 // is_synthetic:X11 窗口获焦时合成的按下事件,不过滤会误触发
                 if is_synthetic {
                     return;
@@ -791,6 +838,7 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::Ime(ime) => {
+                self.caret_blink_reset = std::time::Instant::now();
                 // 预编辑期间 winit 抑制 KeyboardInput,与编辑段无竞争
                 if let Some(id) = self.doc.focused()
                     && self
@@ -811,6 +859,8 @@ impl ApplicationHandler<UserEvent> for App {
                 button: MouseButton::Left,
                 ..
             } => {
+                // 点击可能移动光标 → 重置闪烁,光标先亮
+                self.caret_blink_reset = std::time::Instant::now();
                 // :active / 按压回调:先派发 pointer_down,再派发点击
                 let Some(ws) = &self.win else { return };
                 let scale = ws.window.scale_factor();
@@ -934,6 +984,7 @@ pub fn run_app(
         mods: ModifiersState::empty(),
         ime_allowed: false,
         epoch: std::time::Instant::now(),
+        caret_blink_reset: std::time::Instant::now(),
         last_frame_key: None,
         show_fps: std::env::var("SV_SHOW_FPS").is_ok_and(|v| v == "1"),
         fps_frames: 0,
@@ -1174,6 +1225,36 @@ mod tests {
         assert_eq!(e.text.as_deref(), Some("s"));
         // 漏配键静默丢弃
         assert!(map_key(&WKey::Named(NamedKey::CapsLock), None, false, none).is_none());
+    }
+
+    /// 光标闪烁门:获焦输入框在"亮"相画光标竖线,"灭"相不画。
+    /// 差值恰好一条命令(那条竖线),证明闪烁只切光标、不动别的。
+    #[test]
+    fn caret_blink_gate_toggles_only_the_caret() {
+        let doc = Doc::new();
+        let (input, _scope) = create_root(|| {
+            let inp = doc.create_text_input();
+            doc.append(doc.root(), inp);
+            doc.set_input_value(inp, "abc");
+            inp
+        });
+        doc.focus(input);
+        let placed = layout_tree(&doc, 200.0, 60.0);
+
+        crate::render::set_caret_visible(true);
+        let mut on = crate::RecordingPainter::default();
+        crate::render::paint_tree(&doc, &placed, &mut on, 1.0);
+
+        crate::render::set_caret_visible(false);
+        let mut off = crate::RecordingPainter::default();
+        crate::render::paint_tree(&doc, &placed, &mut off, 1.0);
+
+        crate::render::set_caret_visible(true); // 复原默认(离屏/别的测试恒亮)
+        assert_eq!(
+            on.cmds.len(),
+            off.cmds.len() + 1,
+            "亮相应恰好比灭相多一条命令(光标竖线)"
+        );
     }
 
     /// 焦点环金样:获焦节点绘制后应多出一条外扩 2px 的 StrokeRect,
