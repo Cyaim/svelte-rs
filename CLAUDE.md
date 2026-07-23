@@ -7,9 +7,9 @@ Svelte 风格 Rust 跨平台桌面 UI 库(Win/Linux/macOS/鸿蒙)的探索原型
 - `docs/DESIGN.md` — 架构分层、ADR 决策记录、路线图、风险清单。改架构前先读它。
 - `docs/plans/open-issues.md` — **未了结问题登记**(已知缺口、未查明的回归、
   以及反复踩到的几类方法论错误)。动手前扫一眼,免得重踩。
-- `docs/research/` — 26 份联网核实的调研报告(2026-07),DESIGN.md 的依据。
+- `docs/research/` — 27 份联网核实的调研报告(2026-07),DESIGN.md 的依据。
   商用路线图见 DESIGN.md §5(R1–R5 分期,落地方案 = 调研 20–25;
-  调研 26 = sv-arco 组件库生态探索)。
+  调研 26 = sv-arco 组件库生态探索;调研 27 = 商用距离复盘,接调研 19)。
 - `docs/en/` + `docs/zh-CN/` — 中英双语指南(互为镜像,改一边必须同步另一边);
   导航在 `docs/README.md` / `docs/README.zh-CN.md`。
 

@@ -127,10 +127,20 @@ pub fn register_pag_webp(seq: &sv_pag::BitmapSequence) -> Option<u64> {
     register_pag(seq, decode_webp)
 }
 
-/// WebP 字节 → [`sv_pag::DecodedImage`](直通 RGBA8)。解不了返回 `None`。
+/// 单块解码后的最大边(像素)。**这是对不可信输入的护栏**:WebP 的宽高来自
+/// 文件头,一个畸形块声称 65535×65535 会让下面 `output_buffer_size` 算出约 16GB,
+/// `vec![0u8; …]` 直接把进程 OOM 掉——那是拒绝服务,不是"解不了"。8192 与 vello
+/// 图集上限同量级,UI 动画帧远用不到;超了当畸形拒绝(返回 None)。
+const MAX_WEBP_DIM: u32 = 8192;
+
+/// WebP 字节 → [`sv_pag::DecodedImage`](直通 RGBA8)。解不了 / 超尺寸返回 `None`。
 fn decode_webp(bytes: &[u8]) -> Option<sv_pag::DecodedImage> {
     let mut dec = image_webp::WebPDecoder::new(std::io::Cursor::new(bytes)).ok()?;
     let (width, height) = dec.dimensions();
+    // 分配前先卡尺寸:不可信的巨大宽高会变成 GB 级分配(内存炸弹)
+    if width == 0 || height == 0 || width > MAX_WEBP_DIM || height > MAX_WEBP_DIM {
+        return None;
+    }
     let mut buf = vec![0u8; dec.output_buffer_size()?];
     dec.read_image(&mut buf).ok()?;
     // has_alpha → 已是 RGBA;否则是 RGB,补 alpha=255 铺成 RGBA
@@ -557,6 +567,52 @@ mod tests {
             }],
         };
         assert!(register_pag_webp(&bad).is_none(), "非 WebP 应整段拒绝");
+    }
+
+    #[test]
+    fn webp_decode_never_panics_on_malformed_input() {
+        // decode_webp 吃的是 .pag 里的**不可信** WebP 字节。契约:解不了返回 None,
+        // **绝不 panic、绝不内存炸弹**。这里喂对抗语料验证(与 sv-pag/sv-vap 同款纪律)。
+        fn webp(color: [u8; 4], w: u32, h: u32) -> Vec<u8> {
+            let rgba: Vec<u8> = (0..w * h).flat_map(|_| color).collect();
+            let mut out = Vec::new();
+            image_webp::WebPEncoder::new(std::io::Cursor::new(&mut out))
+                .encode(&rgba, w, h, image_webp::ColorType::Rgba8)
+                .expect("编码应成功");
+            out
+        }
+
+        let valid = webp([1, 2, 3, 255], 4, 4);
+        let mut corpus: Vec<Vec<u8>> = Vec::new();
+        // 1) 合法 WebP 从每个字节切一刀(截断的头/块)
+        for cut in 0..valid.len() {
+            corpus.push(valid[..cut].to_vec());
+        }
+        // 2) 对抗:空、乱码、只有 RIFF 头、伪造巨大尺寸的 RIFF、非 WebP 魔数
+        corpus.push(Vec::new());
+        corpus.push(b"not a webp at all".to_vec());
+        corpus.push(b"RIFF".to_vec());
+        corpus.push(b"RIFF\xff\xff\xff\xffWEBP".to_vec());
+        corpus.push(b"RIFF\x00\x00\x00\x00WEBPVP8 ".to_vec());
+        // 伪造一个"尺寸巨大"的 RIFF/WEBP 头(内存炸弹意图),必须被尺寸护栏或解码器挡住
+        corpus.push(b"RIFFxxxxWEBPVP8L\xff\xff\xff\x0f".to_vec());
+        // 3) 字节翻转变异(在合法基础上逐字节 XOR 0xFF 造畸形)
+        for i in (0..valid.len()).step_by(3) {
+            let mut m = valid.clone();
+            m[i] ^= 0xFF;
+            corpus.push(m);
+        }
+
+        for (idx, bytes) in corpus.iter().enumerate() {
+            let b = bytes.clone();
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = decode_webp(&b); // 只准 Some/None,不准 panic/OOM
+            }));
+            assert!(r.is_ok(), "decode_webp 对第 {idx} 条畸形 WebP panic 了");
+        }
+
+        // 合法的仍解得出来(护栏没误伤正常尺寸)
+        assert!(decode_webp(&valid).is_some(), "4×4 合法 WebP 应能解");
     }
 
     #[test]
