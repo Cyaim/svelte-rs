@@ -22,7 +22,7 @@ text { color: #223344; }   /* element rule: baseline for every <text> in this co
 </style>
 ```
 
-Rules are **scoped per component**, like Svelte: `.btn` in `Stepper.sv` and `.btn` in `Showcase.sv` are different stylesheets and never collide. Element rules apply below class rules (the familiar "element < class" intuition, achieved by application order, not specificity — see [Cascade](#cascade-declaration-order-not-specificity)). Defining the same rule twice in one component is a compile error.
+Rules are **scoped per component**, like Svelte: `.btn` in `Stepper.svelte` and `.btn` in `Showcase.svelte` are different stylesheets and never collide. Element rules apply below class rules (the familiar "element < class" intuition, achieved by application order, not specificity — see [Cascade](#cascade-declaration-order-not-specificity)). Defining the same rule twice in one component is a compile error.
 
 ## Applying styles in markup
 
@@ -153,7 +153,7 @@ The full accounting is the 91-item gap matrix in [../CSS-SUPPORT.md](../CSS-SUPP
 
 C2 completion is defined as the "seamless migration line" for Svelte developers (44/91 implemented, covering the high-frequency surface).
 
-To see all of the above running: `cargo run -p showcase` (or `-- --png out.png` for an offscreen frame). Style sources: `examples/showcase/src/Showcase.sv`, `Card.sv`, `Stepper.sv`, `TaskRow.sv`.
+To see all of the above running: `cargo run -p showcase` (or `-- --png out.png` for an offscreen frame). Style sources: `examples/showcase/src/Showcase.svelte`, `Card.svelte`, `Stepper.svelte`, `TaskRow.svelte`.
 
 ## See also
 

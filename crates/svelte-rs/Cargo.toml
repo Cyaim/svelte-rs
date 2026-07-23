@@ -1,0 +1,23 @@
+[package]
+name = "svelte-rs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+authors.workspace = true
+description = "Svelte 风格的 Rust 跨平台桌面 UI 库:一个入口 re-export 整个 sv-* 生态"
+
+[dependencies]
+sv-reactive = { workspace = true }
+sv-ui = { workspace = true }
+sv-macro = { workspace = true }
+sv-shell = { workspace = true }
+# 编译器只在 build.rs 用,单独走 `svelte-rs::compiler` / 直接依赖 sv-compiler。
+# 放这里让 `svelte_rs::compiler::build("src")` 也能用,但它拉 syn/prettyplease,
+# 想瘦身的运行时依赖可只依赖 sv-* 子 crate。
+sv-compiler = { workspace = true }

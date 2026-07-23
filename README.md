@@ -18,7 +18,7 @@ effect(move || println!("{}", double.get()));  // $effect
 count.set(1);                                  // precise trigger, no diff
 ```
 
-Or the same thing in a `.sv` single-file component — real Svelte template syntax,
+Or the same thing in a `.svelte` single-file component — real Svelte template syntax,
 real Rust expressions (the compiler rewrites `count += 1` into handle operations):
 
 ```text
@@ -38,7 +38,7 @@ let double = $derived(count * 2);
 
 - **Runes kernel in Rust** — `state` / `derived` (writable) / `effect` / `batch` /
   `untrack` / context, push-pull three-state dirty marking, effect ownership tree.
-- **Two compiler frontends, one target** — a `view!` proc-macro and a `.sv`
+- **Two compiler frontends, one target** — a `view!` proc-macro and a `.svelte`
   single-file-component compiler (build.rs integration) both emit calls to the same
   scene-tree binding primitives.
 - **Real CSS, compiled** — a closed subset of actual CSS syntax (`:hover`, `:root`
@@ -56,7 +56,7 @@ let double = $derived(count * 2);
 cargo test                    # run the whole test suite
 cargo run -p showcase         # feature tour (recommended first stop)
 cargo run -p counter          # counter, view! macro route
-cargo run -p counter-sfc      # counter, .sv compiler route (UI in src/Counter.sv)
+cargo run -p counter-sfc      # counter, .svelte compiler route (UI in src/Counter.svelte)
 cargo run -p showcase -- --png out.png  # render one frame offscreen, no window needed
 ```
 
@@ -74,7 +74,7 @@ The documentation center lives in [`docs/`](docs/README.md) — guides in
 | [Getting started](docs/en/getting-started.md) | Install, run the examples, repo tour |
 | [Architecture](docs/en/architecture.md) | Layers, data flow, why no VDOM |
 | [Reactivity](docs/en/reactivity.md) | The runes kernel as a user guide |
-| [.sv components](docs/en/sv-components.md) | Template syntax, props, build integration |
+| [.svelte components](docs/en/sv-components.md) | Template syntax, props, build integration |
 | [Styling](docs/en/styling.md) | The compiled CSS subset |
 | [Render backends](docs/en/rendering-backends.md) | Painter trait, CPU/vello, knobs |
 | [Performance](docs/en/performance.md) | virtual_list, membench, measured numbers |
@@ -91,16 +91,16 @@ Reference material (Chinese): [design & ADRs](docs/DESIGN.md) ·
 | `crates/sv-reactive` | Runes reactive kernel |
 | `crates/sv-ui` | Retained scene tree + fine-grained binding primitives |
 | `crates/sv-macro` | `view!` proc-macro frontend |
-| `crates/sv-compiler` | `.sv` single-file-component compiler frontend (+ `sv check`) |
+| `crates/sv-compiler` | `.svelte` single-file-component compiler frontend (+ `sv check`) |
 | `crates/sv-shell` | winit window shell + CPU/vello renderers |
 | `crates/sv-vap` · `sv-pag` · `sv-lottie` | Animation-format parsers (VAP / PAG / Lottie) |
-| `crates/sv-lsp` | `.sv` language server (LSP): live compiler diagnostics |
+| `crates/sv-lsp` | `.svelte` language server (LSP): live compiler diagnostics |
 | `examples/` | showcase · counter(-sfc) · todo-sfc · settings-sfc · input-demo · overlay-demo · membench · vap-gift |
 
 ## Status
 
 M0 exploration is complete: full loop from signal to pixels (CJK text, HiDPI, hit
-testing), `.sv` compiler covering the main Svelte 5 syntax surface (43 of 77 matrix
+testing), `.svelte` compiler covering the main Svelte 5 syntax surface (43 of 77 matrix
 items ✅), dual render backends, and the million-widget virtualization result.
 This is a prototype — APIs churn, and several subsystems (layout, text shaping,
 frame pacing) are placeholders with planned replacements. See

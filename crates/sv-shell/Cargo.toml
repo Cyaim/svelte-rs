@@ -15,6 +15,10 @@ description = "桌面渲染壳:winit 窗口 + CPU 自绘(softbuffer/tiny-skia/sw
 [dependencies]
 sv-reactive = { workspace = true }
 sv-ui = { workspace = true }
+# 日志门面(**只是门面,不是后端**):壳层诊断走 `log::warn!/error!`,
+# 后端由**应用**自选(env_logger / tracing-subscriber+tracing-log / …)——
+# 这就是"轻松更换日志库":库不绑后端,换后端不用碰库。不装后端时零成本。
+log = "0.4"
 # 矢量动画:velato 求值 → PathSink 路径动词,壳侧桥到 Painter(AnimSource::Vector)
 sv-lottie = { workspace = true }
 # PAG 位图序列:容器解析 + 差分帧重放(解码器由调用方注入,壳侧不绑图片解码器)

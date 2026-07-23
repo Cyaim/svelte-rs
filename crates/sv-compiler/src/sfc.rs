@@ -1,4 +1,4 @@
-//! .sv 文件切块:`<script>...</script>` 与模板部分
+//! .svelte 文件切块:`<script>...</script>` 与模板部分
 
 use crate::CompileError;
 
@@ -20,7 +20,7 @@ pub struct Sfc {
     pub style: Option<Span>,
 }
 
-/// 把 .sv 源码切成 script 块 + 模板 + style 块。
+/// 把 .svelte 源码切成 script 块 + 模板 + style 块。
 /// 结构约定(Svelte 型):script 在顶部,style 在底部,中间是模板。
 /// v0 限制:script 里出现字符串 "</script>" 会截断(与 HTML 同款限制)。
 pub fn split(source: &str) -> Result<Sfc, CompileError> {

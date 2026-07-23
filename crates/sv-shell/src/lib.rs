@@ -86,7 +86,7 @@ fn vello_or_fallback(explicit: bool) -> Backend {
     if explicit || vello_backend::probe_adapter() {
         Backend::Vello
     } else {
-        eprintln!("sv-shell: 未探测到可用 GPU adapter,回退 CPU 渲染后端");
+        log::warn!("sv-shell: 未探测到可用 GPU adapter,回退 CPU 渲染后端");
         Backend::Cpu
     }
 }
@@ -94,7 +94,7 @@ fn vello_or_fallback(explicit: bool) -> Backend {
 #[cfg(not(feature = "backend-vello"))]
 fn vello_or_fallback(explicit: bool) -> Backend {
     if explicit {
-        eprintln!("sv-shell: SV_RENDERER=vello 需要 backend-vello feature,回退 CPU 渲染后端");
+        log::warn!("sv-shell: SV_RENDERER=vello 需要 backend-vello feature,回退 CPU 渲染后端");
     }
     Backend::Cpu
 }
@@ -225,7 +225,7 @@ struct App {
 impl App {
     /// 起不来时的体面退出:错误留给 run_app,事件循环立刻收摊
     fn abort(&mut self, event_loop: &ActiveEventLoop, e: ShellError) {
-        eprintln!("{e}");
+        log::error!("{e}");
         self.fatal = Some(e);
         event_loop.exit();
     }
@@ -286,7 +286,7 @@ impl App {
                     // MSRV 是 1.85"。**那条注释后来过期了**:MSRV 已由 let-chains
                     // 定在 1.88(见 Cargo.toml),1.87 的 std API 反而可用了
                     if self.frame_drops <= 3 || self.frame_drops.is_multiple_of(600) {
-                        eprintln!("sv-shell: 丢帧({e});累计 {} 次", self.frame_drops);
+                        log::warn!("sv-shell: 丢帧({e});累计 {} 次", self.frame_drops);
                     }
                     // 本帧作废:清帧键让下一帧重画(否则静止短路会永久跳过)
                     self.last_frame_key = None;
@@ -609,7 +609,7 @@ impl ApplicationHandler<UserEvent> for App {
                 match vello_backend::VelloWin::new(window.clone(), size.width, size.height) {
                     Ok(vw) => Ok(Presenter::Vello(Box::new(vw))),
                     Err(e) => {
-                        eprintln!("sv-shell: vello 初始化失败({e}),回退 CPU 渲染后端");
+                        log::warn!("sv-shell: vello 初始化失败({e}),回退 CPU 渲染后端");
                         self.backend = Backend::Cpu;
                         cpu_presenter(&window)
                     }

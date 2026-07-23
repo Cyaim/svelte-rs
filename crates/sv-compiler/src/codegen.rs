@@ -855,7 +855,7 @@ impl Cg<'_> {
         let user_blur = attrs.iter().find(|a| a.name == "onblur");
         if !has_focus && (user_focus.is_some() || user_blur.is_some()) {
             // 词汇表按"有没有用户闭包"收参(缺席的一侧它补空闭包);
-            // `.sv` 侧的表达式先过 runes 改写
+            // `.svelte` 侧的表达式先过 runes 改写
             let handler = |attr: Option<&Attr>| -> Result<Option<TokenStream>, CompileError> {
                 let Some(a) = attr else { return Ok(None) };
                 let AttrValue::Expr(e) = &a.value else {
@@ -1301,7 +1301,7 @@ impl Cg<'_> {
             return Err(CompileError::at_offset(
                 self.source,
                 offset,
-                format!("未知组件 `<{tag_name}>`(没有找到对应的 .sv 文件)"),
+                format!("未知组件 `<{tag_name}>`(没有找到对应的 .svelte 文件)"),
             ));
         };
         // 未声明 $props 的组件:不带 props 参数;声明了(哪怕空)就带——
@@ -1464,7 +1464,7 @@ impl Cg<'_> {
             Tag::Button => ElemKind::Button,
             _ => ElemKind::Text,
         };
-        // 模板段 → 共享词汇表的段(表达式先过 runes 改写,这是 .sv 独有的一步)
+        // 模板段 → 共享词汇表的段(表达式先过 runes 改写,这是 .svelte 独有的一步)
         let mut parts = Vec::with_capacity(segments.len());
         for seg in segments {
             parts.push(match seg {
@@ -1805,7 +1805,7 @@ impl Cg<'_> {
     /// if/key/each-空态的重建闭包:`Fn` 会被反复调用,体内先对普通变量做
     /// 每次调用的预克隆,内层 move 闭包拿克隆、环境保原值
     fn rebuild_closure(&self, body: TokenStream, scope: &Scope) -> TokenStream {
-        // 闭包协议在共享词汇表里;`.sv` 独有的普通变量预克隆作为 prelude 注入
+        // 闭包协议在共享词汇表里;`.svelte` 独有的普通变量预克隆作为 prelude 注入
         let pre = preclones(&body, scope);
         emit::rebuild_closure(body, pre)
     }

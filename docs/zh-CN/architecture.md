@@ -16,7 +16,7 @@
 │ 用户组件:view! 模板 + $state/$derived/$effect 风格 API       │
 ├──────────────────────────────────────────────────────────────┤
 │ sv-macro     view! 过程宏前端(parse → IR → codegen)          │
-│ sv-compiler  .sv 单文件组件前端                               │
+│ sv-compiler  .svelte 单文件组件前端                               │
 │              → 两者都编译成对 sv-ui 绑定原语的调用             │
 ├──────────────────────────────────────────────────────────────┤
 │ sv-reactive  runes 内核:Signal / Derived / Effect            │
@@ -99,7 +99,7 @@ view! { doc, root =>
 }
 ```
 
-`.sv` 单文件组件路线(`examples/counter-sfc/src/Counter.sv`,由 `build.rs`
+`.svelte` 单文件组件路线(`examples/counter-sfc/src/Counter.svelte`,由 `build.rs`
 调 `sv_compiler::build("src")` 编译进 `OUT_DIR`):
 
 ```svelte
@@ -117,11 +117,11 @@ let double = $derived(count * 2);
 </view>
 ```
 
-| | `view!` 宏(sv-macro) | `.sv` SFC(sv-compiler) |
+| | `view!` 宏(sv-macro) | `.svelte` SFC(sv-compiler) |
 |---|---|---|
 | runes | 显式:`count.get()`、`count.update(..)` | 隐式:裸 `count` 读、`count += 1` 写——整个 script 作用域的源变换 |
 | 模板语法 | 受 Rust tokenizer 约束(文本要引号,Rust 的 `if`/`for`) | 原汁 Svelte:免引号文本、`{#if}{:else}`、`on:click`、`bind:` |
-| 诊断 | span 精确指向用户源码 | 模板域错误带 `.sv` 行列;rustc 类型错误落在(prettyplease 格式化的可读)生成代码里 |
+| 诊断 | span 精确指向用户源码 | 模板域错误带 `.svelte` 行列;rustc 类型错误落在(prettyplease 格式化的可读)生成代码里 |
 | 构建 | 原地展开 | `build.rs` + `OUT_DIR` + `include!` |
 | 编译目标 | sv-ui 绑定原语 | sv-ui 绑定原语(相同) |
 
@@ -134,9 +134,9 @@ setup/render——后两步同时服务热重载。
 `sv_compiler::emit`(绑定原语调用词汇表 + 重建闭包协议),`view!` 宏改为
 依赖 sv-compiler 并从同一词汇表发射;原语签名变更从此只改一处。
 **刻意没有合并的是解析与 IR**:`view!` 的表达式是带真 span 的 Rust token,
-`.sv` 的是带偏移的源码串(还要过 runes 改写)——硬合成一份 IR 会把宏路径的
-span 精度赔进去,而那正是 ADR-2 保留双前端的理由。`.sv` 路线最大的
-悬置风险是 IDE 体验(`.sv` 内没有 rust-analyzer,Volar 式转发 LSP 未 spike)。
+`.svelte` 的是带偏移的源码串(还要过 runes 改写)——硬合成一份 IR 会把宏路径的
+span 精度赔进去,而那正是 ADR-2 保留双前端的理由。`.svelte` 路线最大的
+悬置风险是 IDE 体验(`.svelte` 内没有 rust-analyzer,Volar 式转发 LSP 未 spike)。
 详见 [sv-components](./sv-components.md)。
 
 ## 单线程响应式模型(ADR-1)
@@ -173,10 +173,10 @@ effect(move || println!("{}", double.get()));    // 创建时同步首跑
 | `sv-reactive` | runes 内核:`state` / `derived` / `effect` / `effect_pre` / `batch` / `untrack` / `on_cleanup` / `create_root` / `provide_context` / `use_context`;thread-local runtime 与调度 |
 | `sv-ui` | retained 场景树(`Doc`、`ViewNode`、`Style`)+ 两个编译器共同瞄准的绑定原语:`bind_text`、`bind_style`、`bind_style_patch`、`if_block`、`each_block`、`each_block_else`、`each_block_keyed`、`key_block`、`virtual_list`、`mount`;版本号 + `on_mutate` |
 | `sv-macro` | `view!` 过程宏前端:parse → IR → codegen |
-| `sv-compiler` | `.sv` SFC 前端:runes 源变换、Svelte 模板语法、样式解析、`build.rs`/`OUT_DIR` 集成(`sv_compiler::build`),错误带 `.sv` 行列 |
+| `sv-compiler` | `.svelte` SFC 前端:runes 源变换、Svelte 模板语法、样式解析、`build.rs`/`OUT_DIR` 集成(`sv_compiler::build`),错误带 `.svelte` 行列 |
 | `sv-shell` | winit 窗口 + 渲染器:默认 CPU 栈(softbuffer + tiny-skia + swash),vello/wgpu 在 `backend-vello` feature 后,`SV_RENDERER=cpu\|vello` 覆盖;`Painter` trait、布局、命中测试、`run_app` / `render_to_png` |
 | `examples/counter` | 计数器 · `view!` 路线(开窗 + `--png` 离屏) |
-| `examples/counter-sfc` | 计数器 · `.sv` 路线(build.rs 集成 + 端到端行为测试) |
+| `examples/counter-sfc` | 计数器 · `.svelte` 路线(build.rs 集成 + 端到端行为测试) |
 
 渲染层明确是占位实现:当前 CPU 栈按路线图迁往 vello 家族、Parley 文本与 taffy
 布局——`Painter` 抽象的存在就是为了让后端可替换。见
@@ -189,7 +189,7 @@ effect(move || println!("{}", double.get()));    // 创建时同步首跑
 | ADR | 决策 | 状态 |
 |---|---|---|
 | ADR-1 | 响应式图:thread-local arena + `Copy` 句柄;push-pull 三态脏标记;不做 Send/Sync | 已实现 |
-| ADR-2(修订) | 编译策略:双前端(`view!` + `.sv`)共享同一编译目标;M1 合并为单一编译器核心 | 双前端已跑通,合并规划中 |
+| ADR-2(修订) | 编译策略:双前端(`view!` + `.svelte`)共享同一编译目标;M1 合并为单一编译器核心 | 双前端已跑通,合并规划中 |
 | ADR-3 | 渲染:CPU 栈起步,归宿是 vello 家族(Parley 文本、taffy 布局) | CPU 栈已跑通 |
 | ADR-3b | 后端对比判决 + 可切换 `Painter` 抽象;vello 成为第二个真实后端;文本栈迁 swash | 已落地 |
 | ADR-4 | 窗口层:窄抽象 trait,不以 winit 为架构前提(winit 没有鸿蒙 backend) | 规划中 |
@@ -202,7 +202,7 @@ effect(move || println!("{}", double.get()));    // 创建时同步首跑
 ## 相关页面
 
 - [reactivity](./reactivity.md) — runes 内核深入
-- [sv-components](./sv-components.md) — `.sv` 组件格式与构建集成
+- [sv-components](./sv-components.md) — `.svelte` 组件格式与构建集成
 - [rendering-backends](./rendering-backends.md) — `Painter`、CPU 与 vello、`SV_RENDERER`
 - [performance](./performance.md) — 实测数字与测法
 - [DESIGN.md](../DESIGN.md) — 完整 ADR、路线图、风险清单

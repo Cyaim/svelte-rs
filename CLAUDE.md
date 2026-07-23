@@ -29,7 +29,7 @@ cargo run -p counter -- --png out.png   # 离屏渲染一帧(验证渲染,无需
 
 数据流:`state/derived`(sv-reactive)→ effect 精准改场景树(sv-ui)→ 版本号 bump
 → `on_mutate` → 重绘(sv-shell)。**没有 VDOM/diff**。模板有两个前端(ADR-2 修订版:
-双前端共存,M1 合并内核):`view!` 宏(sv-macro)与 `.sv` 单文件组件(sv-compiler,
+双前端共存,M1 合并内核):`view!` 宏(sv-macro)与 `.svelte` 单文件组件(sv-compiler,
 runes 源变换 + build.rs 集成,示例 examples/counter-sfc)。
 
 约束:

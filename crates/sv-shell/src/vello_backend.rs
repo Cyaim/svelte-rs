@@ -451,7 +451,7 @@ impl VelloWin {
                 antialiasing_method: aa_config(),
             },
         ) {
-            eprintln!("sv-shell: vello render_to_texture 失败: {e}");
+            log::warn!("sv-shell: vello render_to_texture 失败: {e}");
             return (layout, false);
         }
 
@@ -465,12 +465,12 @@ impl VelloWin {
                 return (layout, false);
             }
             CurrentSurfaceTexture::Lost => {
-                eprintln!("sv-shell: vello surface 丢失,尝试重建配置");
+                log::warn!("sv-shell: vello surface 丢失,尝试重建配置");
                 self.context.configure_surface(&self.surface);
                 return (layout, false);
             }
             CurrentSurfaceTexture::Validation => {
-                eprintln!("sv-shell: vello surface 校验错误,跳过本帧");
+                log::warn!("sv-shell: vello surface 校验错误,跳过本帧");
                 return (layout, false);
             }
         };
@@ -525,7 +525,7 @@ fn usable_adapter() -> Option<wgpu::Adapter> {
     if info.device_type == wgpu::DeviceType::Cpu
         && std::env::var("SV_ALLOW_SOFTWARE_GPU").as_deref() != Ok("1")
     {
-        eprintln!(
+        log::warn!(
             "sv-shell: 忽略软件渲染 adapter「{}」(SV_ALLOW_SOFTWARE_GPU=1 可启用)",
             info.name
         );
@@ -623,7 +623,7 @@ fn with_offscreen<R>(width: u32, height: u32, f: impl FnOnce(&mut Offscreen) -> 
             let renderer = match Renderer::new(&device, RendererOptions::default()) {
                 Ok(r) => r,
                 Err(e) => {
-                    eprintln!("sv-shell: vello Renderer 创建失败: {e}");
+                    log::warn!("sv-shell: vello Renderer 创建失败: {e}");
                     return None;
                 }
             };
@@ -699,7 +699,7 @@ fn render_scene_offscreen(
             antialiasing_method: aa_config(),
         },
     ) {
-        eprintln!("sv-shell: vello 离屏渲染失败: {e}");
+        log::warn!("sv-shell: vello 离屏渲染失败: {e}");
         return None;
     }
 

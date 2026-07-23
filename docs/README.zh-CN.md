@@ -11,7 +11,7 @@
 | [快速上手](zh-CN/getting-started.md) | [Getting started](en/getting-started.md) | 安装、跑示例、仓库导览 |
 | [架构](zh-CN/architecture.md) | [Architecture](en/architecture.md) | 分层、数据流、无 VDOM 设计 |
 | [响应式](zh-CN/reactivity.md) | [Reactivity](en/reactivity.md) | `state`/`derived`/`effect`、context、异步桥 |
-| [.sv 组件](zh-CN/sv-components.md) | [.sv components](en/sv-components.md) | 模板语法、props、build.rs 集成 |
+| [.svelte 组件](zh-CN/sv-components.md) | [.svelte components](en/sv-components.md) | 模板语法、props、build.rs 集成 |
 | [样式](zh-CN/styling.md) | [Styling](en/styling.md) | 编译期 CSS 子集、`:hover`、变量 |
 | [渲染后端](zh-CN/rendering-backends.md) | [Render backends](en/rendering-backends.md) | Painter trait、CPU/vello、环境开关 |
 | [性能](zh-CN/performance.md) | [Performance](en/performance.md) | `virtual_list`、membench、实测数字 |
@@ -34,10 +34,10 @@
 | 03 | [鸿蒙 Rust 自绘可行性](research/03-harmonyos.md) |
 | 04 | [编译器策略(proc-macro vs 外部文件)](research/04-compiler-strategy.md) |
 | 05 | [四平台渲染/文本/布局/无障碍选型](research/05-rendering-stack.md) |
-| 06 | [.sv 构建集成机制(build.rs/OUT_DIR)](research/06-sv-build-integration.md) |
-| 07 | [.sv 的 IDE/LSP 策略(Volar 式转发)](research/07-sv-ide-lsp.md) |
+| 06 | [.svelte 构建集成机制(build.rs/OUT_DIR)](research/06-sv-build-integration.md) |
+| 07 | [.svelte 的 IDE/LSP 策略(Volar 式转发)](research/07-sv-ide-lsp.md) |
 | 08 | [runes 源变换语义与健全性](research/08-sv-runes-transform.md) |
-| 09 | [.sv 格式设计 + 热重载架构](research/09-sv-sfc-format-hotreload.md) |
+| 09 | [.svelte 格式设计 + 热重载架构](research/09-sv-sfc-format-hotreload.md) |
 | 10 | [双路线动手实证对比](research/10-route-comparison-hands-on.md) |
 | 11 | [业界 CSS 策略光谱 + Rust 基建](research/11-css-industry-strategies.md) |
 | 12 | [CSS 语义逐项映射设计](research/12-css-semantics-mapping.md) |

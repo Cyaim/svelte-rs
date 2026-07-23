@@ -81,7 +81,7 @@ fn assert_golden(name: &str, actual: &str) {
 /// 过渡、滚动绑定、样式四态(base/hover/active/focus)
 #[test]
 fn wide_fixture_codegen_is_stable() {
-    let src = std::fs::read_to_string(fixtures_dir().join("wide.sv")).expect("读 fixture 失败");
+    let src = std::fs::read_to_string(fixtures_dir().join("wide.svelte")).expect("读 fixture 失败");
     let code = sv_compiler::compile_sv(&src, "wide").expect("fixture 应能编译");
     // 生成物必须是合法 Rust —— 金样比对之前先过这道,免得把坏产物固化成金样
     syn::parse_file(&code).expect("生成代码应是合法 Rust");
@@ -91,8 +91,10 @@ fn wide_fixture_codegen_is_stable() {
 /// 组件调用面单独一份:props / $bindable / snippet 的发射形状
 #[test]
 fn component_fixture_codegen_is_stable() {
-    let child = std::fs::read_to_string(fixtures_dir().join("child.sv")).expect("读 child 失败");
-    let parent = std::fs::read_to_string(fixtures_dir().join("parent.sv")).expect("读 parent 失败");
+    let child =
+        std::fs::read_to_string(fixtures_dir().join("child.svelte")).expect("读 child 失败");
+    let parent =
+        std::fs::read_to_string(fixtures_dir().join("parent.svelte")).expect("读 parent 失败");
 
     // caller 侧要知道被调组件的 props 签名(build() 的第一遍扫描做的事,
     // 这里手工模拟成两遍)

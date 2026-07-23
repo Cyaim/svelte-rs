@@ -1,4 +1,4 @@
-//! `.sv` → 生成 `.rs` 的位置映射:建图、落盘格式、查表。
+//! `.svelte` → 生成 `.rs` 的位置映射:建图、落盘格式、查表。
 //!
 //! 为什么是这个形状(依据 `docs/plans/lsp-spike.md` §3.2 的实测结论):
 //!
@@ -20,8 +20,8 @@
 //! - runes 改写把 `count += 1` 拆成两条语句,用户表达式在生成代码里不再连续;
 //!   落在 `count.update(|__v| …)` 这类残骸上的诊断只能退到相邻锚点之间。
 //! - 样式值在编译期折叠成字面量,没有 provenance——但样式域的错误本来就由
-//!   编译器自报 `.sv` 行列,rustc 看不到它们。
-//! - `{#snippet}` 的参数类型没有 `.sv` 偏移可用(`template.rs` 只带了 snippet
+//!   编译器自报 `.svelte` 行列,rustc 看不到它们。
+//! - `{#snippet}` 的参数类型没有 `.svelte` 偏移可用(`template.rs` 只带了 snippet
 //!   节点本身的偏移),它们的 token 按胶水处理,诊断走降级路径。
 //! - **包络不是真嵌套的**。`lsp-spike.md` §3.2 第三步要求 codegen 进出
 //!   `emit_element`/`emit_if`/`emit_each`/… 时压一个节点栈,让包络天然嵌套;
@@ -30,7 +30,7 @@
 //!   给的是"某一行的跨度",不是"某个模板节点的跨度"。加节点栈之前,
 //!   `Envelope` 这一档的措辞必须继续说"近似"。
 //!
-//! 覆盖率实测(2026-07-22,仓库全部 10 个可独立编译的 `.sv`):`.sv` 里用户写的
+//! 覆盖率实测(2026-07-22,仓库全部 10 个可独立编译的 `.svelte`):`.svelte` 里用户写的
 //! Rust token **281/349 = 80.5%** 拿到精确映射;`map_coverage_floor` 把地板钉在 70%。
 
 use std::cell::RefCell;
@@ -42,7 +42,7 @@ use quote::ToTokens;
 // 数据结构
 // ---------------------------------------------------------------------------
 
-/// 生成侧一段字节区间 ↔ `.sv` 一段字节区间。**两侧文本逐字相等**——
+/// 生成侧一段字节区间 ↔ `.svelte` 一段字节区间。**两侧文本逐字相等**——
 /// 这是"锚点"的定义,也是 `map_segments_are_verbatim` 断言的内容。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Seg {
@@ -62,10 +62,10 @@ pub struct Seg {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MapKind {
-    /// 命中锚点:生成侧与 `.sv` 侧逐字相等
+    /// 命中锚点:生成侧与 `.svelte` 侧逐字相等
     Exact,
     /// 落在同一 region 的两个锚点之间(标点、`.get()` 之类的残骸)——
-    /// 取二者之间那段 `.sv` 文本
+    /// 取二者之间那段 `.svelte` 文本
     Between,
     /// 只知道落在某个 region 里(**行级**包络,不是节点级——节点栈还没做,
     /// 见本模块头部"已知做不到的")
@@ -91,7 +91,7 @@ struct Envelope {
 
 #[derive(Debug, Default, Clone)]
 pub struct SourceMap {
-    /// `.sv` 的绝对路径。**必须绝对**:build.rs 的 cwd 是包根,`sv check` 的 cwd
+    /// `.svelte` 的绝对路径。**必须绝对**:build.rs 的 cwd 是包根,`sv check` 的 cwd
     /// 是 workspace 根,写相对路径两边对不上。
     pub sv_path: String,
     pub sv_len: usize,
@@ -102,7 +102,7 @@ pub struct SourceMap {
     /// **保险丝熔断的原因**;`None` = 锚点并行走走完了(表可信)。
     ///
     /// 熔断时 `segs` 恒为空,但"空表"有两种截然不同的成因:走完了却一段都没
-    /// 记下(极小的 `.sv`)、以及并行走自己失配整表作废。两者给用户的解释
+    /// 记下(极小的 `.svelte`)、以及并行走自己失配整表作废。两者给用户的解释
     /// 完全不同(前者是"这块是胶水",后者是"映射机制坏了,请上报"),
     /// 所以必须落盘区分——`sv check` 靠它选降级措辞,`build()` 靠它打
     /// cargo warning。
@@ -130,7 +130,7 @@ impl Anchors {
     }
 }
 
-/// FNV-1a 64:只用来判"map 与 .sv 是不是同一份",不需要抗碰撞
+/// FNV-1a 64:只用来判"map 与 .svelte 是不是同一份",不需要抗碰撞
 pub fn fnv1a(bytes: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in bytes {
@@ -163,7 +163,7 @@ impl SourceMap {
         self.envelopes = env;
     }
 
-    /// 生成侧字节区间 → `.sv` 字节区间。三档降级:锚点命中 → 同区相邻锚点之间
+    /// 生成侧字节区间 → `.svelte` 字节区间。三档降级:锚点命中 → 同区相邻锚点之间
     /// → region 包络;都不成立返回 `None`(调用方**必须**把诊断原样透出去,
     /// 不许吞)。
     pub fn lookup(&self, gen_start: usize, gen_end: usize) -> Option<Hit> {
@@ -187,14 +187,14 @@ impl SourceMap {
         }
 
         // 2. 同区相邻锚点插值。**不做"按到左锚点的字节距离平移"**:
-        //    生成侧的 `count.get() + "x"` 与 .sv 侧的 `count + "x"` 长度不同,
-        //    平移会越过右锚点。取两个锚点之间那段 .sv 文本才是对的
+        //    生成侧的 `count.get() + "x"` 与 .svelte 侧的 `count + "x"` 长度不同,
+        //    平移会越过右锚点。取两个锚点之间那段 .svelte 文本才是对的
         //    (对 `+` 这种宽度 1 的主 span,结果恰好就是那个 `+`)。
         if let (Some(l), Some(r)) = (left, right)
             && l.region == r.region
             && l.sv_end <= r.sv_start
         {
-            // 诊断区间跨过右锚点 → 连右锚点一起包进去(不拼接不连续的 .sv 区间)
+            // 诊断区间跨过右锚点 → 连右锚点一起包进去(不拼接不连续的 .svelte 区间)
             let e = if gen_end > r.gen_start {
                 r.sv_end
             } else {
@@ -311,7 +311,7 @@ pub(crate) struct RuneHit {
     /// 替换**后**文本里的起点
     pub out_start: usize,
     pub out_len: usize,
-    /// 替换**前**(= .sv 原文)里的起点
+    /// 替换**前**(= .svelte 原文)里的起点
     pub src_start: usize,
     pub src_len: usize,
 }
@@ -322,12 +322,12 @@ struct Site {
     /// 用户文本在"被 parse 的那个串"里的起始字节(= pad + 前缀长度)
     text_start: usize,
     text_len: usize,
-    /// 该段用户文本在 `.sv` 全文里的起始字节
+    /// 该段用户文本在 `.svelte` 全文里的起始字节
     sv_offset: usize,
-    /// `sv_offset` 是否**经过逐字核对**(`.sv[sv_offset..]` 确实以这段文本打头)。
+    /// `sv_offset` 是否**经过逐字核对**(`.svelte[sv_offset..]` 确实以这段文本打头)。
     /// 核对不上时整段不建映射:偏移口径已经不知道对不对了,而 `build_segs` 的
     /// per-token 校验只比**单个 token 的文本**,同名标识符(`count` 这种)在
-    /// `.sv` 里反复出现,张冠李戴照样能通过。宁可不映射。
+    /// `.svelte` 里反复出现,张冠李戴照样能通过。宁可不映射。
     verified: bool,
     /// 仅 script 块非空
     runes: Vec<RuneHit>,
@@ -340,7 +340,7 @@ struct Recorder {
     sites: Vec<Site>,
     /// script 块拿到的 pad(`syn_err` 反算行号要减掉它)
     script_pad: usize,
-    /// `.sv` 全文,用来把"指向空白的偏移"校正到用户文本真正的起点
+    /// `.svelte` 全文,用来把"指向空白的偏移"校正到用户文本真正的起点
     sv_source: String,
 }
 
@@ -460,7 +460,7 @@ pub(crate) fn parse_with_at<P: syn::parse::Parser>(
 }
 
 /// 同上,但被 parse 的文本经过占位替换(`$bindable` → `__sv_bindable`),
-/// 要带上漂移表才能算回 `.sv` 的字节偏移
+/// 要带上漂移表才能算回 `.svelte` 的字节偏移
 pub(crate) fn parse_with_drift_at<P: syn::parse::Parser>(
     parser: P,
     src: &str,
@@ -470,7 +470,7 @@ pub(crate) fn parse_with_drift_at<P: syn::parse::Parser>(
     if !enabled() {
         return parser.parse_str(src);
     }
-    // 占位替换过的文本没法与 `.sv` 原文 starts_with 对比,口径靠 `runes` 漂移表
+    // 占位替换过的文本没法与 `.svelte` 原文 starts_with 对比,口径靠 `runes` 漂移表
     // 保证(`script.rs` 建表时就是按替换点算的),按已核对处理
     let pad = alloc(src, 0, src.len(), sv_offset, true, runes);
     parser.parse_str(&format!("{}{src}", "\n".repeat(pad)))
@@ -523,7 +523,7 @@ impl Recorder {
         Some(rel - delta)
     }
 
-    /// token 的 (line, 字节区间) → (.sv 起, .sv 止, region);`None` = 胶水
+    /// token 的 (line, 字节区间) → (.svelte 起, .svelte 止, region);`None` = 胶水
     ///
     /// region 直接取**虚拟行号**:虚拟行全局单调、site 之间不重叠,所以行号
     /// 天然是"某个 parse 入口的某一行"的唯一编号。见 `Seg::region` 里为什么
@@ -715,7 +715,7 @@ mod tests {
 
     #[test]
     fn lookup_between_two_anchors_takes_the_gap() {
-        // 生成侧 `count.get() + "x"`,.sv 侧 `count + "x"`:
+        // 生成侧 `count.get() + "x"`,.svelte 侧 `count + "x"`:
         // 主 span 是那个 `+`(宽度 1、落在标点上,不在锚点里)
         let m = SourceMap::from_segs(vec![
             seg(0, 5, 0, 5, 0),    // count
@@ -757,7 +757,7 @@ mod tests {
     #[test]
     fn text_roundtrip() {
         let mut m = SourceMap::from_segs(vec![seg(100, 105, 10, 15, 0), seg(120, 121, 20, 21, 1)]);
-        m.sv_path = "E:/a b/Counter.sv".into();
+        m.sv_path = "E:/a b/Counter.svelte".into();
         m.sv_len = 1043;
         m.sv_hash = 0x3f2a_0000_0000_0001;
         m.gen_len = 6382;

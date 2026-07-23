@@ -1,8 +1,8 @@
 //! # sv-compiler
 //!
-//! `.sv` 单文件组件编译器 — **编译器路线**(相对于 `sv-macro` 的 proc-macro 路线)。
+//! `.svelte` 单文件组件编译器 — **编译器路线**(相对于 `sv-macro` 的 proc-macro 路线)。
 //!
-//! 一个 `.sv` 文件 = `<script>`(Rust + runes)+ 模板(原汁 Svelte 语法):
+//! 一个 `.svelte` 文件 = `<script>`(Rust + runes)+ 模板(原汁 Svelte 语法):
 //!
 //! ```text
 //! <script>
@@ -34,7 +34,7 @@ mod codegen;
 pub mod emit;
 mod script;
 mod sfc;
-/// 生成 `.rs` ↔ `.sv` 的位置映射(`sv check` 把 rustc 的诊断搬回 `.sv` 靠它)
+/// 生成 `.rs` ↔ `.svelte` 的位置映射(`sv check` 把 rustc 的诊断搬回 `.svelte` 靠它)
 pub mod sourcemap;
 mod style;
 mod template;
@@ -42,7 +42,7 @@ mod template;
 use std::fmt;
 use std::path::Path;
 
-/// 编译错误,带 .sv 文件内的 1-based 行/列
+/// 编译错误,带 .svelte 文件内的 1-based 行/列
 #[derive(Debug)]
 pub struct CompileError {
     pub message: String,
@@ -113,12 +113,12 @@ impl PropsRegistry {
     }
 }
 
-/// 编译一份 .sv 源码(无组件注册表;模板里出现组件标签会报"未知组件")
+/// 编译一份 .svelte 源码(无组件注册表;模板里出现组件标签会报"未知组件")
 pub fn compile_sv(source: &str, fn_name: &str) -> Result<String, CompileError> {
     compile_sv_with(source, fn_name, &PropsRegistry::new())
 }
 
-/// 编译一份 .sv 源码,返回生成的 Rust 源码
+/// 编译一份 .svelte 源码,返回生成的 Rust 源码
 /// (`pub fn <fn_name>(doc, parent[, props])`,声明了 $props 时附带 props 结构体)
 pub fn compile_sv_with(
     source: &str,
@@ -173,7 +173,7 @@ fn compile_inner(
     codegen::generate(source, fn_name, &script, &nodes, registry, &sheet)
 }
 
-/// 编译单个 .sv 文件,组件函数名取自文件名(snake_case 化)
+/// 编译单个 .svelte 文件,组件函数名取自文件名(snake_case 化)
 pub fn compile_file(path: &Path) -> Result<String, String> {
     compile_file_with(path, &PropsRegistry::new())
 }
@@ -210,7 +210,7 @@ fn sanitize_fn_name(stem: &str) -> String {
     }
 }
 
-/// build.rs 入口:递归扫描 `src_dir` 下所有 .sv,编译到 `$OUT_DIR/<fn_name>.rs`。
+/// build.rs 入口:递归扫描 `src_dir` 下所有 .svelte,编译到 `$OUT_DIR/<fn_name>.rs`。
 /// 两遍:先扫全部文件的 $props 声明建注册表(组件互相引用),再逐个编译。
 /// 编译失败直接 panic(cargo 会把错误显示出来,格式 `文件:行:列: 消息`)。
 pub fn build(src_dir: impl AsRef<Path>) {
@@ -245,7 +245,7 @@ pub fn build(src_dir: impl AsRef<Path>) {
         let abs = abs_path(&path);
         let source = match std::fs::read_to_string(&path) {
             Ok(s) => s,
-            Err(e) => panic!("\n\n.sv 读取失败\n  --> {abs}: {e}\n"),
+            Err(e) => panic!("\n\n.svelte 读取失败\n  --> {abs}: {e}\n"),
         };
         let stem = path
             .file_stem()
@@ -254,13 +254,13 @@ pub fn build(src_dir: impl AsRef<Path>) {
         let fn_name = sanitize_fn_name(stem);
         let compiled = match compile_sv_mapped(&source, &fn_name, &registry, &abs) {
             Ok(c) => c,
-            Err(e) => panic!("\n\n.sv 编译失败\n  --> {abs}:{e}\n"),
+            Err(e) => panic!("\n\n.svelte 编译失败\n  --> {abs}:{e}\n"),
         };
-        // 保险丝熔断 = 这个文件的诊断全都回不到 .sv。它不该只在 .svmap 里留个
+        // 保险丝熔断 = 这个文件的诊断全都回不到 .svelte。它不该只在 .svmap 里留个
         // 字段等人去读:烧了必须有指示灯,否则用户只会看到一片"落在胶水上"
         if let Some(why) = &compiled.map.blown {
             println!(
-                "cargo::warning={abs}: source map 锚点并行走失配({why}),该文件的 rustc 诊断将无法回映射到 .sv,请上报"
+                "cargo::warning={abs}: source map 锚点并行走失配({why}),该文件的 rustc 诊断将无法回映射到 .svelte,请上报"
             );
         }
         let out = Path::new(&out_dir).join(format!("{fn_name}.rs"));
@@ -288,7 +288,7 @@ fn abs_path(path: &Path) -> String {
     s.strip_prefix(r"\\?\").unwrap_or(&s).to_string()
 }
 
-/// 轻量提取一份 .sv 源码的 $props 签名(build 第一遍用);
+/// 轻量提取一份 .svelte 源码的 $props 签名(build 第一遍用);
 /// 返回 None 表示该文件没有声明 $props
 fn props_signature(source: &str) -> Option<Vec<PropsSigField>> {
     let sfc = sfc::split(source).ok()?;
@@ -315,7 +315,7 @@ fn collect_sv_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
         let path = entry.path();
         if path.is_dir() {
             collect_sv_files(&path, out);
-        } else if path.extension().is_some_and(|e| e == "sv") {
+        } else if path.extension().is_some_and(|e| e == "svelte") {
             out.push(path);
         }
     }

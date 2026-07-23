@@ -2,7 +2,7 @@
 
 > `view!` 过程宏前端 — [svelte-rs](https://github.com/Cyaim/svelte-rs) 的一个 crate。
 
-把 Svelte 风味模板编译成对 `sv-ui` 的命令式建树 + 绑定调用,零运行时比对。与 `.sv` 单文件组件(`sv-compiler`)共享同一编译目标。
+把 Svelte 风味模板编译成对 `sv-ui` 的命令式建树 + 绑定调用,零运行时比对。与 `.svelte` 单文件组件(`sv-compiler`)共享同一编译目标。
 
 单独使用意义不大:整套栈的入口、示例与中英双语指南都在
 [仓库根目录](https://github.com/Cyaim/svelte-rs)(`docs/README.md` 是导航)。
