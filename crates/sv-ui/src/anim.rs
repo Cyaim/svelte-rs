@@ -192,12 +192,13 @@ pub fn pump(now_ms: f64) -> bool {
                 Channel::Opacity => an.doc.update_style(an.node, |s| s.opacity = v),
                 Channel::ScrollY => {
                     let x = an.doc.scroll_of(an.node).0;
-                    // 收尾一帧写精确目标:缓动函数在 t=1 才严格等于 to,
-                    // 浮点上差一点点会留下半像素错位。
-                    // 吸附到物理像素网格(含收尾帧:目标本身也该落在网格上,
-                    // 否则最后一帧又变成小数位移,blit 白白错过收尾)
-                    let v = if t >= 1.0 { an.to } else { v };
-                    an.doc.set_scroll(an.node, x, snap_scroll(v));
+                    // 中途帧吸附到物理像素网格(blit 的入场券);**收尾帧写精确
+                    // 目标不吸附**:目标经 route_wheel 时已按网格吸附过,常规
+                    // 情况二者一致;贴底边界的目标是钳出来的小数 max,收尾帧
+                    // 再吸附会让停点回不到 max —— scroll_y_to 的 0.5 死区随即
+                    // 把后续滚轮事件全部吞掉,滚动链永远接不到手(评审发现 #13)
+                    let v = if t >= 1.0 { an.to } else { snap_scroll(v) };
+                    an.doc.set_scroll(an.node, x, v);
                 }
             }
             t < 1.0

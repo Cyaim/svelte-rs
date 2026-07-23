@@ -36,13 +36,6 @@ use crate::render::{Layout, Placed, Rect, ScrollArea};
 /// 描边 AA、斜体字形出格。宁大勿小 —— 大了多画几个节点,小了缺一块像素
 pub const INK_PAD: f32 = 8.0;
 
-/// 隔离扫描用的墨迹垫(逻辑 px)。**方向与 INK_PAD 相同(必须 ≥ 真实出墨),
-/// 但取值贴着真实上界走**:描边 AA ≤ 1、字形出格(bearing/斜体)≤ ~3。
-/// 取大了会把"滚动区上方 8px 处的标题"误判成伸进视口,邻接布局永远进不了
-/// blit;焦点环出墨更远(~4),但环由计划器的 focused 分支单独收损伤,
-/// 不靠这里。改这个值必须让差分 fuzz(大字号/emoji 贴边)先绿
-const ISOLATION_PAD: f32 = 4.0;
-
 /// f32 几何比较容差(逻辑 px):重建/重走产生的坐标对未动节点是位级重现,
 /// 只有滚动平移的补偿差(浮点非结合)需要容差
 const GEOM_EPS: f32 = 0.01;
@@ -176,6 +169,12 @@ pub struct FrameSnapshot {
     /// (`set_scroll` 只下钳),画面用的是钳后值 —— blit 位移必须按钳后算,
     /// 否则贴底部继续滚会搬错位
     pub offsets: HashMap<ViewId, (f32, f32)>,
+    /// 与 `layout.placed` 平行的墨迹范围,按**该帧当时**的节点状态算好存下。
+    /// 上一帧的墨迹不能拿本帧样式现估:NoWrap→Wrap 一切换,旧帧真实画过的
+    /// 溢出字形就会被"新样式的估计"漏掉(评审发现 #2)
+    pub inks: Vec<PhysRect>,
+    /// 快照属于哪个 Doc(identity):防跨 Doc 复用(单窗口模型下防御性)
+    pub doc_id: usize,
     pub scale: f32,
     pub phys_w: u32,
     pub phys_h: u32,
@@ -218,39 +217,78 @@ pub enum DamagePlan {
 // 墨迹范围(剔除与损伤共用同一套判断,别让两边各猜各的)
 // ---------------------------------------------------------------------------
 
-/// 节点绘制可能触及的物理范围(保守超集)。
+/// 节点绘制可能触及的物理范围(保守超集)。剔除、损伤、隔离扫描共用
+/// 这一个模型 —— 三处各猜各的就会互相漏。
 ///
-/// 常规节点 = border-box 外扩 `pad`(剔除/损伤传 [`INK_PAD`],隔离扫描传
-/// [`ISOLATION_PAD`])。**不折行文本与按钮**的字形可以横向越出 border-box
-/// (NoWrap 溢出、按钮文本比按钮宽时居中外溢),横向按其裁剪矩形放宽;
-/// 没有裁剪就只能按整帧宽算
-pub fn ink_rect(
+/// 常规节点 = border-box 外扩 [`INK_PAD`](焦点环/描边 AA)。**带文本的节点**
+/// (Text/Button)按与绘制同源的 shaping 输入实测宽高:文本可以横向
+/// (NoWrap 溢出、按钮文本比按钮宽)也可以**纵向**(定高盒子里装大字号/
+/// 多行折行文本,绘制端对 overflow:Visible 祖先不裁)越出 border-box
+/// (评审发现 #0/#5);再按字号比例垫出字形出格(bearing/斜体/堆叠标记,
+/// 评审发现 #14)。字形受逐像素裁剪约束,故文本扩展部分与裁剪矩形求交。
+/// TextInput 的内容有自己的内缩裁剪(⊆ border-box + 1px),INK_PAD 已盖住。
+pub(crate) fn node_ink(
+    inner: &sv_ui::DocumentInner,
     p: &Placed,
-    kind: ElementKind,
-    wraps: bool,
     scale: f32,
     frame_w: i32,
-    pad: f32,
 ) -> PhysRect {
-    let mut r = PhysRect::outward(p.rect, scale, pad);
-    let text_can_overflow_x =
-        matches!(kind, ElementKind::Button) || (kind == ElementKind::Text && !wraps);
-    if text_can_overflow_x {
-        match p.clip {
-            Some(c) => {
-                let cp = PhysRect::outward(c, scale, pad);
-                r.x0 = r.x0.min(cp.x0);
-                r.x1 = r.x1.max(cp.x1);
-            }
-            None => {
-                r.x0 = 0;
-                r.x1 = frame_w;
-            }
+    let mut r = PhysRect::outward(p.rect, scale, INK_PAD);
+    let Some(n) = inner.nodes.get(p.id) else {
+        return r;
+    };
+    let has_text = matches!(n.kind, ElementKind::Text | ElementKind::Button) && !n.text.is_empty();
+    if has_text {
+        let fs = crate::render::resolve_font_size(inner, p.id);
+        let bw = n.style.border.map(|b| b.width).unwrap_or(0.0);
+        let content_w = (p.rect.w - n.style.padding.horizontal() - bw * 2.0).max(0.0);
+        let content_h = (p.rect.h - n.style.padding.vertical() - bw * 2.0).max(0.0);
+        let wraps = n.kind == ElementKind::Text && n.style.text_wrap == sv_ui::TextWrap::Wrap;
+        let wrap_w = wraps.then_some(content_w);
+        let (tw, th) = crate::text::measure(&n.text, fs, wrap_w);
+        // 溢出量两侧都扩(Text 依对齐可左可右、Button 居中双侧、绘制起点
+        // 在内容盒 —— 双侧扩是无需分辨这些的保守上界);字形出格按字号垫
+        let over_x = (tw - content_w).max(0.0) + 0.25 * fs;
+        let over_y = (th - content_h).max(0.0) + 0.5 * fs;
+        let text_ink = Rect {
+            x: p.rect.x - over_x,
+            y: p.rect.y - over_y,
+            w: p.rect.w + over_x * 2.0,
+            h: p.rect.h + over_y * 2.0,
+        };
+        let mut ext = PhysRect::outward(text_ink, scale, 0.0);
+        // 字形逐像素裁剪:扩展部分不会越过生效裁剪矩形
+        if let Some(c) = p.clip {
+            ext = ext.intersect(&PhysRect::outward(c, scale, 0.0));
+        } else {
+            ext = ext.intersect(&PhysRect {
+                x0: i32::MIN / 2,
+                y0: i32::MIN / 2,
+                x1: frame_w,
+                y1: i32::MAX / 2,
+            });
         }
+        r = r.union(&ext);
     }
     r
 }
 
+/// 整份布局的墨迹范围(与 `layout.placed` 平行)。快照与本帧计划共用
+pub(crate) fn compute_inks(
+    inner: &sv_ui::DocumentInner,
+    layout: &Layout,
+    scale: f32,
+    frame_w: i32,
+) -> Vec<PhysRect> {
+    layout
+        .placed
+        .iter()
+        .map(|p| node_ink(inner, p, scale, frame_w))
+        .collect()
+}
+
+/// 带容差的矩形比较 —— **只许**用在滚动平移补偿之后的比较上
+/// (补偿是浮点非结合的,位级必然对不上);其余一律位级判等
 fn rect_close(a: Rect, b: Rect) -> bool {
     (a.x - b.x).abs() <= GEOM_EPS
         && (a.y - b.y).abs() <= GEOM_EPS
@@ -258,10 +296,10 @@ fn rect_close(a: Rect, b: Rect) -> bool {
         && (a.h - b.h).abs() <= GEOM_EPS
 }
 
-fn clip_close(a: Option<Rect>, b: Option<Rect>) -> bool {
+fn clip_bits_eq(a: Option<Rect>, b: Option<Rect>) -> bool {
     match (a, b) {
         (None, None) => true,
-        (Some(a), Some(b)) => rect_close(a, b),
+        (Some(a), Some(b)) => crate::render::rect_bits_eq(a, b),
         _ => false,
     }
 }
@@ -285,6 +323,7 @@ pub fn plan(
     doc: &Doc,
     prev: &FrameSnapshot,
     cur: &Layout,
+    cur_inks: &[PhysRect],
     dirty: &DirtyLog,
     scale: f32,
     phys_w: u32,
@@ -338,14 +377,15 @@ pub fn plan(
             prev_by_id.insert(p.id, i);
         }
 
-        let ink_of = |layout: &Layout, idx: usize| -> PhysRect {
-            let p = &layout.placed[idx];
-            let (kind, wraps) = inner
-                .nodes
-                .get(p.id)
-                .map(|n| (n.kind, n.style.text_wrap == sv_ui::TextWrap::Wrap))
-                .unwrap_or((ElementKind::View, false));
-            ink_rect(p, kind, wraps, scale, phys_w as i32, INK_PAD)
+        // 本帧墨迹由调用方算好传入(帧末原样进快照);上一帧墨迹**必须**用
+        // 快照存的(按当时的样式算的,评审发现 #2:拿新样式估旧帧墨迹,
+        // NoWrap→Wrap 切换会漏旧溢出字形)
+        let ink_cur = |idx: usize| -> PhysRect { cur_inks[idx] };
+        let ink_prev = |idx: usize| -> PhysRect {
+            prev.inks
+                .get(idx)
+                .copied()
+                .unwrap_or_else(|| PhysRect::outward(prev.layout.placed[idx].rect, scale, INK_PAD))
         };
 
         let mut rects: Vec<PhysRect> = Vec::new();
@@ -366,15 +406,18 @@ pub fn plan(
             let Some(&prev_off) = prev.offsets.get(&area.id) else {
                 // 新出现的滚动区(样式切换出来的):它那块全算损伤
                 if let Some(&i) = cur_by_id.get(&area.id) {
-                    push_rect(&mut rects, ink_of(cur, i));
+                    push_rect(&mut rects, ink_cur(i));
                 }
                 continue;
             };
             let prev_area = prev.layout.scroll_areas.iter().find(|a| a.id == area.id);
+            // 位级相等而不是容差:没有滚动平移补偿参与的比较,f32 值是同一
+            // 计算路径的重现,位同才叫没变 —— 容差会把亚像素真实位移
+            // 读成"没变",AA 像素就悄悄陈旧了(评审发现 #4)
             let content_same = prev_area.is_some_and(|pa| {
-                (pa.content.0 - area.content.0).abs() <= GEOM_EPS
-                    && (pa.content.1 - area.content.1).abs() <= GEOM_EPS
-                    && rect_close(pa.viewport, area.viewport)
+                pa.content.0.to_bits() == area.content.0.to_bits()
+                    && pa.content.1.to_bits() == area.content.1.to_bits()
+                    && crate::render::rect_bits_eq(pa.viewport, area.viewport)
             });
             let delta_l = (cur_off.0 - prev_off.0, cur_off.1 - prev_off.1);
             if delta_l.0.abs() <= f32::EPSILON && delta_l.1.abs() <= f32::EPSILON && content_same {
@@ -385,11 +428,12 @@ pub fn plan(
                 break;
             };
             // 视口自身没动、裁剪上下文没变、内容尺寸没变,才谈得上搬像素
+            // (位级判等,理由同上)
             let stable = content_same
-                && rect_close(prev.layout.placed[pi].rect, cur.placed[ci].rect)
-                && clip_close(prev.layout.placed[pi].clip, cur.placed[ci].clip);
+                && crate::render::rect_bits_eq(prev.layout.placed[pi].rect, cur.placed[ci].rect)
+                && clip_bits_eq(prev.layout.placed[pi].clip, cur.placed[ci].clip);
             if !stable {
-                push_rect(&mut rects, ink_of(cur, ci).union(&ink_of(&prev.layout, pi)));
+                push_rect(&mut rects, ink_cur(ci).union(&ink_prev(pi)));
                 continue;
             }
             let subtree_end = subtree_end(cur, ci);
@@ -407,7 +451,7 @@ pub fn plan(
             if !cur.scroll_areas.iter().any(|a| a.id == pa.id)
                 && let Some(&pi) = prev_by_id.get(&pa.id)
             {
-                push_rect(&mut rects, ink_of(&prev.layout, pi));
+                push_rect(&mut rects, ink_prev(pi));
             }
         }
 
@@ -437,15 +481,23 @@ pub fn plan(
             }
             region = region.clamp_to(phys_w, phys_h);
 
-            let viewport_ink = ink_of(cur, s.placed_idx);
+            let viewport_ink = ink_cur(s.placed_idx);
             let big_jump =
                 dxi.abs() as i64 >= region.w() as i64 || dyi.abs() as i64 >= region.h() as i64;
 
+            // 子树里有 Measure 脏 → 内容在滚动的同时还在重排,placed 差分的
+            // 平移补偿容差可能掩蔽亚容差真实位移 —— 不赌,整视口重画
+            let measure_inside = dirty.items.iter().any(|it| {
+                matches!(it, DirtyItem::Measure { id }
+                    if cur_by_id.get(id).is_some_and(|&mi| mi > s.placed_idx && mi < s.subtree_end))
+            });
+
             let eligible = integral
                 && !big_jump
+                && !measure_inside
                 && !region.is_empty()
                 && (dxi != 0.0 || dyi != 0.0)
-                && blit_region_isolated(inner, cur, s, &region, scale, phys_w as i32);
+                && blit_region_isolated(inner, cur, s, &region, scale, cur_inks);
 
             if !eligible {
                 // 整视口重画(含滚动条列、含焦点环出界部分 —— ink 垫已盖住)
@@ -463,12 +515,23 @@ pub fn plan(
                 push_rect(&mut rects, strip);
             }
             // 滚动条 thumb 每帧都动且半透明(叠着搬会双重变深):
-            // 轨道列一律重画;横向 blit 还会把旧 thumb 搬进内容区,
-            // 把"搬到哪儿"的那列也划进损伤
-            let track = track_column(&cur.scroll_areas, p.id, scale);
-            push_rect(&mut rects, track);
-            if dxi != 0 {
-                push_rect(&mut rects, track.shift(-dxi, 0));
+            // 自己的轨道列一律重画。**别的滚动区**(祖先/兄弟)的 thumb 画在
+            // 最上层、不随本区内容动 —— 只要其轨道列伸进 blit 区,搬移就会
+            // 拖走它的旧像素,那一列(和搬到的位置)都得重画(评审发现 #3/#7)
+            let own_track = track_column(&cur.scroll_areas, p.id, scale);
+            push_rect(&mut rects, own_track);
+            if dxi != 0 || dyi != 0 {
+                push_rect(&mut rects, own_track.shift(-dxi, -dyi));
+            }
+            for a in &cur.scroll_areas {
+                if a.id == p.id {
+                    continue;
+                }
+                let track = track_column(&cur.scroll_areas, a.id, scale);
+                if track.intersects(&region) {
+                    push_rect(&mut rects, track);
+                    push_rect(&mut rects, track.shift(-dxi, -dyi));
+                }
             }
             // 视口边缘的半像素缝(向内取整丢掉的):上下左右各一条 1px 补画
             let outer = PhysRect::outward(vp, scale, 0.0)
@@ -503,17 +566,28 @@ pub fn plan(
                 }
                 _ => continue,
             };
-            if let Some(&ci) = cur_by_id.get(&id) {
-                push_rect(&mut rects, ink_of(cur, ci));
-            }
-            if let Some(&pi) = prev_by_id.get(&id) {
-                // 旧位置的旧墨迹;若旧位置落在本帧某个 blit 区里,它的像素
-                // 已被搬到 -delta 处,把搬到的位置也划进损伤
-                let ink = ink_of(&prev.layout, pi);
-                push_rect(&mut rects, ink);
-                for b in &blits {
-                    if ink.intersects(&b.region) {
-                        push_rect(&mut rects, ink.shift(-b.dx, -b.dy));
+            // 损伤覆盖**整个子树**,不只该节点:fg 沿父链继承、opacity 逐级
+            // 相乘 —— 改父节点的纯绘制属性,溢出到父 border-box 之外的后代
+            // (NoWrap 长文本、定高父里的高子)像素也在变(评审发现 #1/#6)。
+            // 用 Doc 树收后代(显式栈防深树爆栈);subtree_end 不能用 ——
+            // 它按 clip_depth 划界,不裁剪的 View 与其子同深度
+            let mut stack = vec![id];
+            while let Some(nid) = stack.pop() {
+                if let Some(n) = inner.nodes.get(nid) {
+                    stack.extend(n.children.iter().copied());
+                }
+                if let Some(&ci) = cur_by_id.get(&nid) {
+                    push_rect(&mut rects, ink_cur(ci));
+                }
+                if let Some(&pi) = prev_by_id.get(&nid) {
+                    // 旧位置的旧墨迹;若旧位置落在本帧某个 blit 区里,它的像素
+                    // 已被搬到 -delta 处,把搬到的位置也划进损伤
+                    let ink = ink_prev(pi);
+                    push_rect(&mut rects, ink);
+                    for b in &blits {
+                        if ink.intersects(&b.region) {
+                            push_rect(&mut rects, ink.shift(-b.dx, -b.dy));
+                        }
                     }
                 }
             }
@@ -538,11 +612,20 @@ pub fn plan(
                     w: p.rect.w,
                     h: p.rect.h,
                 };
-                if rect_close(expected_prev, pp.rect) && clip_close(p.clip, pp.clip) {
+                // 无平移补偿 → 位级判等(重建/重走对未动节点是位级重现);
+                // 有补偿 → 容差只吸收浮点非结合噪声。补偿路径的节点不可能有
+                // 真实相对位移:blit 资格已把「子树内有 Measure」降级掉了
+                let unchanged = if shx == 0.0 && shy == 0.0 {
+                    crate::render::rect_bits_eq(expected_prev, pp.rect)
+                        && clip_bits_eq(p.clip, pp.clip)
+                } else {
+                    rect_close(expected_prev, pp.rect) && clip_bits_eq(p.clip, pp.clip)
+                };
+                if unchanged {
                     continue;
                 }
-                push_rect(&mut rects, ink_of(cur, ci));
-                let ink = ink_of(&prev.layout, pi);
+                push_rect(&mut rects, ink_cur(ci));
+                let ink = ink_prev(pi);
                 push_rect(&mut rects, ink);
                 for b in &blits {
                     if ink.intersects(&b.region) {
@@ -555,8 +638,8 @@ pub fn plan(
         // ---- 焦点环 / 光标闪烁 ----
         let focused = inner.focused;
         if let Some(fid) = focused {
-            let cur_ink = cur_by_id.get(&fid).map(|&i| ink_of(cur, i));
-            let prev_ink = prev_by_id.get(&fid).map(|&i| ink_of(&prev.layout, i));
+            let cur_ink = cur_by_id.get(&fid).map(|&i| ink_cur(i));
+            let prev_ink = prev_by_id.get(&fid).map(|&i| ink_prev(i));
             let moved = match (cur_ink, prev_ink) {
                 (Some(a), Some(b)) => a != b,
                 (None, None) => false,
@@ -627,7 +710,7 @@ fn blit_region_isolated(
     s: &ScrollDelta,
     region: &PhysRect,
     scale: f32,
-    frame_w: i32,
+    cur_inks: &[PhysRect],
 ) -> bool {
     for (i, p) in cur.placed.iter().enumerate() {
         if i > s.placed_idx && i < s.subtree_end {
@@ -636,9 +719,7 @@ fn blit_region_isolated(
         let Some(n) = inner.nodes.get(p.id) else {
             continue;
         };
-        let wraps = n.style.text_wrap == sv_ui::TextWrap::Wrap;
-        let ink = ink_rect(p, n.kind, wraps, scale, frame_w, ISOLATION_PAD);
-        if !ink.intersects(region) {
+        if !cur_inks[i].intersects(region) {
             continue;
         }
         if i > s.placed_idx {
