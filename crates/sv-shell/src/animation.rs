@@ -75,7 +75,7 @@ pub fn register_frames(frames: Vec<PixelImage>) -> u64 {
 /// 注册一份 Lottie 矢量资产,返回给 [`sv_ui::AnimSource::Vector`] 用的句柄。
 ///
 /// 与位图档不同,矢量档不预解码成帧序列 —— 每帧由 velato 现算路径,
-/// 经 [`render_vector`] 直接发到宿主 `Painter`,不落位图(省内存、缩放无损)。
+/// 经 `render_vector` 直接发到宿主 `Painter`,不落位图(省内存、缩放无损)。
 pub fn register_vector(lottie: sv_lottie::Lottie) -> u64 {
     let handle = next_handle();
     let tl = lottie.timeline();
@@ -92,7 +92,7 @@ pub fn register_vector(lottie: sv_lottie::Lottie) -> u64 {
     handle
 }
 
-/// 注销一份矢量资产。语义同 [`unregister`](所有权由调用方显式管理)。
+/// 注销一份矢量资产。语义同 [`unregister`]:所有权由调用方显式管理。
 pub fn unregister_vector(handle: u64) -> bool {
     VSTORE.with(|s| s.borrow_mut().remove(&handle).is_some())
 }
