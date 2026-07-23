@@ -19,10 +19,14 @@ mod vello_backend;
 
 pub use a11y::{A11yCache, build_tree_update, dispatch_action, incremental_tree_update};
 pub use animation::{
-    frame, frame_count, register_frames, register_vector, unregister, unregister_vector,
+    frame, frame_count, register_frames, register_pag, register_vector, unregister,
+    unregister_vector,
 };
 // 矢量动画资产类型:下游用 `Lottie::from_slice` 解析后交给 `register_vector`
 pub use sv_lottie::{Error as LottieError, Lottie};
+// PAG 位图序列:下游用 `sv_pag::PagFile::parse` 拿 `BitmapSequence`,配一个图片
+// 解码器交给 `register_pag`(差分帧重放成逐帧图)
+pub use sv_pag::{BitmapSequence, DecodedImage, PagFile};
 // `mod paint` 是私有的,所以这里没列出的类型就是**公开但不可命名** ——
 // 外部 crate 既写不出类型名也构造不出值。路径那五个类型漏了整整一轮:
 // `Painter::fill_path` 明明是 pub trait 的 pub 方法,外面却根本调不动,

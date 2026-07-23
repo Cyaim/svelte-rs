@@ -97,6 +97,38 @@ pub fn unregister_vector(handle: u64) -> bool {
     VSTORE.with(|s| s.borrow_mut().remove(&handle).is_some())
 }
 
+/// 注册一段 PAG 位图序列:**差分帧重放**成逐帧成品图,进位图 `Frames` 注册表,
+/// 返回句柄(节点用 `AnimSource::Frames`)。
+///
+/// `decode` 把每个块的编码字节(WebP)解成 [`sv_pag::DecodedImage`] —— **壳侧不绑
+/// 图片解码器**(与 sv-pag 零依赖同因),解码器由调用方注入(平台强相关的一次
+/// 独立裁决)。任一帧重放 / 解码 / 构图失败,整段拒绝返回 `None`(不给半张动画)。
+pub fn register_pag<F>(seq: &sv_pag::BitmapSequence, decode: F) -> Option<u64>
+where
+    F: Fn(&[u8]) -> Option<sv_pag::DecodedImage>,
+{
+    let mut frames = Vec::with_capacity(seq.frames.len());
+    for i in 0..seq.frames.len() {
+        let img = sv_pag::replay_frame(seq, i, &decode)?;
+        // DecodedImage 是直通 RGBA;PixelImage 契约是**预乘** —— 转一下
+        // (不透明像素 alpha=255 时是恒等,所以纯不透明素材零损耗)。
+        let premul = premultiply(&img.rgba);
+        frames.push(PixelImage::new(img.width, img.height, premul)?);
+    }
+    Some(register_frames(frames))
+}
+
+/// 直通 RGBA8 → 预乘 RGBA8(`c' = c*a/255`,四舍五入)。
+fn premultiply(rgba: &[u8]) -> Vec<u8> {
+    rgba.chunks_exact(4)
+        .flat_map(|p| {
+            let a = p[3] as u16;
+            let m = |c: u8| ((c as u16 * a + 127) / 255) as u8;
+            [m(p[0]), m(p[1]), m(p[2]), p[3]]
+        })
+        .collect()
+}
+
 /// 注销。**调用方必须自己管**:注册表不知道场景树里还有没有节点引用它。
 ///
 /// 不做引用计数是因为句柄可以被自由复制(它就是个 u64),
@@ -356,6 +388,74 @@ mod tests {
             .filter(|c| matches!(c, PaintCmd::PopClip))
             .count();
         assert_eq!(pushes, pops, "push/pop 裁剪必须成对,否则宿主裁剪栈被污染");
+    }
+
+    #[test]
+    fn pag_sequence_replays_into_frames() {
+        use sv_pag::{BitmapFrame, BitmapRect, BitmapSequence, DecodedImage};
+        reset_for_test();
+        // 假解码器:标记 → 纯色 s×s(脱离真 WebP 解码器验证"重放 → 注册"这条链)
+        let decode = |b: &[u8]| -> Option<DecodedImage> {
+            let color = match b[0] {
+                b'R' => [255u8, 0, 0, 255],
+                b'G' => [0, 255, 0, 255],
+                _ => return None,
+            };
+            let s = b[1] as u32;
+            Some(DecodedImage {
+                width: s,
+                height: s,
+                rgba: (0..s * s).flat_map(|_| color).collect(),
+            })
+        };
+        // 关键帧全红 4×4 + 差分帧 (1,1) 2×2 绿
+        let seq = BitmapSequence {
+            width: 4,
+            height: 4,
+            frame_rate: 30.0,
+            frames: vec![
+                BitmapFrame {
+                    is_keyframe: true,
+                    bitmaps: vec![BitmapRect {
+                        x: 0,
+                        y: 0,
+                        bytes: b"R\x04",
+                    }],
+                },
+                BitmapFrame {
+                    is_keyframe: false,
+                    bitmaps: vec![BitmapRect {
+                        x: 1,
+                        y: 1,
+                        bytes: b"G\x02",
+                    }],
+                },
+            ],
+        };
+        let h = register_pag(&seq, decode).expect("应重放并注册");
+        assert_eq!(frame_count(h), 2, "两帧都该进注册表");
+        // 两帧内容不同(差分帧覆盖了绿块)
+        assert_ne!(
+            frame(h, 0).unwrap().id(),
+            frame(h, 1).unwrap().id(),
+            "关键帧与差分帧应是不同的图"
+        );
+
+        // 解码器不认某块 → 整段拒绝
+        let bad = BitmapSequence {
+            width: 4,
+            height: 4,
+            frame_rate: 30.0,
+            frames: vec![BitmapFrame {
+                is_keyframe: true,
+                bitmaps: vec![BitmapRect {
+                    x: 0,
+                    y: 0,
+                    bytes: b"X\x04",
+                }],
+            }],
+        };
+        assert!(register_pag(&bad, decode).is_none(), "解不了应整段拒绝");
     }
 
     #[test]

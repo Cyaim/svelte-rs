@@ -2880,6 +2880,7 @@ dependencies = [
  "pollster",
  "softbuffer",
  "sv-lottie",
+ "sv-pag",
  "sv-reactive",
  "sv-ui",
  "swash",

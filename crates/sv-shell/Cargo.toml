@@ -17,6 +17,8 @@ sv-reactive = { workspace = true }
 sv-ui = { workspace = true }
 # 矢量动画:velato 求值 → PathSink 路径动词,壳侧桥到 Painter(AnimSource::Vector)
 sv-lottie = { workspace = true }
+# PAG 位图序列:容器解析 + 差分帧重放(解码器由调用方注入,壳侧不绑图片解码器)
+sv-pag = { workspace = true }
 winit = "0.30"
 softbuffer = "0.4"
 tiny-skia = "0.11"
