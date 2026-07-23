@@ -348,7 +348,7 @@ thread_local! {
     static REC: RefCell<Option<Recorder>> = const { RefCell::new(None) };
 }
 
-/// 开始记录(`compile_sv_mapped` 入口);不调用时全部 `parse_*_at` 退化成裸
+/// 开始记录(`compile_mapped` 入口);不调用时全部 `parse_*_at` 退化成裸
 /// `parse_str`,生成代码一字不差——这是 golden 不受影响的原因。
 pub(crate) fn begin(sv_source: &str) {
     REC.with(|r| {

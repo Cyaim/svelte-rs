@@ -1,11 +1,14 @@
-//! `sv check` —— 跑 `cargo check`,把落在生成 `.rs` 上的 rustc 诊断搬回 `.svelte`。
+//! `sv` —— svelte-rs 的开发工具入口(ADR-10 标识符改名:原 `sv-check` 二进制)。
+//!
+//! 目前唯一的子命令是 `check`:跑 `cargo check`,把落在生成 `.rs` 上的
+//! rustc 诊断搬回 `.svelte`。
 //!
 //! 用法:
 //! ```sh
-//! cargo run -q -p sv-compiler --bin sv-check              # 默认 --workspace
-//! cargo run -q -p sv-compiler --bin sv-check -- -p counter-sfc
+//! cargo run -q -p sv-compiler --bin sv -- check              # 默认 --workspace
+//! cargo run -q -p sv-compiler --bin sv -- check -p counter-sfc
 //! ```
-//! 参数原样透传给 `cargo check`(features/target 都照用)。
+//! `check` 之后的参数原样透传给 `cargo check`(features/target 都照用)。
 //! 输出是 rustc 风格的单行 `路径:行:列: level[code]: 消息`,
 //! `.vscode/tasks.json` 里的 problemMatcher 直接吃这一行。
 //!
@@ -17,13 +20,30 @@ use std::process::{Command, Stdio};
 use sv_compiler::check::{Line, Session, scrape_build_script_error};
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    let usage = "sv —— svelte-rs 开发工具\n\n\
+                 用法: sv check [cargo check 的参数...]\n\
+                 `check` 把 rustc 落在生成 .rs 上的诊断搬回 .svelte;\n\
+                 不给额外参数时等价于 `cargo check --workspace`。";
+    match args.first().map(String::as_str) {
+        Some("check") => {
+            args.remove(0);
+        }
+        Some("-h") | Some("--help") => {
+            eprintln!("{usage}");
+            return;
+        }
+        Some(other) => {
+            eprintln!("sv: 未知子命令 `{other}`\n\n{usage}");
+            std::process::exit(2);
+        }
+        None => {
+            eprintln!("{usage}");
+            std::process::exit(2);
+        }
+    }
     if args.iter().any(|a| a == "-h" || a == "--help") {
-        eprintln!(
-            "sv check —— 把 rustc 落在生成 .rs 上的诊断搬回 .svelte\n\n\
-             用法: sv-check [cargo check 的参数...]\n\
-             不给参数时等价于 `cargo check --workspace`。"
-        );
+        eprintln!("{usage}");
         return;
     }
     std::process::exit(run(&args));
@@ -43,7 +63,7 @@ fn run(args: &[String]) -> i32 {
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("sv-check: 启动 cargo 失败: {e}");
+            eprintln!("sv check: 启动 cargo 失败: {e}");
             return 2;
         }
     };
@@ -81,7 +101,7 @@ fn run(args: &[String]) -> i32 {
             // 是为了不污染 problemMatcher 吃的那条 stdout 流;原文再缩进一格,
             // 免得它自己被当成一条诊断(与 `Rendered::context` 同一套约定)
             Line::Unparsed => {
-                eprintln!("sv-check: 下面这行 cargo 输出解析不了,原样透出:");
+                eprintln!("sv check: 下面这行 cargo 输出解析不了,原样透出:");
                 eprintln!("  {line}");
             }
         }

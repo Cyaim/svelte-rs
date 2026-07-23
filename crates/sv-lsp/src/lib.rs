@@ -2,7 +2,7 @@
 //!
 //! # 它做什么
 //!
-//! 编辑器每次打开 / 改动一个 `.sv` 文件,就把全文交给 `sv_compiler::compile_sv`
+//! 编辑器每次打开 / 改动一个 `.sv` 文件,就把全文交给 `sv_compiler::compile`
 //! 编译一遍;编译前端报的错(未知标签、非法属性、runes 改写失败、样式语法……)
 //! 原地变成 `textDocument/publishDiagnostics`,在编辑器里画波浪线。
 //!
@@ -222,7 +222,7 @@ impl Server {
 
     /// 编译一遍 `.sv`,把编译前端的错变成一条 publishDiagnostics。
     fn diagnostics(&self, uri: &str, text: &str) -> Out {
-        let diags = match sv_compiler::compile_sv(text, "component") {
+        let diags = match sv_compiler::compile(text, "component") {
             Ok(_) => Vec::new(),
             Err(e) => vec![diagnostic(&e)],
         };
@@ -267,7 +267,7 @@ fn diagnostic(e: &sv_compiler::CompileError) -> Value {
             ]),
         ),
         ("severity", num(1)), // 1 = Error
-        ("source", str_("sv-check")),
+        ("source", str_("sv check")),
         ("message", str_(&e.message)),
     ])
 }

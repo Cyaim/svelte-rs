@@ -22,7 +22,7 @@ fn fixtures_dir() -> PathBuf {
 }
 
 fn compile(src: &str) -> sv_compiler::Compiled {
-    sv_compiler::compile_sv_mapped(src, "probe", &PropsRegistry::new(), "probe.svelte")
+    sv_compiler::compile_mapped(src, "probe", &PropsRegistry::new(), "probe.svelte")
         .expect("fixture 应能编译")
 }
 
@@ -60,7 +60,7 @@ fn all_sv_sources() -> Vec<(String, String)> {
             let p = e.path();
             if p.is_dir() {
                 stack.push(p);
-            } else if p.extension().is_some_and(|x| x == "sv")
+            } else if p.extension().is_some_and(|x| x == "svelte")
                 && let Ok(s) = std::fs::read_to_string(&p)
             {
                 out.push((p.display().to_string(), s));
@@ -83,7 +83,7 @@ fn all_sv_sources() -> Vec<(String, String)> {
 fn mapped_output_is_byte_identical() {
     for (name, src) in all_sv_sources() {
         // 组件调用需要 props 注册表,这里只比对能独立编译的那些
-        let Ok(plain) = sv_compiler::compile_sv(&src, "probe") else {
+        let Ok(plain) = sv_compiler::compile(&src, "probe") else {
             continue;
         };
         let mapped = compile(&src);
@@ -96,7 +96,7 @@ fn mapped_output_is_byte_identical() {
 #[test]
 fn map_segments_are_verbatim() {
     for (name, src) in all_sv_sources() {
-        let Ok(_) = sv_compiler::compile_sv(&src, "probe") else {
+        let Ok(_) = sv_compiler::compile(&src, "probe") else {
             continue;
         };
         let c = compile(&src);
@@ -121,7 +121,7 @@ fn map_segments_are_verbatim() {
 #[test]
 fn map_is_sorted_and_disjoint() {
     for (name, src) in all_sv_sources() {
-        let Ok(_) = sv_compiler::compile_sv(&src, "probe") else {
+        let Ok(_) = sv_compiler::compile(&src, "probe") else {
             continue;
         };
         let c = compile(&src);
@@ -244,7 +244,7 @@ fn map_coverage_floor() {
     let (mut total, mut covered) = (0usize, 0usize);
     let mut worst: Vec<String> = Vec::new();
     for (name, src) in all_sv_sources() {
-        if sv_compiler::compile_sv(&src, "probe").is_err() {
+        if sv_compiler::compile(&src, "probe").is_err() {
             continue;
         }
         let c = compile(&src);
@@ -400,7 +400,7 @@ fn tmp_dir(tag: &str) -> PathBuf {
 fn stage(dir: &Path, sv_src: &str) -> (PathBuf, sv_compiler::Compiled) {
     let sv_path = dir.join("Probe.svelte");
     std::fs::write(&sv_path, sv_src).unwrap();
-    let c = sv_compiler::compile_sv_mapped(
+    let c = sv_compiler::compile_mapped(
         sv_src,
         "probe",
         &PropsRegistry::new(),
@@ -470,7 +470,7 @@ fn check_degrades_on_glue_without_dropping() {
         r.headline
     );
     assert!(
-        r.headline.contains("sv-check:"),
+        r.headline.contains("sv check:"),
         "降级必须附一句说明,不能默默给个假位置: {}",
         r.headline
     );
@@ -619,7 +619,7 @@ fn blown_fuse_is_not_reported_as_glue() {
 #[test]
 fn map_anchor_walk_is_total() {
     for (name, src) in all_sv_sources() {
-        if sv_compiler::compile_sv(&src, "probe").is_err() {
+        if sv_compiler::compile(&src, "probe").is_err() {
             continue;
         }
         let c = compile(&src);
@@ -642,7 +642,7 @@ fn map_anchor_walk_is_total() {
 #[test]
 fn between_interpolation_never_crosses_a_line() {
     for (name, src) in all_sv_sources() {
-        if sv_compiler::compile_sv(&src, "probe").is_err() {
+        if sv_compiler::compile(&src, "probe").is_err() {
             continue;
         }
         let c = compile(&src);
@@ -763,14 +763,15 @@ fn e2e_bad_sv_reports_on_sv_line() {
     )
     .unwrap();
 
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_sv-check"))
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_sv"))
+        .arg("check")
         .current_dir(&root)
         .env("CARGO_TARGET_DIR", root.join("target"))
         .env_remove("CARGO")
         .output()
-        .expect("跑 sv-check 失败");
+        .expect("跑 sv check 失败");
     let stdout = String::from_utf8_lossy(&out.stdout);
-    eprintln!("--- sv-check stdout ---\n{stdout}");
+    eprintln!("--- sv check stdout ---\n{stdout}");
     eprintln!("--- stderr ---\n{}", String::from_utf8_lossy(&out.stderr));
 
     // `  <text>坏的中文:{nope}</text>`:2 + 6 + 5 个中文/全角字符 + `{` = 14,nope 从 15 起
