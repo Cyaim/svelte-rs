@@ -90,6 +90,7 @@ cargo run -p showcase -- --png out.png  # 离屏渲染一帧(无需窗口)
 | `crates/sv-compiler` | `.sv` 单文件组件编译器前端(含 `sv check`) |
 | `crates/sv-shell` | winit 窗口壳 + CPU/vello 渲染器 |
 | `crates/sv-vap` · `sv-pag` · `sv-lottie` | 动画格式解析器(VAP / PAG / Lottie) |
+| `crates/sv-lsp` | `.sv` 语言服务器(LSP):实时编译诊断 |
 | `examples/` | showcase · counter(-sfc) · todo-sfc · settings-sfc · input-demo · overlay-demo · membench · vap-gift |
 
 ## 现状

@@ -46,6 +46,19 @@ sv-shell),按依赖序推送;`examples/` 不发布。
   label="..." />`,建 `ElementKind::Animation` 节点(标签名描述用途、不绑格式)。
   素材经壳侧 `register_vector`/`register_frames` 接入。`view!` 宏按 ADR-2 冻结策略不加。
 
+- **`sv-lsp`——`.sv` 语言服务器(LSP MVP)**:打开/改动 `.sv` 即把编译前端诊断
+  (未知标签、非法属性、runes 改写失败、样式语法)实时变成编辑器波浪线
+  (`textDocument/publishDiagnostics`,Full 同步)。零外部依赖(手写 `Content-Length`
+  分帧 + JSON-RPC)。与 `sv check` 分工:LSP 管编辑期高频的前端错,`sv check` 管
+  rustc 类型错。仍未做:补全/跳转/hover。
+
+- **PAG 差分帧重放**:`sv_pag::replay_frame` 把位图序列(关键帧 + 脏矩形差分)从最近
+  关键帧逐帧覆盖还原成整帧 RGBA,**仍零依赖**(图片解码器由调用方注入);
+  `sv_shell::register_pag` 把重放结果进帧注册表 → 场景树。WebP 解码器是注入 seam。
+
+- **增量 Measure(布局)**:一帧里只有 `Measure` 变更(结构没动)时复用布局树,
+  只让 taffy 重算脏子树,不整棵重建(计划步骤 3 的安全子集,不碰结构性 taffy 操作)。
+
 - **平滑滚动**(R2 档 B S6):鼠标滚轮走 140ms ease-out 逼近目标;
   触摸板 PixelDelta 保持直通。
 

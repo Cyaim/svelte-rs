@@ -94,6 +94,7 @@ Reference material (Chinese): [design & ADRs](docs/DESIGN.md) ·
 | `crates/sv-compiler` | `.sv` single-file-component compiler frontend (+ `sv check`) |
 | `crates/sv-shell` | winit window shell + CPU/vello renderers |
 | `crates/sv-vap` · `sv-pag` · `sv-lottie` | Animation-format parsers (VAP / PAG / Lottie) |
+| `crates/sv-lsp` | `.sv` language server (LSP): live compiler diagnostics |
 | `examples/` | showcase · counter(-sfc) · todo-sfc · settings-sfc · input-demo · overlay-demo · membench · vap-gift |
 
 ## Status

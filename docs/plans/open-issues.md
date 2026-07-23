@@ -9,6 +9,21 @@
 
 ## ✅ 2026-07-23 复核轮已修复
 
+- **增量 Measure(计划步骤 3 的安全子集)**(此前"未实现",本轮实现):一帧里若
+  **只有 `Measure` 变更**(结构没动)且布局树留着,不再整棵重扔 —— 只 `set_style` +
+  `set_node_context`(都标脏,taffy 最稳那层)让 taffy 重算脏子树。**§3.4 那五条
+  taffy 陷阱一条不碰**(前提就是结构没变,从不 add_child/remove/reparent)。
+  差分 fuzz(增量 vs 全量逐帧对拍)+ 定点测试(证明路径被走、树被复用、坐标逐个
+  相同)双守。仍未做:结构变更的增量(那才是陷阱区,继续全量)、walk 优化(步骤 4)。
+- **`.sv` 语言服务器 `sv-lsp`(LSP MVP)**(此前"未实现",本轮实现):打开/改动
+  `.sv` → `compile_sv` → `publishDiagnostics` 波浪线。零外部依赖(手写 `Content-Length`
+  分帧 + JSON-RPC,协议解析复用 `sv_compiler::check::json`)。纯函数 `Server::handle`
+  有单测,stdio 端到端冒烟过。仍未做:补全/跳转/hover(要符号表)。
+- **PAG 差分帧重放**(此前"未实现",本轮实现):`sv_pag::replay_frame` 从最近关键帧
+  逐帧覆盖贴脏矩形还原整帧,**仍零依赖**(解码器注入回调);`sv_shell::register_pag`
+  把重放结果进 Frames 注册表 → 场景树。假解码器脱离真 WebP 验证了铺底/覆盖/裁剪/
+  畸形安全。**唯一仍缺的是 WebP 解码器本身** —— 本环境 crates.io 镜像不可达、
+  装不了任何解码器 crate,故做成注入 seam;选定并接上解码器是一步纯胶水。
 - **Lottie 矢量档接入场景树**(此前"未实现",本轮实现):`sv-shell` 新增
   `sv-lottie` 依赖 + `register_vector`/`render_vector` + `PainterSink` 桥
   (`sv_lottie::PathSink` → `Painter` 同形动词转发);矢量动画节点现在每帧
