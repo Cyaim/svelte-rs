@@ -271,38 +271,71 @@ impl Default for Style {
 }
 
 // font_size 的 NAN(继承哨兵)要按"同为 NAN 即相等"比较,
-// 否则 set_style 的相等剪枝永远失效、每次重算都 bump 版本
+// 否则 set_style 的相等剪枝永远失效、每次重算都 bump 版本。
+//
+// **穷尽解构闸门(计划 §5.2 三道之一)**:下面用无 `..` 的模式把 self 拆开,
+// 给 Style 加字段却忘了在这里比较 = 编译错误。这比分级错更早失效也更难查——
+// 漏比一个字段,set_style 会认为"样式没变"而连 bump 都不做,新字段的改动被静默吞掉。
 impl PartialEq for Style {
     fn eq(&self, other: &Self) -> bool {
-        let fs_eq = (self.font_size.is_nan() && other.font_size.is_nan())
-            || self.font_size == other.font_size;
-        self.direction == other.direction
-            && self.gap == other.gap
-            && self.padding == other.padding
-            && self.margin == other.margin
-            && self.border == other.border
-            && self.bg == other.bg
-            && self.fg == other.fg
+        let Style {
+            direction,
+            gap,
+            padding,
+            margin,
+            border,
+            bg,
+            fg,
+            font_size,
+            width,
+            height,
+            corner_radius,
+            opacity,
+            cursor,
+            overflow,
+            overflow_x,
+            justify_content,
+            align_items,
+            align_self,
+            flex_grow,
+            flex_shrink,
+            flex_wrap,
+            min_width,
+            min_height,
+            max_width,
+            max_height,
+            text_wrap,
+            text_align,
+        } = self;
+        let fs_eq =
+            (font_size.is_nan() && other.font_size.is_nan()) || *font_size == other.font_size;
+        *direction == other.direction
+            && *gap == other.gap
+            && *padding == other.padding
+            && *margin == other.margin
+            && *border == other.border
+            && *bg == other.bg
+            && *fg == other.fg
             && fs_eq
-            && self.width == other.width
-            && self.height == other.height
-            && self.corner_radius == other.corner_radius
-            && self.opacity == other.opacity
-            && self.cursor == other.cursor
-            && self.overflow == other.overflow
-            && self.overflow_x == other.overflow_x
-            && self.justify_content == other.justify_content
-            && self.align_items == other.align_items
-            && self.align_self == other.align_self
-            && self.flex_grow == other.flex_grow
-            && self.flex_shrink == other.flex_shrink
-            && self.flex_wrap == other.flex_wrap
-            && self.min_width == other.min_width
-            && self.min_height == other.min_height
-            && self.max_width == other.max_width
-            && self.max_height == other.max_height
-            && self.text_wrap == other.text_wrap
-            && self.text_align == other.text_align
+            && *width == other.width
+            && *height == other.height
+            && *corner_radius == other.corner_radius
+            && *opacity == other.opacity
+            && *cursor == other.cursor
+            && *overflow == other.overflow
+            && *overflow_x == other.overflow_x
+            && *justify_content == other.justify_content
+            && *align_items == other.align_items
+            && *align_self == other.align_self
+            && *flex_grow == other.flex_grow
+            && *flex_shrink == other.flex_shrink
+            && *flex_wrap == other.flex_wrap
+            && *min_width == other.min_width
+            && *min_height == other.min_height
+            && *max_width == other.max_width
+            && *max_height == other.max_height
+            && *text_wrap == other.text_wrap
+            && *text_align == other.text_align
     }
 }
 

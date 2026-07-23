@@ -70,7 +70,7 @@ pub struct Template {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Verdict {
     /// 只推数据面即可。`remap[新槽位] = 旧槽位下标` ——
-    /// **推过去之前必须按它把新数据里的槽位号改写成旧表下标**,见 [`remap_slots`]。
+    /// **推过去之前必须按它把新数据里的槽位号改写成旧表下标**,见 `remap_slots`。
     DataOnly { remap: Vec<u16> },
     /// 必须走 rustc。带上原因,给热通道打日志用(不给原因的话现场只能看到"又全量重编了")
     NeedsRustc(NeedsRustc),
@@ -160,6 +160,11 @@ impl Template {
 /// 之所以不做成"调用方负责 leak":外层返回的 `Vec<TNode>` 可以由调用方处置,
 /// 但内层的 `binds`/`children` 在构造 `TNode` 的那一刻就必须已经是 `'static` 了,
 /// 这个选择躲不掉。要躲只能把 `TNode` 改成 `Cow`,而那正是裁决 1 拒绝的方案。
+///
+/// **dev 门禁**:`#[cfg(any(debug_assertions, test))]` —— 因为它泄漏,只该出现在
+/// dev 热通道。release 数据面直接来自 `static`、槽位号编译期就对,根本不调它;
+/// 门禁把"未来某段 release 代码不慎调用它导致泄漏"从"靠注释自觉"升级成编译期不可达。
+#[cfg(any(debug_assertions, test))]
 pub fn remap_slots(nodes: &[TNode], remap: &[u16]) -> Vec<TNode> {
     fn map1(slot: u16, remap: &[u16]) -> u16 {
         match remap.get(slot as usize) {
@@ -271,7 +276,7 @@ impl Bind {
         }
     }
 
-    /// 换个槽位号,种类不变(热重载重映射用,见 [`remap_slots`])
+    /// 换个槽位号,种类不变(热重载重映射用,见 `remap_slots`)
     pub fn with_slot(self, slot: u16) -> Self {
         match self {
             Bind::Text(_) => Bind::Text(slot),

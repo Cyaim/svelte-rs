@@ -1,4 +1,4 @@
-# 未了结问题登记(截至 2026-07-22)
+# 未了结问题登记(截至 2026-07-23)
 
 > 这一批工作横跨增量布局、ADR-2 ③、`sv check`、以及三种动画格式。
 > 每条线各自的 README / 计划文档里都写了缺口,但**散着放就等于没写** ——
@@ -6,6 +6,47 @@
 >
 > 规矩:**已知但没做**的写在这里;**不知道**的也写在这里并标明。
 > 一条缺口从这里消失,只能是因为它被做掉了或被明确判为不做,不能因为被遗忘。
+
+## ✅ 2026-07-23 复核轮已修复
+
+- **增量 Measure(计划步骤 3 的安全子集)**(此前"未实现",本轮实现):一帧里若
+  **只有 `Measure` 变更**(结构没动)且布局树留着,不再整棵重扔 —— 只 `set_style` +
+  `set_node_context`(都标脏,taffy 最稳那层)让 taffy 重算脏子树。**§3.4 那五条
+  taffy 陷阱一条不碰**(前提就是结构没变,从不 add_child/remove/reparent)。
+  差分 fuzz(增量 vs 全量逐帧对拍)+ 定点测试(证明路径被走、树被复用、坐标逐个
+  相同)双守。仍未做:结构变更的增量(那才是陷阱区,继续全量)、walk 优化(步骤 4)。
+- **`.sv` 语言服务器 `sv-lsp`(LSP MVP)**(此前"未实现",本轮实现):打开/改动
+  `.sv` → `compile_sv` → `publishDiagnostics` 波浪线。零外部依赖(手写 `Content-Length`
+  分帧 + JSON-RPC,协议解析复用 `sv_compiler::check::json`)。纯函数 `Server::handle`
+  有单测,stdio 端到端冒烟过。仍未做:补全/跳转/hover(要符号表)。
+- **PAG 差分帧重放 + WebP 解码(全链打通)**(此前"未实现",本轮实现):
+  `sv_pag::replay_frame`(**仍零依赖**,解码器注入回调)从最近关键帧逐帧覆盖脏矩形
+  还原整帧;`sv_shell::register_pag` 进 Frames 注册表 → 场景树。**WebP 解码已接上**:
+  网络恢复后加了 `image-webp`(纯 Rust,MIT/Apache)到 sv-shell,
+  `register_pag_webp` 用它解码;端到端测试**用真编码的 WebP 字节**(image-webp 编码
+  →解码→重放→注册)跑通,不是假解码器。仍缺:**真实 `.pag` 素材验证**(仓库仍无
+  真文件,固件是手工构造 + 真 WebP 块);容器解析本身仍未在 AE 导出的真 `.pag` 上验过。
+- **Lottie 矢量档接入场景树**(此前"未实现",本轮实现):`sv-shell` 新增
+  `sv-lottie` 依赖 + `register_vector`/`render_vector` + `PainterSink` 桥
+  (`sv_lottie::PathSink` → `Painter` 同形动词转发);矢量动画节点现在每帧
+  现算路径直发 `Painter`,不落位图。端到端记录型测试守住"发出填充路径 +
+  裁剪栈平衡"。顺带确认"`PathCmd` 等公开但不可命名"的洞本 PR 已通过
+  `paint` 的 re-export 补上(sv-lottie `path.rs` 的旧注释已随之更新)。
+- **🔴 `sv-vap` largesize box 溢出 panic**(复核新发现,非本表原有):`find_vapc`
+  对 size==1 的 64 位 largesize 做 `p + size`,debug 溢出 panic、release 环绕后
+  越界切片 panic,打破"任何输入绝不 panic"承诺。已改 `checked_add` + 回归测试。
+  同轮修 `VapConfig` 数值 `as u32` 截断(2^32+1→1),超 u32 一律报 `BadGeometry`/`BadRect`。
+- **§5.2 三道穷尽解构闸门只装了一道**:`Style::eq` 与 `to_taffy` 补上无 `..` 的
+  穷尽解构,给 `Style` 加字段而漏改 = 编译错误(此前只有 `layout_relevant` 有)。
+- **`sv check` 包络档措辞**:`check.rs` 把"节点级近似"改为"行级近似",与
+  `sourcemap.rs` 设计注释一致(节点栈未做,只能定位到行)。
+- **`update_overlay_anchor` 埋雷注释**:注释原说"重走一遍就够"(暗示可降 Position),
+  实际靠 `OverlayRegistry` 重建级承重,已改注释说明降级会静默丢锚点更新。
+- **#7(下表)**:`CLAUDE.md` 的构建产物路径已订正为"默认 `./target`,重定向那行默认注释掉"。
+- **文档横向同步**:CHANGELOG 补本轮(增量布局/`sv check`/三动画格式 + `bump` 必传
+  破坏性变更);两语 `performance.md` 把已落地的帧调度/局部布局移出"尚未实现";
+  DESIGN.md 的整帧基准数改以 membench README 为准(并订正 `bump` 点计数 34→42);
+  docs/README 与根 README 的 ADR-1..10 / 调研 ×26 / 新 crate 与示例清单 / plans 入口。
 
 ## 🔴 会咬人的(动手前必须先处理)
 
@@ -15,14 +56,14 @@
 | 2 | `sv-pag` 的 `BitmapSequence` 布局是**单源**(只有 libpag 的 C++ 那一份;libpag-lite 没有它) | 同上 | 它恰好是本 crate 最核心的结构,交叉印证缺位 |
 | 3 | 位图序列帧档在真实素材里的**占比未知** | — | 它直接决定"c2 免 libpag"这条路线能覆盖多少素材。核实了"能读",没核实"设计师实际会不会这么导" |
 | 4 | `sv-lottie` 只测过手写固件,**没跑过真实资产**(Tiger、Noto emoji 之类) | `crates/sv-lottie` | 同 #1。"渐变均值色好不好看""轨道遮罩会糊成什么样"目前全是按 velato 源码推断 |
-| 5 | velato 在**合法** Lottie 上会 `todo!()` panic(六处,解析期);`catch_unwind` 是创可贴,**渲染期残余风险没覆盖** | `sv-lottie/src/lib.rs` | 根治要给上游提 PR。渲染期那条(`animated.rs` 的 `vertices.last().unwrap()`)现在没有任何防护 |
+| 5 | velato 在**合法** Lottie 上会在导入期 panic(**七处**:4 个 `todo!()` + 3 个 `unimplemented!()`,见 `lib.rs:154-168`);`catch_unwind` 只兜解析期 | `sv-lottie/src/lib.rs` | 根治要给上游提 PR。渲染期(`Renderer::append`)刻意不加 unwind 屏障(每帧热路径);velato 0.11 的两处渲染期 `unwrap`(`animated.rs:257`、`render.rs:306`)读下来均被上一行守住、判为不可达,但**这不是上游 API 承诺**,真炸只能靠调用方兜。裁剪栈污染由 `PainterSink::Drop` 补 `pop_clip` 覆盖 |
 
 ## ⚠️ 已知的不实/未查明
 
 | # | 问题 | 位置 |
 |---|---|---|
 | 6 | **membench `deep` 两档与 `virtual 3000` 档比上一版慢 3–10%,没查明原因。** 已排除"留着布局树导致的内存压力"(关掉留树 `deep` 一点没变)。也可能是上一版基线本身偏乐观 —— 两批数字之间隔了十来个提交 | `examples/membench/README.md` |
-| 7 | `CLAUDE.md` 写"构建产物在 `C:/cargo-target/svelte-rs`",而 `.cargo/config.toml` 里那行是**注释掉的**,实际在仓库内 `./target` | `CLAUDE.md` / `.cargo/config.toml` |
+| 7 | ~~`CLAUDE.md` 的构建产物路径与 `.cargo/config.toml`(注释掉的 `target-dir`)不符~~ **✅ 2026-07-23 已订正** | `CLAUDE.md` |
 | 8 | `sv check` 的映射覆盖率 80.5%,**胶水代码(runes 改写产物)映射不回去**。这是设计边界不是 bug,但要防止有人当它是 bug 去"修" | `crates/sv-compiler/src/sourcemap.rs` |
 
 ## 各条线的欠账
@@ -59,13 +100,22 @@
 |---|---|---|---|---|
 | **VAP** | ✅ `sv-vap` | ✅(需外部 H.264 解码) | ✅ `examples/vap-gift` 端到端 | ✅ **10 个素材,含与 Python 参考逐字节对拍** |
 | **PAG** | ✅ `sv-pag`(位图序列档) | ❌ 缺 WebP 解码 + 差分帧重放 | — | 🔴 **零** |
-| **Lottie** | ✅ `sv-lottie` | ✅(自己发路径命令) | ❌ `AnimSource::Vector` 未接 | ❌ 只有手写固件 |
+| **Lottie** | ✅ `sv-lottie` | ✅(自己发路径命令) | ✅ **2026-07-23 已接**(`register_vector` + `render_vector`) | ❌ 只有手写固件 |
 
 共同欠账:
 
-- **`<animation src>` 前端标签未做**(`.sv` / `view!` 都没有)。
+- ~~`<animation src>` 前端标签未做~~ **✅ 2026-07-23 `.sv` 侧已做**:
+  `<animation src="..." loop autoplay label="..." />` 叶子标签,建
+  `ElementKind::Animation` 节点(sv-compiler:template/codegen/emit/style +
+  `animation_compiles` 测试)。素材经壳侧 `register_vector`/`register_frames`
+  接入(与 sv-ui/sv-shell 分层一致,模板层只建节点)。`view!` 宏按 ADR-2
+  冻结策略不加(checkbox/textarea/overlay 同样只在 `.sv`)。仍缺:构建期
+  importer(把 `src` 转译+注册的胶水,与解码器决策同批)、play-loop 短路(§4.2)。
 - **动画帧仍整窗重绘**。分级只让布局归零(`set_anim_frame` 是 Paint 级),绘制端没有脏矩形。ADR-6 里那段"别指望零功耗自动成立"依然成立。
-- `AnimSource::Vector` 在 `sv_shell::animation::image_for` 里恒返回 `None` —— 它要走 sv-lottie 的 `RenderSink` 直接发路径命令,不产生位图,接线是另一件事。
+- ~~`AnimSource::Vector` 恒返回 `None`~~ **✅ 2026-07-23 已接线**:壳侧新增
+  `PainterSink`(sv_lottie `PathSink` → `Painter` 的同形动词转发)+ `render_vector`
+  每帧经 velato 现算路径直发 `Painter`;裁剪成对、句柄失效静默不画,有端到端
+  记录型测试守着(`vector_registers_and_renders_paths_into_the_painter`)。
 - **没有解码器**:`sv-pag` 交出 WebP 字节、`sv-vap` 要 RGB24 输入,两者都把解码挡在外面。"引哪个解码器"是一次独立的重裁决,且与平台强相关。
 
 ### `draw_image` 的已知近似

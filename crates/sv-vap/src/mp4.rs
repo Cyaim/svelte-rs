@@ -40,7 +40,13 @@ pub fn find_vapc(mp4: &[u8]) -> Result<&str, VapError> {
             // 不前进,循环永远转下去(这类死循环在畸形文件上很常见)
             return Err(VapError::MalformedBox);
         }
-        let end = p as u64 + size;
+        // largesize 分支的 `size` 是攻击者可控的完整 u64,`p + size` 会溢出:
+        // debug 直接 panic;release 环绕成 end < p 绕过下面的越界检查,再在
+        // `&mp4[p+hdr..end]` 以 start > end 切片 panic。checked_add 把它挡在门外。
+        let end = match (p as u64).checked_add(size) {
+            Some(e) => e,
+            None => return Err(VapError::MalformedBox),
+        };
         if end > mp4.len() as u64 {
             return Err(VapError::TruncatedMp4);
         }
@@ -62,6 +68,19 @@ mod tests {
         v.extend_from_slice(typ);
         v.extend_from_slice(body);
         v
+    }
+
+    #[test]
+    fn largesize_overflow_reports_error_instead_of_panicking() {
+        // 回归:前导 box 之后跟一个 largesize=u64::MAX 的 box。
+        // 修复前:debug 在 `p + size` 算术溢出 panic;release 环绕后越界切片 panic。
+        for typ in [b"vapc", b"free"] {
+            let mut f = boxed(b"ftyp", b"isomiso2avc1mp41");
+            f.extend_from_slice(&[0, 0, 0, 1]); // size==1 → largesize
+            f.extend_from_slice(typ);
+            f.extend_from_slice(&u64::MAX.to_be_bytes());
+            assert!(matches!(find_vapc(&f), Err(VapError::MalformedBox)));
+        }
     }
 
     #[test]

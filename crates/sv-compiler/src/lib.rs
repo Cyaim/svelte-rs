@@ -1202,6 +1202,36 @@ let note = $state(String::new());
     }
 
     #[test]
+    fn animation_compiles() {
+        // <animation> 是叶子:建 Animation 节点,认 src/loop/autoplay/label
+        let src = r#"<script></script>
+<view>
+  <animation src="assets/loading.json" loop autoplay label="加载中" />
+</view>
+"#;
+        let code = compile_sv(src, "c").expect("应编译成功");
+        assert!(
+            code.contains("create_animation"),
+            "<animation> 应建 Animation 节点:\n{code}"
+        );
+        // 输出必须是合法 Rust
+        syn::parse_file(&code).unwrap();
+
+        // 叶子:带子节点应报错
+        let err = compile_sv(
+            "<script></script><view><animation>x</animation></view>",
+            "c",
+        )
+        .expect_err("animation 带子节点应报错");
+        assert!(err.message.contains("叶子"), "{}", err.message);
+
+        // 未知标签的错误信息里应列出 animation
+        let err =
+            compile_sv("<script></script><view><anim /></view>", "c").expect_err("未知标签应报错");
+        assert!(err.message.contains("animation"), "{}", err.message);
+    }
+
+    #[test]
     fn keyed_each_compiles() {
         let src = r#"<script>
 let items = $state(vec![(1i32, String::from("甲"))]);

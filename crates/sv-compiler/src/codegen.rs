@@ -510,6 +510,7 @@ impl Cg<'_> {
             Tag::View => emit::create(&el, ElemKind::View, ""),
             Tag::Checkbox => emit::create(&el, ElemKind::Checkbox, ""),
             Tag::Input | Tag::TextArea => emit::create(&el, ElemKind::TextInput, ""),
+            Tag::Animation => emit::create(&el, ElemKind::Animation, ""),
             Tag::Overlay => unreachable!("overlay 在 emit_element 顶部拦截"),
             Tag::Text | Tag::Button => {
                 let segments: &[Segment] = match children.first() {
@@ -537,6 +538,7 @@ impl Cg<'_> {
             Tag::Checkbox => "checkbox",
             Tag::Input => "input",
             Tag::TextArea => "textarea",
+            Tag::Animation => "animation",
             Tag::Overlay => unreachable!(),
             Tag::Component(_) => unreachable!(),
         };
@@ -588,6 +590,9 @@ impl Cg<'_> {
             match attr.name.as_str() {
                 "class" | "checked" | "@attach" | "autofocus" | "placeholder" | "aria-label"
                 | "rows" => {}
+                // <animation> 专属:src(源素材路径,构建期 importer 用)/ loop / autoplay
+                // / label(a11y)。模板层记录并建节点,素材注册是壳侧(register_*)的事。
+                "src" | "loop" | "autoplay" | "label" if *tag == Tag::Animation => {}
                 "value" if tag.is_text_input() => {}
                 name if name == "onclick"
                     || name.starts_with("on")

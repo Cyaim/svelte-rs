@@ -13,6 +13,7 @@ use std::rc::Rc;
 
 use tiny_skia::Pixmap;
 
+use sv_ui::dirty::DirtyItem;
 use sv_ui::{Color, Direction, Doc, DocumentInner, ElementKind, Overflow, ViewId};
 
 use crate::paint::{Painter, TinySkiaPainter};
@@ -205,6 +206,40 @@ struct MeasureCtx {
 /// 与 Painter 边界同理;调研 23 §2.2 映射表)
 fn to_taffy(s: &sv_ui::Style) -> taffy::Style {
     use taffy::prelude::*;
+    // 穷尽解构闸门(计划 §5.2 三道之一,与 sv_ui 的 Style::eq / dirty::layout_relevant 对齐):
+    // 给 Style 加字段而不在这里过一遍 = 编译错误,逼作者判断它是否进 taffy 布局。
+    // 绑到 `_` 只为形成编译期门禁,实际映射仍走下面的 `s.field`。
+    let sv_ui::Style {
+        direction: _,
+        gap: _,
+        padding: _,
+        margin: _,
+        border: _,
+        width: _,
+        height: _,
+        min_width: _,
+        min_height: _,
+        max_width: _,
+        max_height: _,
+        flex_grow: _,
+        flex_shrink: _,
+        flex_wrap: _,
+        justify_content: _,
+        align_items: _,
+        align_self: _,
+        overflow: _,
+        overflow_x: _,
+        // 影响文本测量,经 measure_leaf 进布局,但不落 taffy::Style:
+        font_size: _,
+        text_wrap: _,
+        // 以下纯绘制,不影响布局:
+        bg: _,
+        fg: _,
+        corner_radius: _,
+        opacity: _,
+        cursor: _,
+        text_align: _,
+    } = s;
     let dim = |v: Option<f32>| v.map_or(Dimension::auto(), Dimension::length);
     let bw = s.border.map(|b| b.width).unwrap_or(0.0);
     taffy::Style {
@@ -544,6 +579,10 @@ fn walk_taffy(
 struct LayoutTrees {
     tree: taffy::TaffyTree<MeasureCtx>,
     map: HashMap<u64, ViewId>,
+    /// `map` 的反向:ViewId → NodeId,增量 Measure 用(改了哪个节点就直接找到它的
+    /// taffy 节点)。只覆盖**基础树**;弹层节点不在里面(改弹层内节点会退回全量,
+    /// 见 [`try_incremental_measure`])。建树时一次性从 `map` 反转,重建才更新。
+    v2n: HashMap<ViewId, taffy::NodeId>,
     root: taffy::NodeId,
     /// 弹层各一棵独立树,**按 walk 顺序存**(Popup 注册序在前、Tooltip 恒最后)。
     /// 顺序只在"注册表没变"的前提下有效 —— 而注册表一变就是重建,所以恒有效
@@ -632,6 +671,40 @@ pub fn layout_full_cached(doc: &Doc, logical_w: f32, logical_h: f32) -> Rc<Layou
             // 树没留(小界面):落到重建,反正它便宜
         }
 
+        // 增量 Measure(计划步骤 3 的安全子集):这一帧要重建,但**全部重建项都是
+        // `Measure`**(结构没动)且树还留着 → 只更新改动节点、让 taffy 重算脏子树,
+        // 不整棵重扔。结构一变(Structure/InheritFontSize/OverlayRegistry/溢出)就
+        // 不走这条,老老实实全量 —— 那些才是 §3.4 taffy 陷阱的所在,这里一个不碰。
+        if reusable && !dirty.overflowed {
+            let only_measure = dirty.items.iter().all(|i| {
+                matches!(
+                    i,
+                    DirtyItem::Paint | DirtyItem::Position { .. } | DirtyItem::Measure { .. }
+                )
+            });
+            if only_measure {
+                let changed: Vec<ViewId> = dirty
+                    .items
+                    .iter()
+                    .filter_map(|i| match i {
+                        DirtyItem::Measure { id } => Some(*id),
+                        _ => None,
+                    })
+                    .collect();
+                let cached = slot.as_mut().expect("reusable 已保证非空");
+                if let Some(trees) = cached.trees.as_mut()
+                    && let Some(layout) = doc.read(|inner| {
+                        try_incremental_measure(inner, trees, &changed, logical_w, logical_h)
+                    })
+                {
+                    let layout = Rc::new(layout);
+                    cached.layout = Rc::clone(&layout);
+                    return layout;
+                }
+                // 增量没走成(节点不在基础树等)→ 落到下面全量,安全
+            }
+        }
+
         // **先把旧树扔掉再建新的**。留着它直到 `*slot = Some(..)` 才落地,
         // 意味着重建帧上新旧两棵树同时活着 —— 峰值内存翻倍,分配器局部性变差。
         // 实测 membench `rows 3k --mutate`(每帧都重建):不扔 20.0–21.0ms,
@@ -654,6 +727,24 @@ pub fn layout_full_cached(doc: &Doc, logical_w: f32, logical_h: f32) -> Rc<Layou
         });
         layout
     })
+}
+
+// 测试探针:增量 Measure 路径被成功走过的次数(证明它不是死代码)。
+// **thread_local**:布局本就是线程局部单线程模型(CACHE 同款),而测试并行跑 ——
+// 用进程级 static 会被别的测试线程的自增打乱 `+1` 断言。
+#[cfg(test)]
+thread_local! {
+    static INCREMENTAL_MEASURE_HITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn incremental_hits() -> usize {
+    INCREMENTAL_MEASURE_HITS.with(|c| c.get())
+}
+
+#[cfg(test)]
+pub(crate) fn reset_incremental_hits() {
+    INCREMENTAL_MEASURE_HITS.with(|c| c.set(0));
 }
 
 /// 测试探针:上一帧的布局树还留着吗。
@@ -734,12 +825,89 @@ fn build_trees(inner: &DocumentInner, logical_w: f32, logical_h: f32) -> LayoutT
         }
     }
 
+    // 反转 map(NodeId→ViewId)得到 v2n(ViewId→NodeId)。一次 O(节点数),
+    // 与建树同量级;增量 Measure 靠它 O(1) 找到改动节点的 taffy 节点。
+    let v2n = map
+        .iter()
+        .map(|(&n, &v)| (v, taffy::NodeId::from(n)))
+        .collect();
+
     LayoutTrees {
         tree,
         map,
+        v2n,
         root,
         overlays,
     }
+}
+
+/// 增量 Measure:一帧里**只有 `Measure` 变更**(结构没动)时,不重建整棵树,
+/// 只把改动节点的 taffy 样式 / 测量上下文更新掉,让 taffy 重算脏子树。
+///
+/// **为什么这条安全**(§3.4 的雷一个都不碰):它**从不** `add_child` / `remove` /
+/// reparent —— 结构没变是进入这条路的前提。改的只有 `set_style`(标脏,安全)与
+/// `set_node_context`(标脏,安全),都是 taffy 最稳的那一层。
+///
+/// 任一步对不上(节点不在基础树 v2n 里、Doc 里查不到、taffy 报错)就返回 `None`,
+/// 调用方**退回全量重建** —— 宁可慢一帧,不出错。差分 fuzz 会拿它的产物逐帧对拍
+/// 全量重算,坐标错了立刻红。
+fn try_incremental_measure(
+    inner: &DocumentInner,
+    trees: &mut LayoutTrees,
+    changed: &[ViewId],
+    logical_w: f32,
+    logical_h: f32,
+) -> Option<Layout> {
+    for &id in changed {
+        let node = trees.v2n.get(&id).copied()?;
+        let n = inner.nodes.get(id)?;
+        // 布局相关样式可能也变了(Measure 也涵盖"布局样式变") → 同步 taffy 样式
+        trees.tree.set_style(node, to_taffy(&n.style)).ok()?;
+        // 叶子(有测量上下文)才重建 context;View 只有样式没有 context
+        if trees.tree.get_node_context(node).is_some() {
+            // 有效字号:节点自己设了就用自己的,否则用旧 context 里的继承值 ——
+            // 继承值在 Measure-only 帧里稳定(改继承是 InheritFontSize,会走全量)
+            let old_px = trees
+                .tree
+                .get_node_context(node)
+                .map_or(ROOT_FONT_SIZE, |c| c.px);
+            let fs = if n.style.font_size.is_nan() {
+                old_px
+            } else {
+                n.style.font_size
+            };
+            let ctx = MeasureCtx {
+                kind: n.kind,
+                text: n.text.clone(),
+                px: fs,
+                wrap: n.kind == ElementKind::Text && n.style.text_wrap == sv_ui::TextWrap::Wrap,
+                rows: n
+                    .input
+                    .as_deref()
+                    .filter(|i| i.multiline)
+                    .map_or(1, |i| i.rows),
+                intrinsic: n.anim.as_deref().map_or((0.0, 0.0), |a| a.intrinsic),
+            };
+            trees.tree.set_node_context(node, Some(ctx)).ok()?;
+        }
+    }
+    // 测试探针:证明这条增量路径**真的被走过**(不是死代码),供 fuzz 之外的定点测试断言
+    #[cfg(test)]
+    INCREMENTAL_MEASURE_HITS.with(|c| c.set(c.get() + 1));
+
+    // taffy 只重算被标脏的子树(及其受影响的祖先);未动的分支命中缓存
+    trees
+        .tree
+        .compute_layout_with_measure(
+            trees.root,
+            taffy::Size {
+                width: taffy::AvailableSpace::Definite(logical_w),
+                height: taffy::AvailableSpace::Definite(logical_h),
+            },
+            |known, available, _id, ctx, _style| measure_leaf(known, available, ctx),
+        )
+        .ok()?;
+    Some(walk_trees(inner, trees, logical_w, logical_h))
 }
 
 /// 算好的树 → 绝对坐标产物。**便宜的那一半**:30k 档 2.6–4.6ms,纯遍历。
@@ -967,15 +1135,29 @@ pub fn paint_tree(doc: &Doc, placed: &[Placed], painter: &mut dyn Painter, scale
             match n.kind {
                 ElementKind::Animation => {
                     // 贴在**内容盒**上(扣掉 padding 与边框),与文本同口径。
-                    // 素材没接上 / 帧号越界 / 矢量档 → 什么都不画。
+                    // 素材没接上 / 帧号越界 / 句柄失效 → 什么都不画。
                     // **刻意不画占位方块**:占位方块会让"素材没接上"看起来像
                     // "接上了但内容是灰的",而这两者查的方向完全不同
-                    if let Some(a) = n.anim.as_deref()
-                        && let Some(img) = crate::animation::image_for(a)
-                    {
+                    if let Some(a) = n.anim.as_deref() {
                         let cw = (p.rect.w - s.padding.horizontal()) * scale - bw * 2.0;
                         let ch = (p.rect.h - s.padding.vertical()) * scale - bw * 2.0;
-                        painter.draw_image(x + inset, y + inset_top, cw, ch, &img);
+                        match a.source {
+                            sv_ui::AnimSource::Frames { .. } => {
+                                if let Some(img) = crate::animation::image_for(a) {
+                                    painter.draw_image(x + inset, y + inset_top, cw, ch, &img);
+                                }
+                            }
+                            // 矢量档(Lottie):每帧现算路径,直接发到 Painter,不落位图
+                            sv_ui::AnimSource::Vector { handle } => {
+                                crate::animation::render_vector(
+                                    handle,
+                                    a.frame,
+                                    (x + inset, y + inset_top, cw, ch),
+                                    op,
+                                    painter,
+                                );
+                            }
+                        }
                     }
                 }
                 ElementKind::Text => {

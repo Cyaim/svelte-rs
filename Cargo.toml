@@ -9,6 +9,7 @@ members = [
     "crates/sv-lottie",
     "crates/sv-pag",
     "crates/sv-vap",
+    "crates/sv-lsp",
     "examples/counter",
     "examples/counter-sfc",
     "examples/todo-sfc",
@@ -45,6 +46,7 @@ sv-shell = { path = "crates/sv-shell", version = "0.0.1" }
 sv-lottie = { path = "crates/sv-lottie", version = "0.0.1" }
 sv-pag = { path = "crates/sv-pag", version = "0.0.1" }
 sv-vap = { path = "crates/sv-vap", version = "0.0.1" }
+sv-lsp = { path = "crates/sv-lsp", version = "0.0.1" }
 
 [profile.dev]
 # UI 原型迭代期:略微提高优化等级让 demo 不至于太卡,同时保持编译速度

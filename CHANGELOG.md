@@ -20,6 +20,46 @@ sv-shell),按依赖序推送;`examples/` 不发布。
 
 ### 新增
 
+- **增量布局(变更分级 + 持久布局树)**:每次 `bump` 分 Paint / Position / 重建
+  三级(分级是 `bump` 的必传参数);渲染壳侧保留一棵**只读**布局树,滚动/打字/
+  换色只走 Position 或 Paint,不再触发全树重布局(约 6000 节点滚动列表:全量
+  29ms → 滚动帧 0.66ms)。C 类(结构)变更仍整棵重建。差分 fuzz 对拍全量重算。
+
+- **`sv check`**:`cargo check --message-format=json` → 源码映射 → rustc 风格输出,
+  把 `.sv` 编译错误的行列指回 `.sv` 源(而非生成的 `.rs`);附 `.vscode/tasks.json`
+  的 problemMatcher。映射覆盖率实测 80.5%(胶水/runes 改写产物退到行级近似)。
+
+- **三种动画格式(解析 + 像素,独立 crate)**:
+  - `sv-vap`(腾讯 VAP):MP4 里抠 `vapc` 配置 + alpha/RGB 并排合成,
+    `examples/vap-gift` 端到端;与 Python 参考在真实素材上逐字节对拍。
+  - `sv-pag`(PAG):零依赖纯 Rust 解析位图序列帧容器档(WebP 解码与真实素材
+    验证未做,见 `docs/plans/open-issues.md`)。
+  - `sv-lottie`(Lottie):基于 velato(`default-features=false`,依赖树无
+    vello/wgpu),自发路径命令走 tiny-skia 像素;**`AnimSource::Vector` 已接入
+    场景树**——壳侧 `register_vector` 注册 + 绘制路径 `render_vector` 每帧现算
+    路径直发 `Painter`(不落位图,缩放无损),裁剪栈成对平衡。
+- **`Painter::draw_image`**:CPU(tiny-skia)/ vello / Recording 三后端统一图像绘制,
+  是三种动画格式的共同地基;`ElementKind::Animation` 单一 kind 装所有格式,
+  `set_anim_frame` 定级 Paint(一秒 60 次换帧零布局)。
+
+- **`.sv` 的 `<animation>` 叶子标签**:`<animation src="..." loop autoplay
+  label="..." />`,建 `ElementKind::Animation` 节点(标签名描述用途、不绑格式)。
+  素材经壳侧 `register_vector`/`register_frames` 接入。`view!` 宏按 ADR-2 冻结策略不加。
+
+- **`sv-lsp`——`.sv` 语言服务器(LSP MVP)**:打开/改动 `.sv` 即把编译前端诊断
+  (未知标签、非法属性、runes 改写失败、样式语法)实时变成编辑器波浪线
+  (`textDocument/publishDiagnostics`,Full 同步)。零外部依赖(手写 `Content-Length`
+  分帧 + JSON-RPC)。与 `sv check` 分工:LSP 管编辑期高频的前端错,`sv check` 管
+  rustc 类型错。仍未做:补全/跳转/hover。
+
+- **PAG 差分帧重放 + WebP 解码**:`sv_pag::replay_frame` 把位图序列(关键帧 + 脏矩形
+  差分)从最近关键帧逐帧覆盖还原成整帧 RGBA,**sv-pag 仍零依赖**(解码器由调用方注入);
+  `sv_shell::register_pag_webp` 用内置 `image-webp`(纯 Rust)解码后进帧注册表 → 场景树。
+  仍缺:真实 `.pag` 素材验证(仓库无真文件)。
+
+- **增量 Measure(布局)**:一帧里只有 `Measure` 变更(结构没动)时复用布局树,
+  只让 taffy 重算脏子树,不整棵重建(计划步骤 3 的安全子集,不碰结构性 taffy 操作)。
+
 - **平滑滚动**(R2 档 B S6):鼠标滚轮走 140ms ease-out 逼近目标;
   触摸板 PixelDelta 保持直通。
 
@@ -64,6 +104,11 @@ sv-shell),按依赖序推送;`examples/` 不发布。
   不存在** —— 对话框/菜单读不出来。现在接到 root 的 children 名下。
 
 ### 变更
+
+- **`Doc::bump` 现在必传变更分级参数(API breaking)**:签名从 `bump()` 改为
+  `bump(item: dirty::DirtyItem)`,漏定级是编译错误。迁移:调用点按语义选
+  `Paint`(仅重绘)/ `Position`(重走坐标)/ `Structure` 等分级;绑定原语的
+  改写产物已随之更新。这是"没有分级就没有增量布局"的地基,故列为破坏性变更。
 
 - **keyed `{#each}` 行内容原地更新(ADR-7)**:行改持 `Signal<T>`,同 key 换内容
   不再显示旧数据(顺带修掉"列表一变就把所有行作用域悄悄销毁"的 bug);顺序未变

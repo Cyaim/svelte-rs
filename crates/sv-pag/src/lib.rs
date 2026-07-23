@@ -96,6 +96,7 @@ mod error;
 mod model;
 mod parse;
 mod reader;
+mod replay;
 mod tag;
 
 pub use error::{PagError, VerifyFailure};
@@ -103,4 +104,5 @@ pub use model::{
     BitmapFrame, BitmapRect, BitmapSequence, Composition, CompositionAttributes, CompositionKind,
     FileKind, ImageEncoding, PagFile,
 };
+pub use replay::{DecodedImage, replay_frame};
 pub use tag::tag_name;

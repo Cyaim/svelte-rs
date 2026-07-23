@@ -21,8 +21,9 @@ cargo run -p counter                    # 开窗跑计数器
 cargo run -p counter -- --png out.png   # 离屏渲染一帧(验证渲染,无需窗口)
 ```
 
-构建产物在 `C:/cargo-target/svelte-rs`(见 `.cargo/config.toml`,仓库在 OneDrive
-内,target 不能放同步目录)。
+构建产物默认在仓库内 `./target`。若检出目录在 OneDrive 等同步盘内,建议按
+`.cargo/config.toml` 里的注释取消 `target-dir` 那行、把产物移出同步目录
+(同步器锁文件会导致 Windows 链接失败/增量构建损坏)——**该行默认是注释掉的**。
 
 ## 架构速记
 

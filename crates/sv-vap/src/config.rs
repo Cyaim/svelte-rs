@@ -82,8 +82,10 @@ impl VapConfig {
             if a.len() != 4 {
                 return Err(VapError::BadRect(k.to_string(), a.len()));
             }
-            let neg = a.iter().any(|v| *v < 0);
-            if neg {
+            // 负数或超出 u32 都算畸形:`as u32` 会把 2^32+1 截成 1,
+            // 之后 fits_in 的 checked_add 在错误的小值上反而通过,静默画错。
+            let bad = a.iter().any(|v| *v < 0 || *v > u32::MAX as i64);
+            if bad {
                 return Err(VapError::BadRect(k.to_string(), a.len()));
             }
             Ok(Rect {
@@ -105,6 +107,13 @@ impl VapConfig {
         let rgb_rect = rect("rgbFrame")?;
 
         if frames < 0 || width <= 0 || height <= 0 || video_width <= 0 || video_height <= 0 {
+            return Err(VapError::BadGeometry);
+        }
+        // 上界:这些量随后 `as u32`,超过 u32::MAX 会静默截断(如 2^32+1→1)。
+        if [frames, width, height, video_width, video_height]
+            .iter()
+            .any(|v| *v > u32::MAX as i64)
+        {
             return Err(VapError::BadGeometry);
         }
         if !(fps > 0.0 && fps.is_finite()) {
@@ -313,6 +322,27 @@ mod tests {
                 "{to} 应被拒绝(否则后面会除零或越界采样)"
             );
         }
+    }
+
+    #[test]
+    fn oversized_integers_do_not_truncate_into_valid_geometry() {
+        // 2^32+1 as u32 == 1:若不设上界,巨大的 w/f 会静默截成合法小值。
+        let over = (u32::MAX as i64 + 1).to_string();
+        for from in ["\"w\":750", "\"f\":150"] {
+            let key = &from[..from.find(':').unwrap()];
+            let bad = REAL.replace(from, &format!("{key}:{over}"));
+            assert_eq!(
+                VapConfig::parse(&bad),
+                Err(VapError::BadGeometry),
+                "{from} 超 u32 应报错而非截断"
+            );
+        }
+        // rect 分量同理:aFrame 的 w 超 u32
+        let bad = REAL.replace("[754,0,375,812]", &format!("[754,0,{over},812]"));
+        assert!(matches!(
+            VapConfig::parse(&bad),
+            Err(VapError::BadRect(_, _))
+        ));
     }
 
     #[test]

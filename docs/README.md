@@ -19,13 +19,14 @@ research reports — is currently Chinese-only and linked as-is.
 
 ## Reference (Chinese)
 
-- [DESIGN.md](DESIGN.md) — architecture design and the ADR record (ADR-1..9). Read this before changing architecture.
+- [DESIGN.md](DESIGN.md) — architecture design and the ADR record (ADR-1..10). Read this before changing architecture.
 - [SVELTE-SUPPORT.md](SVELTE-SUPPORT.md) — Svelte 5 syntax/feature support matrix, 77 items.
 - [CSS-SUPPORT.md](CSS-SUPPORT.md) — modern-CSS gap matrix, 91 items.
+- [plans/](plans/) — working plans and, notably, [plans/open-issues.md](plans/open-issues.md), the single registry of known gaps (a CLAUDE.md must-read).
 
 ## Research
 
-Twenty-five internet-verified research reports (Chinese) that back the ADRs, 2026-07:
+Twenty-six internet-verified research reports (Chinese) that back the ADRs, 2026-07:
 
 | # | Report |
 |---|---|
@@ -54,6 +55,7 @@ Twenty-five internet-verified research reports (Chinese) that back the ADRs, 202
 | 23 | [taffy layout + text wrapping](research/23-taffy-text-wrap.md) |
 | 24 | [Parley migration + AccessKit](research/24-parley-accesskit.md) |
 | 25 | [Overlay system + release engineering](research/25-overlay-release-engineering.md) |
+| 26 | [arco.design-style component-kit feasibility (sv-arco)](research/26-arco-design-ui-kit.md) |
 
 ## Conventions
 

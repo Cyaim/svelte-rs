@@ -18,7 +18,15 @@ mod text;
 mod vello_backend;
 
 pub use a11y::{A11yCache, build_tree_update, dispatch_action, incremental_tree_update};
-pub use animation::{frame, frame_count, register_frames, unregister};
+pub use animation::{
+    frame, frame_count, register_frames, register_pag, register_pag_webp, register_vector,
+    unregister, unregister_vector,
+};
+// 矢量动画资产类型:下游用 `Lottie::from_slice` 解析后交给 `register_vector`
+pub use sv_lottie::{Error as LottieError, Lottie};
+// PAG 位图序列:下游用 `sv_pag::PagFile::parse` 拿 `BitmapSequence`,配一个图片
+// 解码器交给 `register_pag`(差分帧重放成逐帧图)
+pub use sv_pag::{BitmapSequence, DecodedImage, PagFile};
 // `mod paint` 是私有的,所以这里没列出的类型就是**公开但不可命名** ——
 // 外部 crate 既写不出类型名也构造不出值。路径那五个类型漏了整整一轮:
 // `Painter::fill_path` 明明是 pub trait 的 pub 方法,外面却根本调不动,
@@ -2950,6 +2958,50 @@ cd",
             assert!(t < 5000.0, "动画没有在合理时间内结束");
         }
         assert!(frames > 3, "滚动动画至少要推进几帧,否则这条没测到东西");
+    }
+
+    /// 增量 Measure(计划步骤 3 的安全子集):纯文本变更**复用布局树**、
+    /// 只让 taffy 重算脏子树,且产物与全量重算**逐字段相同**。
+    ///
+    /// 这条和差分 fuzz 是两个层面的守卫:fuzz 证明"随机负载下增量 == 全量"(正确性),
+    /// 这条证明"增量路径真的被走(不是死代码)+ 结构没动时确实没重建树"(它生效了)。
+    #[test]
+    fn incremental_measure_reuses_tree_and_matches_full() {
+        crate::render::cache_reset();
+        crate::render::reset_incremental_hits();
+        let (doc, _scope, scroller) = big_doc(300);
+        let _ = crate::render::layout_full_cached(&doc, 800.0, 600.0);
+        assert!(crate::render::cache_has_trees(), "大树应留着(>512 节点)");
+
+        // 改一个文本节点的文字:纯 Measure(结构不变)
+        let text_id = doc.read(|i| {
+            let row = i.nodes[scroller].children[0];
+            i.nodes[row].children[0]
+        });
+        doc.set_text(text_id, "改成很长很长很长很长很长的一段文字撑大它的固有宽");
+
+        let before = crate::render::incremental_hits();
+        let incr = crate::render::layout_full_cached(&doc, 800.0, 600.0);
+        let after = crate::render::incremental_hits();
+        assert_eq!(
+            after,
+            before + 1,
+            "纯文本变更应走增量 Measure 路径,而不是全量重建"
+        );
+        assert!(crate::render::cache_has_trees(), "增量后树仍留着,没被重建");
+
+        // 增量结果必须与全量重算逐个坐标相同(taffy disable_rounding → 确定性)
+        let full = crate::render::layout_tree_full(&doc, 800.0, 600.0);
+        assert_eq!(incr.placed.len(), full.placed.len(), "节点数应一致");
+        for (a, b) in incr.placed.iter().zip(full.placed.iter()) {
+            assert_eq!(a.id, b.id, "顺序/身份应一致");
+            assert_eq!(
+                (a.rect.x, a.rect.y, a.rect.w, a.rect.h),
+                (b.rect.x, b.rect.y, b.rect.w, b.rect.h),
+                "增量与全量的坐标必须逐个相同(node {:?})",
+                a.id
+            );
+        }
     }
 
     /// 分级漏项的差分 fuzz —— **这是变更分级唯一真正的安全网**。

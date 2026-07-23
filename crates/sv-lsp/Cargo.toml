@@ -1,0 +1,21 @@
+[package]
+name = "sv-lsp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+authors.workspace = true
+description = ".sv 语言服务器(LSP):把编译器诊断实时喂给编辑器"
+
+[[bin]]
+name = "sv-lsp"
+path = "src/main.rs"
+
+[dependencies]
+# 复用 sv-compiler 的编译前端(诊断)与手写 JSON —— 全零外部依赖,与全仓一致
+sv-compiler = { workspace = true }

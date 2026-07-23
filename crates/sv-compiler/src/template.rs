@@ -21,6 +21,11 @@ pub enum Tag {
     /// 弹层(调研 25:children 编译成 overlay_block 的 build 闭包;
     /// 锚定到**父容器元素**)
     Overlay,
+    /// 动画叶子(`<animation src="..." loop autoplay label="..." />`)。
+    /// **标签名描述用途,不绑格式**(pag/lottie/序列帧都收成一个运行时 kind,
+    /// 与 textarea 同款先例)。模板层只建 `ElementKind::Animation` 节点;
+    /// 素材注册是壳侧的事(`sv_shell::register_vector`/`register_frames`)。
+    Animation,
     /// 大写开头的标签 = 组件调用,如 `<TodoItem />`
     Component(String),
 }
@@ -309,6 +314,7 @@ impl<'a> Parser<'a> {
             "input" => Tag::Input,
             "textarea" => Tag::TextArea,
             "overlay" => Tag::Overlay,
+            "animation" => Tag::Animation,
             "" => return Err(self.err(off, "`<` 后应为标签名")),
             other if other.chars().next().unwrap().is_ascii_uppercase() => {
                 Tag::Component(other.to_string())
@@ -317,8 +323,8 @@ impl<'a> Parser<'a> {
                 return Err(self.err(
                     off + 1,
                     format!(
-                        "未知标签 `{other}`(内置 view/text/button/checkbox/input/textarea;\
-                         组件用大写开头)"
+                        "未知标签 `{other}`(内置 view/text/button/checkbox/input/textarea/\
+                         overlay/animation;组件用大写开头)"
                     ),
                 ));
             }
@@ -361,7 +367,7 @@ impl<'a> Parser<'a> {
                 children,
                 offset: off,
             }),
-            Tag::Checkbox | Tag::Input | Tag::TextArea => {
+            Tag::Checkbox | Tag::Input | Tag::TextArea | Tag::Animation => {
                 if !children.is_empty() {
                     return Err(self.err(off, format!("`<{name}>` 是叶子元素,请自闭合")));
                 }
