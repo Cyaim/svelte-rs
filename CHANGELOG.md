@@ -42,6 +42,10 @@ sv-shell),按依赖序推送;`examples/` 不发布。
   是三种动画格式的共同地基;`ElementKind::Animation` 单一 kind 装所有格式,
   `set_anim_frame` 定级 Paint(一秒 60 次换帧零布局)。
 
+- **`.sv` 的 `<animation>` 叶子标签**:`<animation src="..." loop autoplay
+  label="..." />`,建 `ElementKind::Animation` 节点(标签名描述用途、不绑格式)。
+  素材经壳侧 `register_vector`/`register_frames` 接入。`view!` 宏按 ADR-2 冻结策略不加。
+
 - **平滑滚动**(R2 档 B S6):鼠标滚轮走 140ms ease-out 逼近目标;
   触摸板 PixelDelta 保持直通。
 

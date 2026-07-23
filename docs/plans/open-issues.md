@@ -87,8 +87,13 @@
 
 共同欠账:
 
-- **`<animation src>` 前端标签未做**(`.sv` / `view!` 都没有)。运行期 API 已齐
-  (`create_animation` + `register_frames`/`register_vector`),缺的是模板层糖。
+- ~~`<animation src>` 前端标签未做~~ **✅ 2026-07-23 `.sv` 侧已做**:
+  `<animation src="..." loop autoplay label="..." />` 叶子标签,建
+  `ElementKind::Animation` 节点(sv-compiler:template/codegen/emit/style +
+  `animation_compiles` 测试)。素材经壳侧 `register_vector`/`register_frames`
+  接入(与 sv-ui/sv-shell 分层一致,模板层只建节点)。`view!` 宏按 ADR-2
+  冻结策略不加(checkbox/textarea/overlay 同样只在 `.sv`)。仍缺:构建期
+  importer(把 `src` 转译+注册的胶水,与解码器决策同批)、play-loop 短路(§4.2)。
 - **动画帧仍整窗重绘**。分级只让布局归零(`set_anim_frame` 是 Paint 级),绘制端没有脏矩形。ADR-6 里那段"别指望零功耗自动成立"依然成立。
 - ~~`AnimSource::Vector` 恒返回 `None`~~ **✅ 2026-07-23 已接线**:壳侧新增
   `PainterSink`(sv_lottie `PathSink` → `Painter` 的同形动词转发)+ `render_vector`
