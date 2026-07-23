@@ -37,11 +37,42 @@ impl Tag {
     }
 }
 
+/// 用户源码载荷(表达式 / 模式 / 索引名)——公共 IR 的双前端分叉点。
+///
+/// 两个前端的表达式表示天然不同,这里用双态承载而不是归一成字符串
+/// (归一会把宏路径的 span 精度赔进去,那是 ADR-2 保留双前端的硬约束):
+/// - `.svelte` 文本前端产 [`ExprSrc::Text`]:源码串 + 全文字节偏移,
+///   codegen 期经 sourcemap 垫位解析 + runes 改写;
+/// - `view!` 宏前端产 [`ExprSrc::Tokens`]:带真 span 的 Rust token 原样直通,
+///   **不过任何改写**(runes/force-move/预克隆都是 `.svelte` 语义),
+///   编译错误因此仍指到用户源码的准确 token。
 #[derive(Debug)]
-pub struct ExprSrc {
-    pub src: String,
-    /// 在 .svelte 全文中的字节偏移(错误定位)
-    pub offset: usize,
+pub enum ExprSrc {
+    Text {
+        src: String,
+        /// 在 .svelte 全文中的字节偏移(错误定位)
+        offset: usize,
+    },
+    Tokens(proc_macro2::TokenStream),
+}
+
+impl ExprSrc {
+    /// 错误定位用偏移:Tokens 形态没有文本偏移,统一取 0
+    /// (宏路径的用户错误在解析期已带真 span 报出,这里只是兜底)
+    pub fn offset(&self) -> usize {
+        match self {
+            ExprSrc::Text { offset, .. } => *offset,
+            ExprSrc::Tokens(_) => 0,
+        }
+    }
+
+    /// 展示用源码文本({@debug} 标签等)
+    pub fn display_src(&self) -> String {
+        match self {
+            ExprSrc::Text { src, .. } => src.clone(),
+            ExprSrc::Tokens(ts) => ts.to_string(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -88,9 +119,9 @@ pub enum Node {
     },
     Each {
         list: ExprSrc,
-        pat: String,
-        pat_offset: usize,
-        index: Option<String>,
+        /// 行绑定模式(`as` 后的部分;宏前端为带 span 的 `syn::Pat` token)
+        pat: ExprSrc,
+        index: Option<ExprSrc>,
         /// `(key)` keyed 形态:按 key 复用行作用域
         key: Option<ExprSrc>,
         children: Vec<Node>,
@@ -140,7 +171,9 @@ pub enum Node {
     },
 }
 
-pub fn parse(source: &str, span: &Span) -> Result<Vec<Node>, CompileError> {
+/// `.svelte` 模板文本 → IR(文本前端的 parser 分叉;`view!` 的 token parser
+/// 在 sv-macro,两者只在 IR 汇合)。crate 内部入口——`Span` 来自 sfc 切块
+pub(crate) fn parse(source: &str, span: &Span) -> Result<Vec<Node>, CompileError> {
     let mut p = Parser {
         source,
         pos: span.start,
@@ -286,7 +319,7 @@ impl<'a> Parser<'a> {
                 self.pos += 1;
                 let src = self.read_balanced()?;
                 self.expect("}", "插值表达式结束")?;
-                segments.push(Segment::Expr(ExprSrc { src, offset: off }));
+                segments.push(Segment::Expr(ExprSrc::Text { src, offset: off }));
             } else {
                 let start = self.pos;
                 while let Some(c) = self.cur() {
@@ -416,7 +449,7 @@ impl<'a> Parser<'a> {
             }
             return Ok(Attr {
                 name: "@attach".to_string(),
-                value: AttrValue::Expr(ExprSrc { src, offset: voff }),
+                value: AttrValue::Expr(ExprSrc::Text { src, offset: voff }),
                 offset: off,
             });
         }
@@ -432,7 +465,7 @@ impl<'a> Parser<'a> {
             self.expect("}", "简写属性结束")?;
             return Ok(Attr {
                 name: name.clone(),
-                value: AttrValue::Expr(ExprSrc {
+                value: AttrValue::Expr(ExprSrc::Text {
                     src: name,
                     offset: off + 1,
                 }),
@@ -478,7 +511,7 @@ impl<'a> Parser<'a> {
             self.pos += 1;
             let src = self.read_balanced()?;
             self.expect("}", "表达式属性值结束")?;
-            AttrValue::Expr(ExprSrc { src, offset: voff })
+            AttrValue::Expr(ExprSrc::Text { src, offset: voff })
         } else {
             return Err(self.err(
                 self.pos,
@@ -504,7 +537,7 @@ impl<'a> Parser<'a> {
         // `</` 也作为终止符:块里遇到的闭合标签必然属于祖先元素,
         // 交回上层处理;若 {/if} 缺失,下面会在 {#if} 处报错
         let mut arms = vec![Arm {
-            cond: ExprSrc {
+            cond: ExprSrc::Text {
                 src: cond,
                 offset: cond_off,
             },
@@ -520,7 +553,7 @@ impl<'a> Parser<'a> {
                     let cond = self.read_balanced()?;
                     self.expect("}", "{:else if 条件} 结束")?;
                     arms.push(Arm {
-                        cond: ExprSrc {
+                        cond: ExprSrc::Text {
                             src: cond,
                             offset: coff,
                         },
@@ -571,12 +604,14 @@ impl<'a> Parser<'a> {
                 return Err(self.err(off, "{#each} 没有对应的 {/each}"));
             }
             return Ok(Node::Each {
-                list: ExprSrc {
+                list: ExprSrc::Text {
                     src: header.trim().to_string(),
                     offset: header_off,
                 },
-                pat: "_".to_string(),
-                pat_offset: header_off,
+                pat: ExprSrc::Text {
+                    src: "_".to_string(),
+                    offset: header_off,
+                },
                 index: None,
                 key: None,
                 children,
@@ -598,7 +633,7 @@ impl<'a> Parser<'a> {
                 if key_src.is_empty() {
                     return Err(self.err(off, "{#each} 的 (key) 不能为空"));
                 }
-                key = Some(ExprSrc {
+                key = Some(ExprSrc::Text {
                     src: key_src,
                     offset: header_off + as_pos + 2 + paren + 1,
                 });
@@ -606,13 +641,20 @@ impl<'a> Parser<'a> {
             }
         }
 
+        let binding_off = header_off + as_pos + 2;
         let (pat_src, index) = match find_top_level(binding, ",") {
             Some(c) => {
                 let idx = binding[c + 1..].trim();
                 if idx.is_empty() || !idx.chars().all(|ch| ch.is_alphanumeric() || ch == '_') {
                     return Err(self.err(off, format!("{{#each}} 的索引名 `{idx}` 不是合法标识符")));
                 }
-                (binding[..c].trim().to_string(), Some(idx.to_string()))
+                (
+                    binding[..c].trim().to_string(),
+                    Some(ExprSrc::Text {
+                        src: idx.to_string(),
+                        offset: binding_off + c + 1,
+                    }),
+                )
             }
             None => (binding.trim().to_string(), None),
         };
@@ -635,12 +677,14 @@ impl<'a> Parser<'a> {
             return Err(self.err(off, "{#each} 没有对应的 {/each}"));
         }
         Ok(Node::Each {
-            list: ExprSrc {
+            list: ExprSrc::Text {
                 src: list_src,
                 offset: header_off,
             },
-            pat: pat_src,
-            pat_offset: header_off + as_pos + 2,
+            pat: ExprSrc::Text {
+                src: pat_src,
+                offset: binding_off,
+            },
             index,
             key,
             children,
@@ -762,7 +806,7 @@ impl<'a> Parser<'a> {
             return Err(self.err(off, "{#await} 需要 {:then} 分支(v0 不支持纯 pending 形态)"));
         }
         Ok(Node::Await {
-            fut: ExprSrc {
+            fut: ExprSrc::Text {
                 src: fut,
                 offset: fut_off,
             },
@@ -786,7 +830,7 @@ impl<'a> Parser<'a> {
         }
         self.expect("}", "{@render} 结束")?;
         Ok(Node::Render {
-            call: ExprSrc {
+            call: ExprSrc::Text {
                 src,
                 offset: call_off,
             },
@@ -805,7 +849,7 @@ impl<'a> Parser<'a> {
             .into_iter()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
-            .map(|s| ExprSrc {
+            .map(|s| ExprSrc::Text {
                 src: s,
                 offset: args_off,
             })
@@ -830,7 +874,7 @@ impl<'a> Parser<'a> {
             return Err(self.err(off, "{#key} 没有对应的 {/key}"));
         }
         Ok(Node::Key {
-            key: ExprSrc {
+            key: ExprSrc::Text {
                 src: key,
                 offset: key_off,
             },
@@ -857,7 +901,7 @@ impl<'a> Parser<'a> {
         self.expect("}", "{@const} 结束")?;
         Ok(Node::Const {
             name,
-            expr: ExprSrc {
+            expr: ExprSrc::Text {
                 src: expr,
                 offset: expr_off,
             },

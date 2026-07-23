@@ -29,15 +29,18 @@
 
 pub mod check;
 mod codegen;
-/// 绑定原语调用词汇表:**双前端共享的 codegen 内核**
-/// (`view!` 宏从这里发射同一套调用;见 emit.rs 头部说明)
+/// 绑定原语调用词汇表:双前端共享 codegen 的最终发射口(见 emit.rs 头部说明)
 pub mod emit;
 mod script;
 mod sfc;
 /// 生成 `.rs` ↔ `.svelte` 的位置映射(`sv check` 把 rustc 的诊断搬回 `.svelte` 靠它)
 pub mod sourcemap;
 mod style;
-mod template;
+/// **双前端共享的模板 IR**(ADR-2 内核合并):`.svelte` 的模板 parser 与
+/// `view!` 宏的 token parser 都产出这套节点,codegen 只有一份。
+/// 表达式载荷是双态 [`template::ExprSrc`]——文本前端带字节偏移,
+/// 宏前端带真 span 的 token,span 精度因此不被合并牺牲。
+pub mod template;
 
 use std::fmt;
 use std::path::Path;
@@ -116,6 +119,18 @@ impl PropsRegistry {
 /// 编译一份 .svelte 源码(无组件注册表;模板里出现组件标签会报"未知组件")
 pub fn compile_sv(source: &str, fn_name: &str) -> Result<String, CompileError> {
     compile_sv_with(source, fn_name, &PropsRegistry::new())
+}
+
+/// 双前端共享内核的宏侧入口:模板 IR 节点 → 建树/绑定语句序列(TokenStream)。
+///
+/// `view!` 宏(sv-macro)把 token 解析成 [`template::Node`](template::Node)
+/// 后从这里走**同一份 codegen**。不带 script/样式表/props 上下文:宏模板的
+/// 表达式是 [`template::ExprSrc::Tokens`](template::ExprSrc)(用户亲手写的
+/// 最终 Rust,带真 span),不过 runes 改写、普通变量预克隆与 sourcemap 记录。
+pub fn generate_template(
+    nodes: &[template::Node],
+) -> Result<proc_macro2::TokenStream, CompileError> {
+    codegen::generate_template(nodes)
 }
 
 /// 编译一份 .svelte 源码,返回生成的 Rust 源码
