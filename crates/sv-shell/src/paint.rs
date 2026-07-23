@@ -759,10 +759,15 @@ fn path_bbox_i32(path: &[PathCmd]) -> (i32, i32, i32, i32) {
 pub struct TinySkiaPainter<'a> {
     pixmap: &'a mut Pixmap,
     /// 累积交集后的裁剪矩形栈(物理像素;top 即当前生效裁剪)。
-    /// v0 裁决(调研 22 §2.3):手动矩形交集,不用 tiny-skia Mask——
-    /// Mask 每层要分配整画布 w×h 字节且嵌套逐像素相乘,与 CPU 栈能力
-    /// 冻结(ADR-3b)相悖;圆角裁剪为矩形近似(角部最多溢出 ~radius²px)
+    /// v0 裁决(调研 22 §2.3):手动矩形交集,不用 tiny-skia Mask 做**常规**
+    /// 裁剪——Mask 每层要分配整画布 w×h 字节,与 CPU 栈能力冻结(ADR-3b)
+    /// 相悖;圆角裁剪为矩形近似(角部最多溢出 ~radius²px)。
+    /// 例外见 [`Self::ensure_clip_mask`]:描边与任意路径**必须**走 Mask。
     clips: Vec<[f32; 4]>,
+    /// 描边/路径用的裁剪 Mask(键 = 生效裁剪矩形)。懒建 + 按矩形值缓存:
+    /// 没有"裁剪内描边/路径"的帧一个字节都不分配;滚动帧里裁剪矩形
+    /// 整帧不变,Mask 只建一次
+    clip_mask: Option<([f32; 4], tiny_skia::Mask)>,
 }
 
 impl<'a> TinySkiaPainter<'a> {
@@ -770,7 +775,40 @@ impl<'a> TinySkiaPainter<'a> {
         Self {
             pixmap,
             clips: Vec::new(),
+            clip_mask: None,
         }
+    }
+
+    /// 保证 `clip_mask` 与当前生效裁剪一致(无裁剪时清掉)。
+    ///
+    /// 描边不能几何裁剪(收缩轮廓会造出幻影边),又不能放任出血:
+    /// 视口底缘被裁一半的输入框,它的下边框会画到滚动区**外面**
+    /// (真机可见的悬浮边框碎片),而且出血距离 = 节点越界深度,无上界 ——
+    /// 脏矩形的"墨迹范围"就此失去边界,损伤重画会漏掉这些像素。
+    /// Mask 是唯一两全的裁法:光栅化照常走完整轮廓,写像素时按位遮罩。
+    fn ensure_clip_mask(&mut self) {
+        let Some(&top) = self.clips.last() else {
+            // 无裁剪时**保留**缓存不清:mask_for 按"缓存键 == 当前 top"取,
+            // 留着的旧条目不会被误用;清了的话「有裁剪→无裁剪→同裁剪」的
+            // 交替会白白重建整画布 Mask(评审发现 #17)
+            return;
+        };
+        if self.clip_mask.as_ref().is_some_and(|(r, _)| *r == top) {
+            return;
+        }
+        let mask = tiny_skia::Mask::new(self.pixmap.width(), self.pixmap.height());
+        let Some(mut mask) = mask else {
+            self.clip_mask = None; // 分配失败:退回出血(画多不画错)
+            return;
+        };
+        let mut pb = PathBuilder::new();
+        if let Some(rect) = tiny_skia::Rect::from_xywh(top[0], top[1], top[2], top[3]) {
+            pb.push_rect(rect);
+        }
+        if let Some(path) = pb.finish() {
+            mask.fill_path(&path, FillRule::Winding, true, Transform::identity());
+        }
+        self.clip_mask = Some((top, mask));
     }
 
     /// 绘制矩形与当前裁剪求交;None = 完全被裁掉
@@ -877,6 +915,18 @@ fn skia_color(c: Color) -> tiny_skia::Color {
     tiny_skia::Color::from_rgba8(c.r, c.g, c.b, c.a)
 }
 
+/// 当前生效裁剪的 Mask(无裁剪 / 缓存不一致时 None)。
+/// 自由函数而不是方法:调用点同时要 `&mut pixmap`,方法会整借 `self`
+fn mask_for<'m>(
+    cache: &'m Option<([f32; 4], tiny_skia::Mask)>,
+    clips: &[[f32; 4]],
+) -> Option<&'m tiny_skia::Mask> {
+    match (cache, clips.last()) {
+        (Some((r, m)), Some(top)) if r == top => Some(m),
+        _ => None,
+    }
+}
+
 fn rounded_rect_path(pb: &mut PathBuilder, x: f32, y: f32, w: f32, h: f32, r: f32) {
     let r = r.min(w / 2.0).min(h / 2.0);
     if r <= 0.5 {
@@ -961,8 +1011,9 @@ impl Painter for TinySkiaPainter<'_> {
         width: f32,
         color: Color,
     ) {
-        // 视口外整体剔除;部分越界时不几何裁剪(描边收缩会造出幻影边,
-        // 允许出血,滚动容器边框在 push_clip 之外绘制,实践中罕见触发)
+        // 视口外整体剔除;部分越界时**不几何裁剪**(描边收缩会造出幻影边),
+        // 改走 Mask:光栅化完整轮廓、写像素时遮罩 —— 被视口裁一半的
+        // 输入框不再把下边框画到滚动区外(那是脏矩形无法覆盖的无界出血)
         if self.clipped(x, y, w, h).is_none() {
             return;
         }
@@ -985,8 +1036,14 @@ impl Painter for TinySkiaPainter<'_> {
                 width,
                 ..Stroke::default()
             };
-            self.pixmap
-                .stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+            self.ensure_clip_mask();
+            self.pixmap.stroke_path(
+                &path,
+                &paint,
+                &stroke,
+                Transform::identity(),
+                mask_for(&self.clip_mask, &self.clips),
+            );
         }
     }
 
@@ -1066,10 +1123,10 @@ impl Painter for TinySkiaPainter<'_> {
         let mut paint = Paint::default();
         paint.set_color(skia_color(color));
         paint.anti_alias = true;
-        // 裁剪:矩形裁剪走 Mask 太贵(见 push_clip 的矩形交集裁决),这里
-        // 用 tiny-skia 的 clip_mask 参数传 None,靠调用方保证路径在裁剪内。
-        // **已知缺口**:滚动容器内的路径图标不会被裁掉;等真有这个场景再补
-        // (补法是把 clips 栈末项转成 Mask 传进来)
+        // 裁剪走懒建的矩形 Mask(与描边同一份缓存)。曾是「已知缺口:
+        // 滚动容器内的路径图标不会被裁掉」—— ensure_clip_mask 落地后补上;
+        // 无裁剪场景仍零成本(不建 Mask)
+        self.ensure_clip_mask();
         self.pixmap.fill_path(
             &p,
             &paint,
@@ -1078,7 +1135,7 @@ impl Painter for TinySkiaPainter<'_> {
                 PathFill::EvenOdd => FillRule::EvenOdd,
             },
             Transform::identity(),
-            None,
+            mask_for(&self.clip_mask, &self.clips),
         );
     }
 
@@ -1102,9 +1159,15 @@ impl Painter for TinySkiaPainter<'_> {
             },
             ..Stroke::default()
         };
-        // 裁剪同 fill_path:见那边的已知缺口注释
-        self.pixmap
-            .stroke_path(&p, &paint, &stroke, Transform::identity(), None);
+        // 裁剪同 fill_path:懒建矩形 Mask
+        self.ensure_clip_mask();
+        self.pixmap.stroke_path(
+            &p,
+            &paint,
+            &stroke,
+            Transform::identity(),
+            mask_for(&self.clip_mask, &self.clips),
+        );
     }
 
     fn draw_image(&mut self, x: f32, y: f32, w: f32, h: f32, img: &PixelImage) {
@@ -1748,5 +1811,101 @@ mod tests {
                 bbox: (10, 0, 91, 20),
             }]
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Mask 裁剪(描边/路径):差分套件对"两边同错"是盲的,这里直接验像素
+    // -----------------------------------------------------------------
+
+    /// 描边跨越裁剪边界:裁剪外一个字节都不许动,裁剪内要真的画上
+    #[test]
+    fn stroke_respects_clip_mask() {
+        let mut pixmap = Pixmap::new(60, 60).unwrap();
+        let mut p = TinySkiaPainter::new(&mut pixmap);
+        p.push_clip(0.0, 0.0, 60.0, 30.0, 0.0);
+        // 一个 40×40 的框,下半截在裁剪外
+        p.stroke_rounded_rect(10.0, 10.0, 40.0, 40.0, 0.0, 2.0, Color::rgb(255, 0, 0));
+        p.pop_clip();
+        let px = |x: u32, y: u32| {
+            let i = ((y * 60 + x) * 4) as usize;
+            &pixmap.data()[i..i + 4]
+        };
+        assert_ne!(px(10, 10), &[0, 0, 0, 0], "裁剪内的上边框应画上");
+        for y in 30..60u32 {
+            for x in 0..60u32 {
+                assert_eq!(px(x, y), &[0, 0, 0, 0], "裁剪外 ({x},{y}) 不许有描边出血");
+            }
+        }
+    }
+
+    /// fill_path / stroke_path 跨越裁剪边界:曾是"路径不吃裁剪"的已知缺口
+    #[test]
+    fn paths_respect_clip_mask() {
+        let mut pixmap = Pixmap::new(40, 40).unwrap();
+        let mut p = TinySkiaPainter::new(&mut pixmap);
+        p.push_clip(0.0, 0.0, 40.0, 20.0, 0.0);
+        let path = [
+            PathCmd::MoveTo(5.0, 5.0),
+            PathCmd::LineTo(35.0, 5.0),
+            PathCmd::LineTo(35.0, 35.0),
+            PathCmd::LineTo(5.0, 35.0),
+            PathCmd::Close,
+        ];
+        p.fill_path(&path, PathFill::NonZero, Color::rgb(0, 128, 0));
+        p.stroke_path(
+            &path,
+            &StrokeStyle {
+                width: 2.0,
+                ..StrokeStyle::default()
+            },
+            Color::rgb(0, 0, 255),
+        );
+        p.pop_clip();
+        let data = pixmap.data();
+        for y in 20..40usize {
+            for x in 0..40usize {
+                let i = (y * 40 + x) * 4;
+                assert_eq!(
+                    &data[i..i + 4],
+                    &[0, 0, 0, 0],
+                    "裁剪外 ({x},{y}) 不许有路径像素"
+                );
+            }
+        }
+        let inside = (10 * 40 + 10) * 4;
+        assert_ne!(&data[inside..inside + 4], &[0, 0, 0, 0], "裁剪内应画上");
+    }
+
+    /// A→B→A 交替裁剪下 Mask 缓存不错用:每段描边都只落在各自裁剪内
+    #[test]
+    fn alternating_clips_use_correct_masks() {
+        let mut pixmap = Pixmap::new(60, 30).unwrap();
+        let mut p = TinySkiaPainter::new(&mut pixmap);
+        let stroke = |p: &mut TinySkiaPainter, c: Color| {
+            p.stroke_rounded_rect(-10.0, 5.0, 80.0, 20.0, 0.0, 2.0, c);
+        };
+        p.push_clip(0.0, 0.0, 20.0, 30.0, 0.0); // A
+        stroke(&mut p, Color::rgb(255, 0, 0));
+        p.pop_clip();
+        p.push_clip(40.0, 0.0, 20.0, 30.0, 0.0); // B
+        stroke(&mut p, Color::rgb(0, 255, 0));
+        p.pop_clip();
+        p.push_clip(0.0, 0.0, 20.0, 30.0, 0.0); // A 复用
+        stroke(&mut p, Color::rgb(0, 0, 255));
+        p.pop_clip();
+        let data = pixmap.data();
+        // 中缝 [20,40) 任何 y 都不许有像素(三段裁剪都不含这一列)
+        for y in 0..30usize {
+            for x in 20..40usize {
+                let i = (y * 60 + x) * 4;
+                assert_eq!(&data[i..i + 4], &[0, 0, 0, 0], "裁剪缝 ({x},{y}) 有泄漏");
+            }
+        }
+        // A 区被红后蓝覆画(上边框在 y=6 附近):蓝分量该在
+        let a = (6 * 60 + 5) * 4;
+        assert!(data[a + 2] > 0, "A 区应有(最后画的)蓝描边");
+        // B 区:绿描边
+        let b = (6 * 60 + 45) * 4;
+        assert!(data[b + 1] > 0, "B 区应有绿描边");
     }
 }

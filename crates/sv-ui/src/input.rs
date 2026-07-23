@@ -454,7 +454,7 @@ pub fn apply_edit(doc: &Doc, id: ViewId, op: EditOp) {
         // **打字是纯绘制帧**:输入框的测量恒为 200×行高×rows,与内容无关。
         // 这是分级表里收益最大的一条 —— 每个按键以前都在重排整棵树。
         // 【做 auto-size input 时这一条要改成 Measure】
-        doc.bump(crate::dirty::DirtyItem::Paint);
+        doc.bump(crate::dirty::DirtyItem::Paint { id });
     }
 }
 
@@ -477,7 +477,7 @@ pub fn handle_ime(doc: &Doc, id: ViewId, ev: ImeEvent) {
             });
             if changed {
                 // 预编辑串画在输入框里,不改输入框尺寸
-                doc.bump(crate::dirty::DirtyItem::Paint);
+                doc.bump(crate::dirty::DirtyItem::Paint { id });
             }
         }
         ImeEvent::Commit(s) => {
@@ -501,7 +501,7 @@ pub fn handle_ime(doc: &Doc, id: ViewId, ev: ImeEvent) {
                 input.preedit.take().is_some()
             });
             if changed {
-                doc.bump(crate::dirty::DirtyItem::Paint);
+                doc.bump(crate::dirty::DirtyItem::Paint { id });
             }
         }
     }

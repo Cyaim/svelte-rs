@@ -115,7 +115,7 @@ impl Layout {
 const ROOT_FONT_SIZE: f32 = 16.0;
 
 /// 继承解析:自身 NAN → 父链向上,根 fallback
-fn resolve_font_size(inner: &DocumentInner, id: ViewId) -> f32 {
+pub(crate) fn resolve_font_size(inner: &DocumentInner, id: ViewId) -> f32 {
     let mut cur = Some(id);
     while let Some(c) = cur {
         let Some(n) = inner.nodes.get(c) else { break };
@@ -638,7 +638,31 @@ thread_local! {
 /// 没有渲染壳的调用方(单测、离屏 PNG、直调 [`layout_tree_full`])不取日志,
 /// 日志会一直涨到上限然后置 `overflowed` —— 那是"退化成全量",方向是安全的。
 pub fn layout_full_cached(doc: &Doc, logical_w: f32, logical_h: f32) -> Rc<Layout> {
+    layout_full_cached_taking(doc, logical_w, logical_h).0
+}
+
+/// 同 [`layout_full_cached`],但把这一帧取走的脏日志**交还给调用方**。
+///
+/// 脏矩形消费端(`render_into_cached`)靠它:`take_dirty` 是破坏性的单消费者,
+/// 布局分档消费完就没了 —— 而"这一帧哪些节点变了"正是损伤计划的输入。
+/// 事件处理里中途布局(滚轮路由)也必须用这个变体,把日志并进待处理池,
+/// 否则那部分变更的损伤会在下一帧被静默吞掉(画错一帧,且无报错)。
+pub fn layout_full_cached_taking(
+    doc: &Doc,
+    logical_w: f32,
+    logical_h: f32,
+) -> (Rc<Layout>, sv_ui::dirty::DirtyLog) {
     let dirty = doc.take_dirty();
+    let layout = layout_full_cached_with(doc, logical_w, logical_h, &dirty);
+    (layout, dirty)
+}
+
+fn layout_full_cached_with(
+    doc: &Doc,
+    logical_w: f32,
+    logical_h: f32,
+    dirty: &sv_ui::dirty::DirtyLog,
+) -> Rc<Layout> {
     let (doc_id, w, h) = (doc.identity(), logical_w.to_bits(), logical_h.to_bits());
 
     CACHE.with(|c| {
@@ -679,7 +703,9 @@ pub fn layout_full_cached(doc: &Doc, logical_w: f32, logical_h: f32) -> Rc<Layou
             let only_measure = dirty.items.iter().all(|i| {
                 matches!(
                     i,
-                    DirtyItem::Paint | DirtyItem::Position { .. } | DirtyItem::Measure { .. }
+                    DirtyItem::Paint { .. }
+                        | DirtyItem::Position { .. }
+                        | DirtyItem::Measure { .. }
                 )
             });
             if only_measure {
@@ -1091,24 +1117,57 @@ pub fn set_caret_visible(on: bool) {
 /// 共享绘制遍历:对任意 Painter 后端发出同一命令流。
 /// 这是"可切换渲染后端"的支点(调研 14):后端只实现 Painter 三个动词
 pub fn paint_tree(doc: &Doc, placed: &[Placed], painter: &mut dyn Painter, scale: f32) {
+    paint_tree_culled(doc, placed, painter, scale, None);
+}
+
+/// f32 位级相等(裁剪矩形由同一祖先传播,同源必位同;
+/// 用 `==` 会在 clippy `float_cmp` 上挨骂,语义还没这个准)
+pub(crate) fn rect_bits_eq(a: Rect, b: Rect) -> bool {
+    a.x.to_bits() == b.x.to_bits()
+        && a.y.to_bits() == b.y.to_bits()
+        && a.w.to_bits() == b.w.to_bits()
+        && a.h.to_bits() == b.h.to_bits()
+}
+
+/// 同 [`paint_tree`],可带损伤剔除:墨迹范围(见 [`crate::damage::ink_rect`])
+/// 与所有损伤矩形都不相交的节点整个跳过 —— **剔除发生在 shaping 之前**,
+/// 这是损伤重画能省时间的全部来源(滚动帧的成本大头是每帧全量 shaping)。
+///
+/// 裁剪栈不再假设"DFS 深度每步至多 +1"(剔除会把中间节点跳掉):
+/// 栈存(虚拟深度, 矩形),按深度**与矩形位级相等**同步。无剔除时发出的
+/// push/pop 序列与旧算法逐条相同(golden 测试盯着)。
+pub(crate) fn paint_tree_culled(
+    doc: &Doc,
+    placed: &[Placed],
+    painter: &mut dyn Painter,
+    scale: f32,
+    cull: Option<&[crate::damage::PhysRect]>,
+) {
     doc.read(|inner| {
-        // 裁剪栈按 clip_depth 同步(Placed 是 DFS 序,深度每步至多 +1;
-        // effective rect 已含祖先交集,push 交集幂等)
-        let mut clip_stack: Vec<Rect> = Vec::new();
+        let mut clip_stack: Vec<(u16, Rect)> = Vec::new();
         for p in placed {
-            while clip_stack.len() > p.clip_depth as usize {
-                clip_stack.pop();
-                painter.pop_clip();
-            }
-            if (p.clip_depth as usize) > clip_stack.len()
-                && let Some(c) = p.clip
-            {
-                clip_stack.push(c);
-                painter.push_clip(c.x * scale, c.y * scale, c.w * scale, c.h * scale, 0.0);
-            }
             let Some(n) = inner.nodes.get(p.id) else {
                 continue;
             };
+            if let Some(rects) = cull {
+                let ink = crate::damage::node_ink(inner, p, scale, i32::MAX / 4);
+                if !rects.iter().any(|r| ink.intersects(r)) {
+                    continue;
+                }
+            }
+            while clip_stack.last().is_some_and(|(vd, r)| {
+                *vd > p.clip_depth
+                    || (*vd == p.clip_depth && p.clip.is_none_or(|c| !rect_bits_eq(*r, c)))
+            }) {
+                clip_stack.pop();
+                painter.pop_clip();
+            }
+            if clip_stack.last().is_none_or(|(vd, _)| *vd < p.clip_depth)
+                && let Some(c) = p.clip
+            {
+                clip_stack.push((p.clip_depth, c));
+                painter.push_clip(c.x * scale, c.y * scale, c.w * scale, c.h * scale, 0.0);
+            }
             let s = &n.style;
             let op = effective_opacity(inner, p.id);
             let bw = s.border.map(|b| b.width).unwrap_or(0.0);
@@ -1389,6 +1448,10 @@ pub fn paint_tree(doc: &Doc, placed: &[Placed], painter: &mut dyn Painter, scale
         // 画在所有节点之后 = 永远在最上层;Painter 零新动词)
         if let Some(fid) = inner.focused
             && let Some(p) = placed.iter().find(|p| p.id == fid)
+            && cull.is_none_or(|rects| {
+                let ink = crate::damage::PhysRect::outward(p.rect, scale, crate::damage::INK_PAD);
+                rects.iter().any(|r| ink.intersects(r))
+            })
         {
             let m = 2.0 * scale;
             let radius = inner
@@ -1420,11 +1483,228 @@ pub fn render_into(doc: &Doc, pixmap: &mut Pixmap, scale: f32) -> Rc<Layout> {
     let logical_w = pixmap.width() as f32 / scale;
     let logical_h = pixmap.height() as f32 / scale;
     let layout = layout_full_cached(doc, logical_w, logical_h);
+    paint_full(doc, &layout, pixmap, scale);
+    layout
+}
+
+/// 整帧:清屏 + 全量绘制(render_into 与损伤路径的 Full 分支共用同一条路,
+/// 逐像素等价才无从谈起"两条路各画各的")
+fn paint_full(doc: &Doc, layout: &Layout, pixmap: &mut Pixmap, scale: f32) {
     pixmap.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
     let mut painter = TinySkiaPainter::new(pixmap);
     paint_tree(doc, &layout.placed, &mut painter, scale);
     paint_scrollbars(doc, &layout.scroll_areas, &mut painter, scale);
-    layout
+}
+
+/// 一帧的渲染结论(事件循环按它决定要不要 present / 打统计)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RenderOutcome {
+    /// 整帧重画了
+    Full,
+    /// 搬了 `blits` 段、补画了 `rects` 个矩形
+    Partial { blits: usize, rects: usize },
+    /// 一个像素都没变(纯回调注册 / 零位移滚动):framebuffer 原样,
+    /// 调用方可以跳过 present
+    Skip,
+}
+
+/// 损伤渲染的常驻状态(事件循环持有;离屏/测试各自建一份)。
+///
+/// `prev` 的失效纪律(错失效 = 画错帧,漏失效 = 白跑全量):
+/// - framebuffer 重分配(尺寸变)→ 内容没了,`invalidate`;
+/// - scale / Doc 变 → `render_into_cached` 自检不匹配走全量并重建快照;
+/// - present 失败 → framebuffer 里的像素**仍然有效**(present 只是拷出),
+///   快照可留;但下一帧必须强制重新 present(事件循环的事,见 lib.rs)。
+pub struct DamageCtx {
+    prev: Option<crate::damage::FrameSnapshot>,
+    /// 与 framebuffer 同尺寸的 scratch:损伤矩形在这里白底重画再拷回。
+    /// 出血(描边越裁剪、fill_path 不吃裁剪、圆角重切)落在矩形外,
+    /// 拷回时天然丢弃 —— 正确性不依赖画家层的裁剪精度
+    scratch: Option<Pixmap>,
+    /// 事件处理中途布局取走的脏日志攒在这里,渲染时并入本帧日志
+    pending: sv_ui::dirty::DirtyLog,
+    /// SV_DAMAGE=0 一键关闭(保险丝):恒走整帧
+    pub enabled: bool,
+    pub stats: DamageStats,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DamageStats {
+    pub full: u64,
+    pub partial: u64,
+    pub blit: u64,
+    pub skip: u64,
+}
+
+impl Default for DamageCtx {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DamageCtx {
+    pub fn new() -> Self {
+        DamageCtx {
+            prev: None,
+            scratch: None,
+            pending: sv_ui::dirty::DirtyLog::default(),
+            enabled: true,
+            stats: DamageStats::default(),
+        }
+    }
+
+    /// 上一帧像素不再可信(framebuffer 重分配/后端切换)时调用
+    pub fn invalidate(&mut self) {
+        self.prev = None;
+    }
+
+    /// 事件处理里中途布局取走的日志并进待处理池(下一次渲染吃掉)。
+    /// 溢出语义与 DirtyLog 一致:超 cap 置 overflowed(→ 整帧),不涨内存
+    pub fn absorb(&mut self, log: sv_ui::dirty::DirtyLog) {
+        if log.overflowed {
+            self.pending.overflowed = true;
+            self.pending.items.clear();
+            return;
+        }
+        for item in log.items {
+            self.pending.push(item);
+        }
+    }
+}
+
+/// 带 scroll-blit 与损伤裁剪的渲染(事件循环 CPU 呈现路径专用)。
+///
+/// 语义承诺:执行后 `pixmap` 与 [`render_into`] 的产物**逐像素相同**
+/// (`blit_render_matches_full_render_*` 差分测试盯着);区别只是少画。
+/// 离屏(`--png`)与测试的 [`render_frame`] 不经过这里 —— 它们没有上一帧。
+pub fn render_into_cached(
+    doc: &Doc,
+    pixmap: &mut Pixmap,
+    scale: f32,
+    ctx: &mut DamageCtx,
+    caret_flip: bool,
+) -> (Rc<Layout>, RenderOutcome) {
+    let (phys_w, phys_h) = (pixmap.width(), pixmap.height());
+    let logical_w = phys_w as f32 / scale;
+    let logical_h = phys_h as f32 / scale;
+    let (layout, mut dirty) = layout_full_cached_taking(doc, logical_w, logical_h);
+    // 事件处理中途取走的日志并进来(否则那些变更的损伤被静默吞掉)
+    let pending = std::mem::take(&mut ctx.pending);
+    if pending.overflowed {
+        dirty.overflowed = true;
+        dirty.items.clear();
+    } else {
+        for item in pending.items {
+            dirty.push(item);
+        }
+    }
+
+    let prev_ok = ctx.prev.as_ref().is_some_and(|s| {
+        s.doc_id == doc.identity()
+            && s.scale.to_bits() == scale.to_bits()
+            && s.phys_w == phys_w
+            && s.phys_h == phys_h
+    });
+
+    // 本帧墨迹只算一次:plan 用它做剔除/损伤/隔离,帧末进快照当"上一帧墨迹"
+    let cur_inks =
+        doc.read(|inner| crate::damage::compute_inks(inner, &layout, scale, phys_w as i32));
+
+    let outcome = if !(ctx.enabled && prev_ok) {
+        paint_full(doc, &layout, pixmap, scale);
+        RenderOutcome::Full
+    } else {
+        let prev = ctx.prev.as_ref().expect("prev_ok 已保证非空");
+        match crate::damage::plan(
+            doc, prev, &layout, &cur_inks, &dirty, scale, phys_w, phys_h, caret_flip,
+        ) {
+            crate::damage::DamagePlan::Full => {
+                paint_full(doc, &layout, pixmap, scale);
+                RenderOutcome::Full
+            }
+            crate::damage::DamagePlan::Partial { blits, rects } => {
+                for b in &blits {
+                    crate::damage::apply_blit(pixmap, b);
+                }
+                if !rects.is_empty() {
+                    let scratch = match ctx
+                        .scratch
+                        .as_mut()
+                        .filter(|s| s.width() == phys_w && s.height() == phys_h)
+                    {
+                        Some(s) => s,
+                        None => {
+                            let Some(p) = Pixmap::new(phys_w.max(1), phys_h.max(1)) else {
+                                // scratch 分配失败:退整帧,别丢帧
+                                paint_full(doc, &layout, pixmap, scale);
+                                ctx.stats.full += 1;
+                                ctx.prev =
+                                    Some(snapshot(doc, &layout, cur_inks, scale, phys_w, phys_h));
+                                return (layout, RenderOutcome::Full);
+                            };
+                            ctx.scratch = Some(p);
+                            ctx.scratch.as_mut().expect("刚放进去")
+                        }
+                    };
+                    for r in &rects {
+                        crate::damage::fill_rect_white(scratch, r);
+                    }
+                    let mut painter = TinySkiaPainter::new(scratch);
+                    paint_tree_culled(doc, &layout.placed, &mut painter, scale, Some(&rects));
+                    paint_scrollbars_culled(
+                        doc,
+                        &layout.scroll_areas,
+                        &mut painter,
+                        scale,
+                        Some(&rects),
+                    );
+                    for r in &rects {
+                        crate::damage::copy_rect(pixmap, scratch, r);
+                    }
+                }
+                if blits.is_empty() && rects.is_empty() {
+                    RenderOutcome::Skip
+                } else {
+                    if !blits.is_empty() {
+                        ctx.stats.blit += 1;
+                    }
+                    RenderOutcome::Partial {
+                        blits: blits.len(),
+                        rects: rects.len(),
+                    }
+                }
+            }
+        }
+    };
+    match outcome {
+        RenderOutcome::Full => ctx.stats.full += 1,
+        RenderOutcome::Partial { .. } => ctx.stats.partial += 1,
+        RenderOutcome::Skip => ctx.stats.skip += 1,
+    }
+    ctx.prev = Some(snapshot(doc, &layout, cur_inks, scale, phys_w, phys_h));
+    (layout, outcome)
+}
+
+/// `inks`:与 `layout.placed` 平行的本帧墨迹(必须按**本帧**节点状态算好传入:
+/// 下一帧样式可能已变,拿新样式估旧帧墨迹会漏,评审发现 #2)。
+/// Partial 帧直接复用 plan 里已算的一份,别每帧算两遍
+fn snapshot(
+    doc: &Doc,
+    layout: &Rc<Layout>,
+    inks: Vec<crate::damage::PhysRect>,
+    scale: f32,
+    phys_w: u32,
+    phys_h: u32,
+) -> crate::damage::FrameSnapshot {
+    crate::damage::FrameSnapshot {
+        offsets: crate::damage::effective_offsets(doc, layout),
+        inks,
+        doc_id: doc.identity(),
+        layout: Rc::clone(layout),
+        scale,
+        phys_w,
+        phys_h,
+    }
 }
 
 /// 渲染一帧:布局(逻辑坐标)+ 绘制(物理坐标)。返回像素与命中测试用的布局。
@@ -1570,12 +1850,38 @@ pub fn scrollbar_thumb(track: f32, viewport: f32, content: f32, offset: f32) -> 
 /// 滚动条绘制:shell 合成,不入场景树(egui 同构;调研 22 §2.4)。
 /// v0 纵向 thumb only(横向 API 留通道);宽 6 逻辑 px、右缘内贴 2px
 pub fn paint_scrollbars(doc: &Doc, areas: &[ScrollArea], painter: &mut dyn Painter, scale: f32) {
+    paint_scrollbars_culled(doc, areas, painter, scale, None);
+}
+
+/// 同上,可带损伤剔除:thumb 与所有损伤矩形不相交的滚动区跳过
+pub(crate) fn paint_scrollbars_culled(
+    doc: &Doc,
+    areas: &[ScrollArea],
+    painter: &mut dyn Painter,
+    scale: f32,
+    cull: Option<&[crate::damage::PhysRect]>,
+) {
     for a in areas {
         let (_, sy) = doc.scroll_of(a.id);
         let Some((pos, len)) = vbar_thumb(a, sy) else {
             continue;
         };
         let (bx, bw) = vbar_x(a);
+        if let Some(rects) = cull {
+            let ink = crate::damage::PhysRect::outward(
+                Rect {
+                    x: bx,
+                    y: a.viewport.y + SCROLLBAR_MARGIN + pos,
+                    w: bw,
+                    h: len,
+                },
+                scale,
+                1.0,
+            );
+            if !rects.iter().any(|r| ink.intersects(r)) {
+                continue;
+            }
+        }
         painter.fill_rounded_rect(
             bx * scale,
             (a.viewport.y + SCROLLBAR_MARGIN + pos) * scale,
@@ -1599,6 +1905,11 @@ fn vbar_x(a: &ScrollArea) -> (f32, f32) {
         a.viewport.x + a.viewport.w - SCROLLBAR_W - SCROLLBAR_MARGIN,
         SCROLLBAR_W,
     )
+}
+
+/// 纵向滚动条轨道列几何(crate 内共享:损伤计划器要知道 thumb 只会出现在哪一列)
+pub(crate) fn vbar_geometry(a: &ScrollArea) -> (f32, f32) {
+    vbar_x(a)
 }
 
 /// 纵向 thumb 的 (轨内偏移, 长度);内容未溢出返回 None
@@ -1681,7 +1992,22 @@ pub fn route_wheel_with(
     while let Some(id) = target {
         if let Some(a) = areas.iter().find(|a| a.id == id) {
             let (sx, sy) = doc.scroll_of(id);
-            let nx = (sx + dx).clamp(0.0, a.max.0);
+            // 吸附到物理像素网格(shell 设的步长;离屏没设 = 原样):
+            // 整数物理位移是 scroll-blit 的入场券,吸附半像素以内肉眼无感。
+            // 先吸附再钳制 —— 钳出的 max 本身可以是小数(内容尺寸是小数),
+            // 贴边那一帧走整视口重画,正常。
+            // **吸附回原地时改用原始值**:慢速触摸板的亚半像素增量若被吸附
+            // 吞掉,事件就永远推不动偏移(每次都从同一格心起算,评审发现
+            // #12)—— 让偏移先小数漂移,跨过半格后自然回到网格
+            let snap_or_raw = |raw: f32, base: f32| {
+                let snapped = sv_ui::anim::snap_scroll(raw);
+                if snapped == base && raw != base {
+                    raw
+                } else {
+                    snapped
+                }
+            };
+            let nx = snap_or_raw(sx + dx, sx).clamp(0.0, a.max.0);
             // 平滑模式下在**进行中的目标**上累加,而不是在"这一帧画到哪儿"
             // 上累加 —— 后者会让连续快滚越滚越慢(每次都从落后的位置起算)
             let base_y = if smooth {
@@ -1689,7 +2015,7 @@ pub fn route_wheel_with(
             } else {
                 sy
             };
-            let ny = (base_y + dy).clamp(0.0, a.max.1);
+            let ny = snap_or_raw(base_y + dy, base_y).clamp(0.0, a.max.1);
             if nx != sx || ny != base_y {
                 if smooth && ny != base_y {
                     sv_ui::anim::scroll_y_to(doc, id, ny);

@@ -46,6 +46,28 @@ struct Timeline {
 thread_local! {
     static ANIMS: RefCell<Vec<Anim>> = const { RefCell::new(Vec::new()) };
     static TIMELINES: RefCell<Vec<Timeline>> = const { RefCell::new(Vec::new()) };
+    /// 滚动偏移的吸附步长(逻辑 px;0 = 不吸附)。渲染壳设为 `1/scale`,
+    /// 让平滑滚动的每帧偏移都落在**物理像素网格**上 —— scroll-blit 只在
+    /// 整数物理位移下成立,不吸附的话缓动帧几乎全是小数位移,blit 永远不命中。
+    /// 半个物理像素以内的吸附肉眼不可见(浏览器滚动本就按整物理像素走)。
+    static SCROLL_QUANTUM: std::cell::Cell<f32> = const { std::cell::Cell::new(0.0) };
+}
+
+/// 设滚动偏移的吸附步长(渲染壳每次 scale 变化时调;离屏/测试不设 = 不吸附)。
+/// 非有限或 ≤0 的值一律当 0(关吸附)处理。
+pub fn set_scroll_quantum(q: f32) {
+    SCROLL_QUANTUM.with(|c| c.set(if q.is_finite() && q > 0.0 { q } else { 0.0 }));
+}
+
+/// 当前吸附步长(滚轮直写路径与拖动路径共用同一网格,见 `route_wheel_with`)
+pub fn scroll_quantum() -> f32 {
+    SCROLL_QUANTUM.with(|c| c.get())
+}
+
+/// 把滚动偏移吸到网格上(步长 0 时原样返回)
+pub fn snap_scroll(v: f32) -> f32 {
+    let q = scroll_quantum();
+    if q > 0.0 { (v / q).round() * q } else { v }
 }
 
 /// 平滑滚动时长(ms)。取值参考浏览器 smooth behavior 的量级:
@@ -170,9 +192,12 @@ pub fn pump(now_ms: f64) -> bool {
                 Channel::Opacity => an.doc.update_style(an.node, |s| s.opacity = v),
                 Channel::ScrollY => {
                     let x = an.doc.scroll_of(an.node).0;
-                    // 收尾一帧写精确目标:缓动函数在 t=1 才严格等于 to,
-                    // 浮点上差一点点会留下半像素错位
-                    let v = if t >= 1.0 { an.to } else { v };
+                    // 中途帧吸附到物理像素网格(blit 的入场券);**收尾帧写精确
+                    // 目标不吸附**:目标经 route_wheel 时已按网格吸附过,常规
+                    // 情况二者一致;贴底边界的目标是钳出来的小数 max,收尾帧
+                    // 再吸附会让停点回不到 max —— scroll_y_to 的 0.5 死区随即
+                    // 把后续滚轮事件全部吞掉,滚动链永远接不到手(评审发现 #13)
+                    let v = if t >= 1.0 { an.to } else { snap_scroll(v) };
                     an.doc.set_scroll(an.node, x, v);
                 }
             }
@@ -510,6 +535,46 @@ mod tests {
         assert!(pump(0.0));
         assert!(!pump(SCROLL_MS as f64 + 1.0));
         assert_eq!(doc.scroll_of(list).1, 101.766, "收尾必须落在精确目标上");
+    }
+
+    /// 吸附步长设定后,缓动的每帧偏移都落在网格上(含收尾帧);
+    /// 步长清零后行为回到原样。防的退化:忘了吸附收尾帧 —— 最后一帧
+    /// 又是小数位移,scroll-blit 白白错过滚动收尾的那一下
+    #[test]
+    fn scroll_quantum_snaps_eased_frames_and_final() {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                set_scroll_quantum(0.0);
+            }
+        }
+        let _reset = Reset;
+        let doc = Doc::new();
+        let list = doc.create_view();
+        doc.append(doc.root(), list);
+        // 模拟 scale=1.25:网格步长 0.8 逻辑 px
+        set_scroll_quantum(1.0 / 1.25);
+        scroll_y_to(&doc, list, 100.0);
+        assert!(pump(0.0));
+        assert!(pump(70.0));
+        let mid = doc.scroll_of(list).1;
+        let on_grid = |v: f32| ((v / 0.8).round() * 0.8 - v).abs() < 1e-4;
+        assert!(mid > 0.0 && mid < 100.0, "应在半路:{mid}");
+        assert!(on_grid(mid), "缓动帧必须落在物理网格上:{mid}");
+        assert!(!pump(SCROLL_MS as f64 + 1.0));
+        let fin = doc.scroll_of(list).1;
+        assert!(on_grid(fin), "收尾帧也必须落在网格上:{fin}");
+        assert!(
+            (fin - 100.0).abs() <= 0.4 + 1e-4,
+            "吸附偏差不超过半步:{fin}"
+        );
+
+        // 非法步长一律当 0(关吸附)
+        set_scroll_quantum(f32::NAN);
+        assert_eq!(scroll_quantum(), 0.0);
+        set_scroll_quantum(-1.0);
+        assert_eq!(scroll_quantum(), 0.0);
+        assert_eq!(snap_scroll(12.34), 12.34, "关吸附时原样返回");
     }
 
     /// 目标与当前位置差得可以忽略时直接返回:既不开动画也不催帧。

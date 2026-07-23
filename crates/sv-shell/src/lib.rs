@@ -11,6 +11,7 @@
 
 mod a11y;
 mod animation;
+mod damage;
 mod paint;
 mod render;
 mod text;
@@ -31,15 +32,17 @@ pub use sv_pag::{BitmapSequence, DecodedImage, PagFile};
 // 外部 crate 既写不出类型名也构造不出值。路径那五个类型漏了整整一轮:
 // `Painter::fill_path` 明明是 pub trait 的 pub 方法,外面却根本调不动,
 // 因为它的参数类型 `&[PathCmd]` 叫不出名字。`tests/public_api.rs` 现在守着这条
+pub use damage::{Blit, DamagePlan, FrameSnapshot, PhysRect};
 pub use paint::{
     GlyphKey, GlyphPos, LineCap, LineJoin, PaintCmd, Painter, PainterCaps, PathCmd, PathFill,
     PixelImage, RecordingPainter, StrokeStyle, TinySkiaPainter,
 };
 pub use render::{
-    Layout, OverlayRegion, Placed, Rect, ScrollArea, hit_click_target, ime_caret_rect,
-    input_caret_at, input_caret_line_move, layout_full_cached, layout_tree, layout_tree_full,
-    overlay_click_gate, paint_scrollbars, paint_tree, render_frame, render_into, route_wheel,
-    route_wheel_with, scrollbar_drag_offset, scrollbar_grab, scrollbar_thumb,
+    DamageCtx, DamageStats, Layout, OverlayRegion, Placed, Rect, RenderOutcome, ScrollArea,
+    hit_click_target, ime_caret_rect, input_caret_at, input_caret_line_move, layout_full_cached,
+    layout_full_cached_taking, layout_tree, layout_tree_full, overlay_click_gate, paint_scrollbars,
+    paint_tree, render_frame, render_into, render_into_cached, route_wheel, route_wheel_with,
+    scrollbar_drag_offset, scrollbar_grab, scrollbar_thumb,
 };
 pub use text::{
     FontHandle, caret_index_at, caret_index_at_point, caret_rect, caret_x, line_height,
@@ -216,6 +219,8 @@ struct App {
     /// 常驻 framebuffer(CPU 后端):每帧复用,省掉每帧 W×H×4 的分配/释放
     /// (脏矩形地基;尺寸变了才重分配)
     frame_buf: Option<tiny_skia::Pixmap>,
+    /// 脏矩形 + scroll-blit 的常驻状态(上一帧快照 / scratch / 待并脏日志)
+    damage: render::DamageCtx,
     /// SV_SHOW_FPS=1:连续重绘 + 每 60 帧打印帧率(基准/诊断用)
     show_fps: bool,
     fps_frames: u32,
@@ -273,7 +278,12 @@ impl App {
         if unchanged && !animating && !self.show_fps {
             return;
         }
+        // 闪烁相翻转帧的损伤只有光标那一块 —— 在覆盖 key 之前捕获
+        let caret_flip = self.last_frame_key.is_some_and(|k| k.4 != caret_phase);
         self.last_frame_key = Some(frame_key);
+        // 平滑滚动/滚轮的物理像素网格步长跟着 scale 走(供 anim::pump 与
+        // route_wheel 吸附;离屏路径从不设置,行为不变)
+        sv_ui::anim::set_scroll_quantum(1.0 / scale);
         match &mut ws.presenter {
             Presenter::Cpu { surface, .. } => {
                 // 复用常驻 framebuffer(脏矩形地基):尺寸没变就重画进旧缓冲,省掉每帧
@@ -284,6 +294,8 @@ impl App {
                     .is_none_or(|p| p.width() != size.width || p.height() != size.height);
                 if need_new {
                     self.frame_buf = tiny_skia::Pixmap::new(size.width.max(1), size.height.max(1));
+                    // 新缓冲零填充,上一帧像素没了 —— blit 快照必须一起作废
+                    self.damage.invalidate();
                 }
                 let Some(pixmap) = self.frame_buf.as_mut() else {
                     // 分配失败:丢帧,清帧键让下一帧重试(与 present 失败同款降级)
@@ -295,40 +307,55 @@ impl App {
                     self.last_frame_key = None;
                     return;
                 };
-                self.layout = render_into(&self.doc, pixmap, scale);
-
-                let (Some(w), Some(h)) =
-                    (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
-                else {
-                    return;
-                };
-                // 帧内失败一律降级为丢帧:窗口最小化/GPU 复位/合成器重启时
-                // 这些调用会短暂失败,崩进程是最坏的处理方式
-                let frame = surface
-                    .resize(w, h)
-                    .and_then(|()| surface.buffer_mut())
-                    .and_then(|mut buffer| {
-                        for (dst, src) in buffer.iter_mut().zip(pixmap.pixels()) {
-                            let c = src.demultiply();
-                            *dst = ((c.red() as u32) << 16)
-                                | ((c.green() as u32) << 8)
-                                | (c.blue() as u32);
+                let (layout, outcome) = render::render_into_cached(
+                    &self.doc,
+                    pixmap,
+                    scale,
+                    &mut self.damage,
+                    caret_flip,
+                );
+                self.layout = layout;
+                if outcome == render::RenderOutcome::Skip {
+                    // 一个像素都没变:framebuffer 与 surface 上的内容一致,
+                    // 连 present 都省(surface 还显示着同样的帧)
+                } else {
+                    let (Some(w), Some(h)) =
+                        (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
+                    else {
+                        return;
+                    };
+                    // 帧内失败一律降级为丢帧:窗口最小化/GPU 复位/合成器重启时
+                    // 这些调用会短暂失败,崩进程是最坏的处理方式
+                    let frame = surface
+                        .resize(w, h)
+                        .and_then(|()| surface.buffer_mut())
+                        .and_then(|mut buffer| {
+                            for (dst, src) in buffer.iter_mut().zip(pixmap.pixels()) {
+                                let c = src.demultiply();
+                                *dst = ((c.red() as u32) << 16)
+                                    | ((c.green() as u32) << 8)
+                                    | (c.blue() as u32);
+                            }
+                            buffer.present()
+                        });
+                    if let Err(e) = frame {
+                        // 前三次与之后每 600 次各记一条:偶发不刷屏,持续故障看得见
+                        self.frame_drops += 1;
+                        // 早先这里写的是 `%`,注释理由是"`is_multiple_of` 1.87 才稳定、
+                        // MSRV 是 1.85"。**那条注释后来过期了**:MSRV 已由 let-chains
+                        // 定在 1.88(见 Cargo.toml),1.87 的 std API 反而可用了
+                        if self.frame_drops <= 3 || self.frame_drops.is_multiple_of(600) {
+                            log::warn!("sv-shell: 丢帧({e});累计 {} 次", self.frame_drops);
                         }
-                        buffer.present()
-                    });
-                if let Err(e) = frame {
-                    // 前三次与之后每 600 次各记一条:偶发不刷屏,持续故障看得见
-                    self.frame_drops += 1;
-                    // 早先这里写的是 `%`,注释理由是"`is_multiple_of` 1.87 才稳定、
-                    // MSRV 是 1.85"。**那条注释后来过期了**:MSRV 已由 let-chains
-                    // 定在 1.88(见 Cargo.toml),1.87 的 std API 反而可用了
-                    if self.frame_drops <= 3 || self.frame_drops.is_multiple_of(600) {
-                        log::warn!("sv-shell: 丢帧({e});累计 {} 次", self.frame_drops);
+                        // 本帧作废:清帧键让下一帧重画(否则静止短路会永久跳过)。
+                        // framebuffer 里的像素其实还好,但 surface 没拿到 ——
+                        // 一并作废快照,强制下一帧整帧重画 + 重新 present,
+                        // 否则"无损伤 → Skip → 不 present"会让窗口停在旧帧
+                        self.damage.invalidate();
+                        self.last_frame_key = None;
+                        ws.window.request_redraw();
+                        return;
                     }
-                    // 本帧作废:清帧键让下一帧重画(否则静止短路会永久跳过)
-                    self.last_frame_key = None;
-                    ws.window.request_redraw();
-                    return;
                 }
             }
             #[cfg(feature = "backend-vello")]
@@ -766,7 +793,8 @@ impl ApplicationHandler<UserEvent> for App {
                         scrollbar_drag_offset(&self.layout.scroll_areas, id, ly, grab)
                     {
                         let (sx, _) = self.doc.scroll_of(id);
-                        self.doc.set_scroll(id, sx, off);
+                        // 吸附到物理像素网格(与滚轮同款,scroll-blit 的入场券)
+                        self.doc.set_scroll(id, sx, sv_ui::anim::snap_scroll(off));
                     }
                     return;
                 }
@@ -802,11 +830,14 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 };
                 let size = ws.window.inner_size();
-                let layout = layout_full_cached(
+                // 中途布局会破坏性取走脏日志 —— 用 taking 变体并进待处理池,
+                // 否则这些变更的损伤会在下一帧被静默吞掉(画错且无报错)
+                let (layout, taken) = render::layout_full_cached_taking(
                     &self.doc,
                     size.width as f32 / scale as f32,
                     size.height as f32 / scale as f32,
                 );
+                self.damage.absorb(taken);
                 // winit 正值 = 内容向右/下移 → offset 减
                 if route_wheel_with(
                     &self.doc,
@@ -1005,6 +1036,12 @@ pub fn run_app(
         caret_blink_reset: std::time::Instant::now(),
         frame_buf: None,
         last_frame_key: None,
+        damage: {
+            let mut d = render::DamageCtx::new();
+            // 保险丝:SV_DAMAGE=0 恒走整帧(怀疑脏矩形画错时的一键排除法)
+            d.enabled = !std::env::var("SV_DAMAGE").is_ok_and(|v| v == "0");
+            d
+        },
         show_fps: std::env::var("SV_SHOW_FPS").is_ok_and(|v| v == "1"),
         fps_frames: 0,
         fps_t0: std::time::Instant::now(),
@@ -1303,6 +1340,623 @@ mod tests {
             reused.data(),
             "内容变更后复用旧缓冲不应残留上一帧"
         );
+    }
+
+    // =====================================================================
+    // scroll-blit / 脏矩形差分:损伤渲染必须与全量渲染逐字节相同
+    // =====================================================================
+
+    /// 差分基建:持久缓冲 + DamageCtx;每步操作后先走损伤渲染,再与
+    /// `render_frame`(权威全量)逐字节对拍。对拍放在损伤渲染**之后**:
+    /// 脏日志已被损伤路径消费,全量侧拿到干净日志 → 布局缓存直接复用,
+    /// 两边同一份 Layout —— 差异只可能来自像素路径
+    struct BlitHarness {
+        doc: Doc,
+        buf: tiny_skia::Pixmap,
+        ctx: render::DamageCtx,
+        scale: f32,
+    }
+
+    impl BlitHarness {
+        fn new(doc: Doc, w: u32, h: u32, scale: f32) -> Self {
+            let mut hn = BlitHarness {
+                doc,
+                buf: tiny_skia::Pixmap::new(w, h).unwrap(),
+                ctx: render::DamageCtx::new(),
+                scale,
+            };
+            hn.frame(false); // 首帧无快照 → 全量,同时建立 blit 基准
+            hn
+        }
+
+        #[track_caller]
+        fn frame(&mut self, caret_flip: bool) -> render::RenderOutcome {
+            let (_, outcome) = render::render_into_cached(
+                &self.doc,
+                &mut self.buf,
+                self.scale,
+                &mut self.ctx,
+                caret_flip,
+            );
+            let (oracle, _) =
+                render_frame(&self.doc, self.buf.width(), self.buf.height(), self.scale);
+            if oracle.data() != self.buf.data() {
+                // 差异像素包围盒:直接指认哪块区域画错(裸 assert_eq 只会喷字节堆)
+                let (w, h) = (self.buf.width() as usize, self.buf.height() as usize);
+                let (mut x0, mut y0, mut x1, mut y1) = (usize::MAX, usize::MAX, 0usize, 0usize);
+                let (a, b) = (oracle.data(), self.buf.data());
+                for y in 0..h {
+                    for x in 0..w {
+                        let i = (y * w + x) * 4;
+                        if a[i..i + 4] != b[i..i + 4] {
+                            x0 = x0.min(x);
+                            y0 = y0.min(y);
+                            x1 = x1.max(x);
+                            y1 = y1.max(y);
+                        }
+                    }
+                }
+                let _ = oracle.save_png(std::env::temp_dir().join("sv_blit_oracle.png"));
+                let _ = self
+                    .buf
+                    .save_png(std::env::temp_dir().join("sv_blit_damage.png"));
+                panic!(
+                    "损伤渲染与全量渲染不同(outcome={outcome:?}),差异包围盒 \
+                     x∈[{x0},{x1}] y∈[{y0},{y1}](物理 px,画布 {w}×{h});\
+                     两侧 PNG 已存 %TEMP%/sv_blit_{{oracle,damage}}.png"
+                );
+            }
+            outcome
+        }
+    }
+
+    /// 有代表性的可滚文档:header 文本 + 带边框/圆角/底色的滚动容器
+    /// (折行 CJK+emoji 段落、复选框、输入框、按钮)+ footer。
+    /// 返回 (doc, 滚动容器, header, 复选框, 输入框)
+    fn scrolly_doc() -> (Doc, ViewId, ViewId, ViewId, ViewId, RootHandle) {
+        let doc = Doc::new();
+        let d = doc.clone();
+        let ((scroller, header, cb, input), scope) = create_root(move || {
+            let root = d.root();
+            d.update_style(root, |s| {
+                s.padding = 12.0.into();
+                s.gap = 10.0;
+            });
+            let header = d.create_text("滚动位置 0px");
+            d.append(root, header);
+            let scroller = d.create_view();
+            d.update_style(scroller, |s| {
+                s.height = Some(240.0);
+                s.overflow = sv_ui::Overflow::Scroll;
+                s.bg = Some(sv_ui::Color::rgb(250, 250, 255));
+                s.border = Some(sv_ui::Border {
+                    width: 1.0,
+                    color: sv_ui::Color::rgb(200, 200, 212),
+                });
+                s.corner_radius = 6.0;
+                s.padding = 8.0.into();
+                s.gap = 6.0;
+            });
+            d.append(root, scroller);
+            // 交互件放在内容**顶部**(初始可见):Paint{id} 局部化、光标闪烁、
+            // 焦点环随滚动这些断言,对着视口外的控件全是空转
+            let cb = d.create_checkbox();
+            d.append(scroller, cb);
+            let input = d.create_text_input();
+            d.set_input_value(input, "初始值");
+            d.append(scroller, input);
+            let btn = d.create_button("确定");
+            d.append(scroller, btn);
+            for i in 0..8 {
+                let t = d.create_text(&format!(
+                    "第 {i} 段 —— 中文折行文本,混排 English 与 emoji 😀,\
+                     再长一点以确保在窗口宽度下至少折成两行。"
+                ));
+                d.update_style(t, |s| s.text_wrap = sv_ui::TextWrap::Wrap);
+                d.append(scroller, t);
+            }
+            let footer = d.create_text("footer 说明文字");
+            d.append(root, footer);
+            (scroller, header, cb, input)
+        });
+        (doc, scroller, header, cb, input, scope)
+    }
+
+    /// 整数位移滚动必须走 blit,且与全量渲染逐字节相同;
+    /// 覆盖:连滚、反向、贴底钳制大跳、回零
+    #[test]
+    fn blit_render_matches_full_render_on_integer_scroll() {
+        let (doc, scroller, _, _, _, _scope) = scrolly_doc();
+        let mut h = BlitHarness::new(doc.clone(), 420, 400, 1.0);
+        doc.set_scroll(scroller, 0.0, 13.0);
+        let o = h.frame(false);
+        assert!(
+            matches!(o, RenderOutcome::Partial { blits: 1, .. }),
+            "整数滚动应走 blit,实际 {o:?}"
+        );
+        doc.set_scroll(scroller, 0.0, 26.0);
+        h.frame(false);
+        doc.set_scroll(scroller, 0.0, 7.0); // 反向
+        h.frame(false);
+        doc.set_scroll(scroller, 0.0, 99999.0); // 贴底大跳(钳制,delta 超视口)
+        h.frame(false);
+        doc.set_scroll(scroller, 0.0, 0.0); // 回顶
+        h.frame(false);
+        assert!(
+            h.ctx.stats.blit >= 2,
+            "多次整数滚动至少该有 2 帧真 blit,实际 {:?}",
+            h.ctx.stats
+        );
+    }
+
+    /// 小数位移进不了 blit(字形按物理像素取整,搬了会错位),
+    /// 必须降级为视口矩形重画 —— 且照样逐字节相同
+    #[test]
+    fn blit_render_matches_full_render_on_fractional_scroll() {
+        let (doc, scroller, _, _, _, _scope) = scrolly_doc();
+        let mut h = BlitHarness::new(doc.clone(), 420, 400, 1.0);
+        doc.set_scroll(scroller, 0.0, 13.35);
+        let o = h.frame(false);
+        assert!(
+            matches!(o, RenderOutcome::Partial { blits: 0, .. }),
+            "小数位移不该 blit,应降级为矩形重画,实际 {o:?}"
+        );
+    }
+
+    /// HiDPI:scale=2 时 6.5 逻辑 px = 13 物理 px,是合法整数位移;
+    /// scale=1.25 时 8 逻辑 px = 10 物理 px 同理
+    #[test]
+    fn blit_render_matches_full_render_at_hidpi_scales() {
+        for (scale, step) in [(2.0f32, 6.5f32), (1.25, 8.0)] {
+            let (doc, scroller, _, _, _, _scope) = scrolly_doc();
+            let mut h = BlitHarness::new(doc.clone(), 840, 800, scale);
+            doc.set_scroll(scroller, 0.0, step);
+            let o = h.frame(false);
+            assert!(
+                matches!(o, RenderOutcome::Partial { blits: 1, .. }),
+                "scale={scale} step={step} 应走 blit,实际 {o:?}"
+            );
+            doc.set_scroll(scroller, 0.0, step * 3.0);
+            h.frame(false);
+        }
+    }
+
+    /// 旗舰场景(settings-sfc 形态):同一帧里滚动 + header 文本变更
+    /// (bind:scrolly 的 set_text 是 Measure 脏,走重建档)。
+    /// blit 照走,header 靠 placed 差分收进损伤
+    #[test]
+    fn blit_render_matches_full_render_on_scroll_plus_measure() {
+        let (doc, scroller, header, _, _, _scope) = scrolly_doc();
+        let mut h = BlitHarness::new(doc.clone(), 420, 400, 1.0);
+        doc.set_scroll(scroller, 0.0, 13.0);
+        doc.set_text(header, "滚动位置 13px");
+        let o = h.frame(false);
+        assert!(
+            matches!(o, RenderOutcome::Partial { .. }),
+            "滚动+Measure 混合帧应仍是局部重画,实际 {o:?}"
+        );
+        doc.set_scroll(scroller, 0.0, 26.0);
+        doc.set_text(header, "滚动位置 26px(更长的一段文本挤动布局)");
+        h.frame(false);
+    }
+
+    /// Paint{id} 局部化:勾选复选框、输入框打字都只该重画那一小块
+    #[test]
+    fn damage_localizes_paint_only_changes() {
+        let (doc, _, _, cb, input, _scope) = scrolly_doc();
+        let mut h = BlitHarness::new(doc.clone(), 420, 400, 1.0);
+        doc.set_checked(cb, true);
+        let o = h.frame(false);
+        assert!(
+            matches!(o, RenderOutcome::Partial { blits: 0, rects } if rects >= 1),
+            "勾选是 Paint{{id}},应局部重画,实际 {o:?}"
+        );
+        doc.set_input_value(input, "打了一些字 typing");
+        let o = h.frame(false);
+        assert!(matches!(o, RenderOutcome::Partial { .. }), "打字帧 {o:?}");
+    }
+
+    /// 光标闪烁翻转帧:脏日志是干净的,损伤 = 焦点输入框那一块
+    #[test]
+    fn caret_blink_flip_repaints_only_focused_box() {
+        let (doc, _, _, _, input, _scope) = scrolly_doc();
+        let mut h = BlitHarness::new(doc.clone(), 420, 400, 1.0);
+        doc.focus(input);
+        h.frame(false);
+        crate::render::set_caret_visible(false);
+        let o = h.frame(true);
+        assert!(
+            matches!(o, RenderOutcome::Partial { blits: 0, .. }),
+            "闪烁翻转应只重画输入框,实际 {o:?}"
+        );
+        crate::render::set_caret_visible(true);
+        h.frame(true);
+    }
+
+    /// 焦点在滚动内容里时滚动:焦点环画在所有裁剪之外、随内容移动,
+    /// blit 会把旧环搬走 —— 新旧环矩形必须都进损伤
+    #[test]
+    fn blit_render_matches_full_render_with_focus_ring_inside_scroller() {
+        let (doc, scroller, _, cb, _, _scope) = scrolly_doc();
+        let mut h = BlitHarness::new(doc.clone(), 420, 400, 1.0);
+        doc.focus(cb);
+        h.frame(false);
+        doc.set_scroll(scroller, 0.0, 17.0);
+        h.frame(false);
+        doc.set_scroll(scroller, 0.0, 4.0);
+        h.frame(false);
+        doc.blur();
+        h.frame(false);
+    }
+
+    /// 弹层(锚定滚动内容、叠画同一缓冲)出现即整帧;注册/注销都一样
+    #[test]
+    fn overlay_forces_full_repaint() {
+        let (doc, scroller, header, _, _, _scope) = scrolly_doc();
+        let mut h = BlitHarness::new(doc.clone(), 420, 400, 1.0);
+        let open = sv_reactive::state(false);
+        let d2 = doc.clone();
+        let (_, _s2) = create_root(move || {
+            sv_ui::overlay_block(
+                &d2,
+                move || open.get(),
+                move || sv_ui::Anchor::Node {
+                    id: header,
+                    side: sv_ui::Side::Below,
+                    gap: 4.0,
+                },
+                sv_ui::OverlayOpts::default(),
+                |d, root| {
+                    let t = d.create_text("弹层内容");
+                    d.append(root, t);
+                },
+            );
+        });
+        open.set(true);
+        sv_reactive::tick();
+        let o = h.frame(false);
+        assert!(matches!(o, RenderOutcome::Full), "开弹层应整帧,实际 {o:?}");
+        doc.set_scroll(scroller, 0.0, 13.0);
+        let o = h.frame(false);
+        assert!(
+            matches!(o, RenderOutcome::Full),
+            "弹层开着时滚动不许 blit,实际 {o:?}"
+        );
+        open.set(false);
+        sv_reactive::tick();
+        let o = h.frame(false);
+        assert!(matches!(o, RenderOutcome::Full), "关弹层应整帧,实际 {o:?}");
+        // 弹层清干净之后,滚动应重新获得 blit 资格
+        doc.set_scroll(scroller, 0.0, 26.0);
+        let o = h.frame(false);
+        assert!(
+            matches!(o, RenderOutcome::Partial { blits: 1, .. }),
+            "弹层关净后整数滚动应恢复 blit,实际 {o:?}"
+        );
+    }
+
+    /// 结构变更(增删节点)整帧;纯 Position 起步 bump(scroll_y_to 未动)= Skip
+    #[test]
+    fn structure_forces_full_and_no_op_position_skips() {
+        let (doc, scroller, _, _, _, _scope) = scrolly_doc();
+        let mut h = BlitHarness::new(doc.clone(), 420, 400, 1.0);
+        let extra = doc.create_text("新增的一行");
+        doc.append(scroller, extra);
+        let o = h.frame(false);
+        assert!(
+            matches!(o, RenderOutcome::Full),
+            "结构变更应整帧,实际 {o:?}"
+        );
+        // scroll_y_to 起步只 bump Position 不动偏移:没有任何像素变化
+        sv_ui::anim::scroll_y_to(&doc, scroller, 60.0);
+        let o = h.frame(false);
+        assert!(
+            matches!(o, RenderOutcome::Skip),
+            "零位移 Position 帧应 Skip,实际 {o:?}"
+        );
+    }
+
+    /// 混合压力:两种 scale 下把滚动/文本/勾选/焦点/打字/闪烁搅在一起,
+    /// 每帧逐字节对拍(抓组合态里的搬移污染)
+    #[test]
+    fn blit_render_matches_full_render_mixed_op_sweep() {
+        for scale in [1.0f32, 2.0] {
+            let (doc, scroller, header, cb, input, _scope) = scrolly_doc();
+            let (w, h_px) = ((420.0 * scale) as u32, (400.0 * scale) as u32);
+            let mut h = BlitHarness::new(doc.clone(), w, h_px, scale);
+            let mut checked = false;
+            for step in 0..24 {
+                match step % 8 {
+                    0 => doc.set_scroll(scroller, 0.0, (step * 9) as f32),
+                    1 => doc.set_text(header, &format!("滚动位置 {step}px")),
+                    2 => {
+                        checked = !checked;
+                        doc.set_checked(cb, checked);
+                    }
+                    3 => {
+                        doc.set_scroll(scroller, 0.0, (step * 9) as f32 + 0.4);
+                        doc.set_text(header, &format!("第 {step} 步混合"));
+                    }
+                    4 => doc.focus(if step % 16 < 8 { cb } else { input }),
+                    5 => doc.set_input_value(input, &format!("值 {step}")),
+                    6 => {
+                        doc.set_scroll(scroller, 0.0, (200 - step * 7) as f32);
+                        doc.set_checked(cb, step % 3 == 0);
+                    }
+                    _ => doc.blur(),
+                }
+                let flip = step % 5 == 4;
+                if flip {
+                    crate::render::set_caret_visible(step % 10 < 5);
+                }
+                h.frame(flip);
+            }
+            crate::render::set_caret_visible(true);
+            assert!(
+                h.ctx.stats.blit >= 1,
+                "混合流里至少该命中一次 blit(scale={scale}):{:?}",
+                h.ctx.stats
+            );
+        }
+    }
+
+    /// 横向滚动容器:dx 位移的 blit 与露出条(纵向 thumb 不存在时轨道列损伤无害)
+    #[test]
+    fn blit_render_matches_full_render_on_horizontal_scroll() {
+        let doc = Doc::new();
+        let d = doc.clone();
+        let (hs, _scope) = create_root(move || {
+            let root = d.root();
+            d.update_style(root, |s| s.padding = 10.0.into());
+            let hs = d.create_view();
+            d.update_style(hs, |s| {
+                // 容器必须定宽:align-items 缺省 Start 不拉伸,
+                // 宽度 auto 会被 max-content 撑到内容那么宽,反而没了溢出
+                s.width = Some(340.0);
+                s.height = Some(80.0);
+                s.overflow_x = sv_ui::Overflow::Scroll;
+                s.direction = sv_ui::Direction::Row;
+                s.gap = 8.0;
+                s.bg = Some(sv_ui::Color::rgb(248, 250, 248));
+            });
+            d.append(root, hs);
+            for i in 0..14 {
+                let t = d.create_text(&format!("列 {i} 内容块"));
+                // 定宽 + 不许压缩:Row 布局默认 flex-shrink 会把列挤进视口,
+                // 内容不溢出就没有横向滚动可测
+                d.update_style(t, |s| {
+                    s.width = Some(90.0);
+                    s.flex_shrink = 0.0;
+                });
+                d.append(hs, t);
+            }
+            hs
+        });
+        let mut h = BlitHarness::new(doc.clone(), 360, 140, 1.0);
+        doc.set_scroll(hs, 21.0, 0.0);
+        let o = h.frame(false);
+        assert!(
+            matches!(o, RenderOutcome::Partial { blits: 1, .. }),
+            "横向整数滚动应走 blit,实际 {o:?}"
+        );
+        doc.set_scroll(hs, 5.0, 0.0);
+        h.frame(false);
+    }
+
+    // PROBE(verifier GEOM_EPS): Measure 帧里亚 EPS(0.008 ≤ 0.01)的兄弟位移
+    // 被 rect_close 判为"没动"→ 不收损伤。文本字形按物理像素取整
+    // (paint.rs g.x.round()),0.496→0.504 跨半像素 → 整像素跳变;
+    // View 填充边缘的 AA 覆盖度也随小数坐标变。若确实漏损伤,
+    // BlitHarness 的逐字节对拍应当 panic。
+    #[test]
+    fn probe_sub_eps_measure_shift_stale_pixels() {
+        let doc = Doc::new();
+        let d = doc.clone();
+        let (a, _scope) = create_root(move || {
+            let root = d.root();
+            d.update_style(root, |s| {
+                s.direction = sv_ui::Direction::Row;
+            });
+            let a = d.create_view();
+            d.update_style(a, |s| {
+                s.width = Some(100.496);
+                s.height = Some(60.0);
+                s.bg = Some(sv_ui::Color::rgb(200, 30, 30));
+            });
+            d.append(root, a);
+            let b = d.create_view();
+            d.update_style(b, |s| {
+                s.width = Some(200.0);
+                s.height = Some(60.0);
+                s.bg = Some(sv_ui::Color::rgb(30, 30, 200));
+            });
+            d.append(root, b);
+            let t = d.create_text("Hello subpixel world 0123456789");
+            d.append(root, t);
+            a
+        });
+        let mut h = BlitHarness::new(doc.clone(), 900, 200, 1.0);
+        // Δwidth = 0.008 < GEOM_EPS=0.01:B 与 t 各右移 0.008,
+        // Measure 差分应把它们当"没动"跳过
+        doc.update_style(a, |s| s.width = Some(100.504));
+        let o = h.frame(false);
+        eprintln!("PROBE sub-eps measure outcome: {o:?}");
+        assert!(
+            matches!(o, RenderOutcome::Partial { .. }),
+            "亚 EPS 位移帧应走 Partial(否则本探针测不到目标路径),实际 {o:?}"
+        );
+    }
+
+    /// 评审 PoC #0/#5:定高盒子里的大字号文本,字形尾巴垂在 border-box
+    /// 之外(绘制端对 overflow:Visible 不裁)。换色帧与滚动帧的损伤都必须
+    /// 盖住尾巴 —— 墨迹模型不带纵向文本溢出时这两个都会红
+    #[test]
+    fn blit_render_matches_full_render_with_text_overflow_tails() {
+        let doc = Doc::new();
+        let d = doc.clone();
+        let ((tall, scroller), _scope) = create_root(move || {
+            let root = d.root();
+            d.update_style(root, |s| {
+                s.padding = 12.0.into();
+                s.gap = 10.0;
+            });
+            // 定高 24 大字号 40:约 25px 字形尾巴垂进下方的滚动区
+            let tall = d.create_text("大字尾巴 gY");
+            d.update_style(tall, |s| {
+                s.height = Some(24.0);
+                s.font_size = 40.0;
+            });
+            d.append(root, tall);
+            let scroller = d.create_view();
+            d.update_style(scroller, |s| {
+                s.height = Some(200.0);
+                s.overflow = sv_ui::Overflow::Scroll;
+                s.gap = 6.0;
+            });
+            d.append(root, scroller);
+            for i in 0..12 {
+                let t = d.create_text(&format!("行 {i} 的内容,长一点确保有内容"));
+                d.update_style(t, |s| s.text_wrap = sv_ui::TextWrap::Wrap);
+                d.append(scroller, t);
+            }
+            // 滚动区里也放一个定高小盒大字文本(Paint 帧损伤要盖尾巴)
+            let inner_tall = d.create_text("内 gj");
+            d.update_style(inner_tall, |s| {
+                s.height = Some(20.0);
+                s.font_size = 36.0;
+            });
+            d.append(scroller, inner_tall);
+            (tall, scroller)
+        });
+        let mut h = BlitHarness::new(doc.clone(), 420, 420, 1.0);
+        // 换色帧:尾巴的旧颜色必须被重画掉
+        doc.update_style(tall, |s| s.fg = Some(sv_ui::Color::rgb(200, 30, 30)));
+        h.frame(false);
+        // 滚动帧:header 尾巴悬进视口,搬移必须被拒或尾巴区被补画
+        doc.set_scroll(scroller, 0.0, 13.0);
+        h.frame(false);
+        doc.set_scroll(scroller, 0.0, 2.0);
+        h.frame(false);
+    }
+
+    /// 评审 PoC #1/#6:父 View 的继承/分组绘制属性(fg 沿链继承、opacity
+    /// 逐级相乘)变化时,损伤必须盖住**溢出到父盒之外的后代**
+    #[test]
+    fn damage_covers_inherited_group_props_on_overflowing_children() {
+        let doc = Doc::new();
+        let d = doc.clone();
+        let ((parent, wrap_parent), _scope) = create_root(move || {
+            let root = d.root();
+            d.update_style(root, |s| {
+                s.padding = 10.0.into();
+                s.gap = 30.0;
+            });
+            // 窄父 + NoWrap 长文本子:字形横向溢出父盒很远
+            let parent = d.create_view();
+            d.update_style(parent, |s| {
+                s.width = Some(100.0);
+                s.height = Some(30.0);
+            });
+            d.append(root, parent);
+            let long = d.create_text("NoWrap overflowing text 0123456789 ABCDEFGH");
+            d.append(parent, long);
+            // 定高父 + 折行高子:纵向溢出
+            let wrap_parent = d.create_view();
+            d.update_style(wrap_parent, |s| {
+                s.width = Some(120.0);
+                s.height = Some(30.0);
+            });
+            d.append(root, wrap_parent);
+            let tallc = d.create_text("折行的长文本内容会折出很多行来,远远高过定高的父容器盒子。");
+            d.update_style(tallc, |s| s.text_wrap = sv_ui::TextWrap::Wrap);
+            d.append(wrap_parent, tallc);
+            (parent, wrap_parent)
+        });
+        let mut h = BlitHarness::new(doc.clone(), 460, 260, 1.0);
+        doc.update_style(parent, |s| s.opacity = 0.4);
+        h.frame(false);
+        doc.update_style(parent, |s| s.fg = Some(sv_ui::Color::rgb(30, 120, 30)));
+        h.frame(false);
+        doc.update_style(wrap_parent, |s| s.opacity = 0.5);
+        h.frame(false);
+        doc.update_style(wrap_parent, |s| s.opacity = 1.0);
+        h.frame(false);
+    }
+
+    /// 评审 #3/#7/#11 + #16:嵌套滚动 —— 外层滚动会把内层(以及自己)的
+    /// 半透明 thumb 一起搬走;内层单独滚、双双同滚也都要逐字节对
+    #[test]
+    fn blit_render_matches_full_render_with_nested_scrollers() {
+        let doc = Doc::new();
+        let d = doc.clone();
+        let ((outer, inner_sc), _scope) = create_root(move || {
+            let root = d.root();
+            d.update_style(root, |s| s.padding = 10.0.into());
+            let outer = d.create_view();
+            d.update_style(outer, |s| {
+                s.height = Some(220.0);
+                s.overflow = sv_ui::Overflow::Scroll;
+                s.gap = 8.0;
+                s.bg = Some(sv_ui::Color::rgb(250, 250, 252));
+            });
+            d.append(root, outer);
+            for i in 0..4 {
+                let t = d.create_text(&format!("外层第 {i} 段,折行的长文本让外层有得滚。"));
+                d.update_style(t, |s| s.text_wrap = sv_ui::TextWrap::Wrap);
+                d.append(outer, t);
+            }
+            // 内层纵向滚动区(有自己的 thumb)
+            let inner_sc = d.create_view();
+            d.update_style(inner_sc, |s| {
+                s.height = Some(90.0);
+                s.overflow = sv_ui::Overflow::Scroll;
+                s.gap = 4.0;
+            });
+            d.append(outer, inner_sc);
+            for i in 0..10 {
+                let t = d.create_text(&format!("内层行 {i}"));
+                d.append(inner_sc, t);
+            }
+            for i in 4..8 {
+                let t = d.create_text(&format!("外层第 {i} 段,继续加长内容。"));
+                d.update_style(t, |s| s.text_wrap = sv_ui::TextWrap::Wrap);
+                d.append(outer, t);
+            }
+            (outer, inner_sc)
+        });
+        let mut h = BlitHarness::new(doc.clone(), 400, 300, 1.0);
+        doc.set_scroll(inner_sc, 0.0, 7.0); // 内层单独滚
+        h.frame(false);
+        doc.set_scroll(outer, 0.0, 15.0); // 外层滚(内层 thumb 在搬移区里)
+        h.frame(false);
+        doc.set_scroll(outer, 0.0, 30.0);
+        doc.set_scroll(inner_sc, 0.0, 14.0); // 双双同滚
+        h.frame(false);
+        doc.set_scroll(outer, 0.0, 0.0);
+        h.frame(false);
+    }
+
+    /// 评审 #2:NoWrap↔Wrap 切换帧 —— 旧帧真实画过的溢出字形,墨迹必须按
+    /// **旧帧当时的样式**估(快照存的 ink),拿新样式估会漏掉
+    #[test]
+    fn damage_covers_wrap_toggle_ink_change() {
+        let doc = Doc::new();
+        let d = doc.clone();
+        let (t, _scope) = create_root(move || {
+            let root = d.root();
+            d.update_style(root, |s| s.padding = 10.0.into());
+            let t = d.create_text("这是一段挺长的文本内容 toggling wrap 0123456789");
+            d.update_style(t, |s| s.width = Some(120.0));
+            d.append(root, t);
+            t
+        });
+        let mut h = BlitHarness::new(doc.clone(), 420, 160, 1.0);
+        doc.update_style(t, |s| s.text_wrap = sv_ui::TextWrap::Wrap);
+        h.frame(false);
+        doc.update_style(t, |s| s.text_wrap = sv_ui::TextWrap::NoWrap);
+        h.frame(false);
+        doc.update_style(t, |s| s.text_wrap = sv_ui::TextWrap::Wrap);
+        h.frame(false);
     }
 
     /// 焦点环金样:获焦节点绘制后应多出一条外扩 2px 的 StrokeRect,

@@ -97,6 +97,9 @@ fn main() {
     let no_render = args.iter().any(|a| a == "--no-render");
     let mutate = args.iter().any(|a| a == "--mutate");
     let windowed = args.iter().any(|a| a == "--windowed");
+    // --blit:离屏计时走持久缓冲 + 脏矩形/scroll-blit(render_into_cached),
+    // 对照默认的 render_frame(每帧新分配 + 全量重画)。只对 cpu 后端有意义
+    let blit = args.iter().any(|a| a == "--blit");
     let cfg = Cfg {
         controls,
         depth: get("--depth", 200),
@@ -168,8 +171,27 @@ fn main() {
     // 预热帧(含字体解析/管线编译)与计时帧分开:帧率只看稳态
     let mut warmup_ms = 0u128;
     let mut samples: Vec<f64> = Vec::with_capacity(frames);
+    let mut damage_stats = sv_shell::DamageStats::default();
     if !no_render {
         match backend.as_str() {
+            "cpu" if blit => {
+                // 事件循环同款:持久缓冲 + 损伤渲染。第一帧(无快照 → 全量)
+                // 算预热,计时帧从有快照起 —— 量的是稳态滚动
+                let mut buf = tiny_skia::Pixmap::new(1920, 1080).expect("framebuffer");
+                let mut ctx = sv_shell::DamageCtx::new();
+                let t = Instant::now();
+                let _ = sv_shell::render_into_cached(&doc, &mut buf, 1.0, &mut ctx, false);
+                warmup_ms = t.elapsed().as_millis();
+                for i in 0..frames {
+                    if mutate {
+                        driver.mutate(i);
+                    }
+                    let t = Instant::now();
+                    let _ = sv_shell::render_into_cached(&doc, &mut buf, 1.0, &mut ctx, false);
+                    samples.push(t.elapsed().as_secs_f64() * 1000.0);
+                }
+                damage_stats = ctx.stats;
+            }
             "cpu" => {
                 let t = Instant::now();
                 let _ = sv_shell::render_frame(&doc, 1920, 1080, 1.0);
@@ -222,12 +244,18 @@ fn main() {
         let low1 = 1000.0 / (worst.iter().sum::<f64>() / worst.len() as f64);
         (avg, p99, low1)
     };
+    // 字段只增不改(CI sed 抠 p99_ms):blit 统计恒追加在尾部,
+    // 非 --blit 模式全为 0
     println!(
-        "READY backend={backend} scene={} mutate={mutate} virtual={virtual_mode} nodes={nodes} signals={signals} build_ms={} warmup_ms={warmup_ms} frame_avg_ms={avg:.2} p99_ms={p99:.2} low1_fps={low1:.0} fps={:.0} frames={}",
+        "READY backend={backend} scene={} mutate={mutate} virtual={virtual_mode} nodes={nodes} signals={signals} build_ms={} warmup_ms={warmup_ms} frame_avg_ms={avg:.2} p99_ms={p99:.2} low1_fps={low1:.0} fps={:.0} frames={} blit={blit} blit_frames={} partial_frames={} full_frames={} skip_frames={}",
         scene.name(),
         built.as_millis(),
         if avg > 0.0 { 1000.0 / avg } else { 0.0 },
-        if no_render { 0 } else { frames }
+        if no_render { 0 } else { frames },
+        damage_stats.blit,
+        damage_stats.partial,
+        damage_stats.full,
+        damage_stats.skip
     );
     // 驻留供外部采样
     std::thread::sleep(std::time::Duration::from_secs(hold as u64));

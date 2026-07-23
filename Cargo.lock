@@ -1603,6 +1603,7 @@ dependencies = [
  "sv-reactive",
  "sv-shell",
  "sv-ui",
+ "tiny-skia",
 ]
 
 [[package]]
