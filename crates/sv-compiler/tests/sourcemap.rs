@@ -33,8 +33,8 @@ let double = $derived(count * 2);
 
 <view style="padding:24; gap:12">
   <text>Count: {count + "x"} · 双倍 = {double}</text>
-  <button on:click={|| count += 1}>+1</button>
-  <button on:click={|| count = 0}>归零</button>
+  <button onclick={|| count += 1}>+1</button>
+  <button onclick={|| count = 0}>归零</button>
 </view>
 "##;
 

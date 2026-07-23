@@ -1,7 +1,7 @@
 //! 模板解析:原汁 Svelte 语法 → IR。
 //!
 //! 因为不受 Rust tokenizer 约束,这里可以支持 proc-macro 路线做不到/别扭的语法:
-//! 免引号文本、`{#if}{:else if}{:else}{/if}`、`{#each list as item, i}`、`on:click={...}`。
+//! 免引号文本、`{#if}{:else if}{:else}{/if}`、`{#each list as item, i}`、`onclick={...}`。
 
 use crate::CompileError;
 use crate::sfc::Span;

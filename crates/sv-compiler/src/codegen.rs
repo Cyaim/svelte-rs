@@ -878,8 +878,8 @@ impl Cg<'_> {
         let mut bind_scrolly: Option<TokenStream> = None;
         for attr in attrs {
             match attr.name.as_str() {
-                // Svelte 5 事件属性与遗留 on: 指令都认
-                "onclick" | "on:click" => match &attr.value {
+                // Svelte 5 事件属性形态(遗留 on: 指令已移除,拒绝分支在下面统一指路)
+                "onclick" => match &attr.value {
                     AttrValue::Expr(e) => {
                         let handler = self.expr(e, scope, true)?;
                         ts.extend(emit::on_click(&el, handler.to_token_stream()));
@@ -1233,13 +1233,14 @@ impl Cg<'_> {
                         ),
                     ));
                 }
-                name if name.starts_with("on:") && name != "on:click" => {
-                    // SVELTE-SUPPORT 裁决:on: 是待移除的遗留形态,新事件只进属性形态
+                name if name.starts_with("on:") => {
+                    // SVELTE-SUPPORT 裁决:on: 指令已移除(对齐 Svelte 5),事件只有属性形态
                     let hint = match name {
+                        "on:click" => "点击事件用属性形态 onclick={|| ...}",
                         "on:keydown" => "键盘事件用属性形态 onkeydown={|e| ...}",
                         "on:focus" => "焦点事件用属性形态 onfocus={...}",
                         "on:blur" => "焦点事件用属性形态 onblur={...}",
-                        _ => "on: 是待移除的遗留形态,新事件只进属性形态(如 onclick)",
+                        _ => "on: 指令已移除,事件用属性形态(如 onclick={...})",
                     };
                     return Err(CompileError::at_offset(
                         self.source,

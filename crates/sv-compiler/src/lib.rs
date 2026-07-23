@@ -12,7 +12,7 @@
 //!
 //! <view style="padding:24; gap:12">
 //!   <text>Count: {count} · 双倍 = {double}</text>
-//!   <button on:click={|| count += 1}>+1</button>
+//!   <button onclick={|| count += 1}>+1</button>
 //!   {#if count > 5}
 //!     <text fg="#ff3e00">超过 5 了!</text>
 //!   {/if}
@@ -22,7 +22,7 @@
 //! 编译器做 proc-macro 做不到的事:
 //! - **runes 源变换**:整个 script 作用域内,裸 `count` 读改写成 `count.get()`,
 //!   `count = x` / `count += x` 改写成 `.set` / `.update` —— Svelte 5 的隐式反应性;
-//! - 模板语法不受 Rust tokenizer 约束:免引号文本、`{#if}{:else}{/if}`、`on:click`;
+//! - 模板语法不受 Rust tokenizer 约束:免引号文本、`{#if}{:else}{/if}`、`onclick={..}`;
 //! - 产物是**人类可读**的 Rust 源码(prettyplease 格式化),定点更新、零 diff。
 //!
 //! 构建集成:build.rs 里调用 [`build`],生成代码进 OUT_DIR,`include!` 引入。
@@ -334,8 +334,8 @@ let double = $derived(count * 2);
   <text style="font-size:28">sv 计数器</text>
   <text>Count: {count} · 双倍 = {double}</text>
   <view style="direction:row; gap:8">
-    <button style="bg:#ff3e00; fg:#ffffff; padding:10; radius:8" on:click={|| count += 1}>+1</button>
-    <button on:click={|| count = 0}>归零</button>
+    <button style="bg:#ff3e00; fg:#ffffff; padding:10; radius:8" onclick={|| count += 1}>+1</button>
+    <button onclick={|| count = 0}>归零</button>
   </view>
   {#if count > 5}
     <text fg="#ff3e00">超过 5 了!</text>
@@ -391,7 +391,7 @@ let items = $state(vec![1i32, 2, 3]);
   {#each items as n, i}
     <text>{i}: {n}</text>
   {/each}
-  <button on:click={|| items.push(9)}>加</button>
+  <button onclick={|| items.push(9)}>加</button>
 </view>
 "#;
         // 注:items.push(9) 这种方法调用不改写(v0 限制),用户应写 items = ...;
@@ -751,6 +751,18 @@ let n = $state(0i32);
         assert!(
             err.message.contains("onkeydown"),
             "on:keydown 报错应指路属性形态:{err}"
+        );
+    }
+
+    /// on: 指令已整体移除(对齐 Svelte 5)——on:click 也不再是遗留别名,
+    /// 报错必须指路 onclick 属性形态
+    #[test]
+    fn on_click_legacy_form_rejected_with_hint() {
+        let src = "<button on:click={|| ()}>x</button>";
+        let err = compile_sv(src, "c").unwrap_err();
+        assert!(
+            err.message.contains("onclick"),
+            "on:click 报错应指路属性形态:{err}"
         );
     }
 
@@ -2006,7 +2018,7 @@ let double = $derived(count * 2);
 </script>
 <view style="direction:column; gap:8; padding:12">
   <text>计数 {count} · 翻倍 {double}</text>
-  <button on:click={|| count += 1}>加</button>
+  <button onclick={|| count += 1}>加</button>
   <input bind:value={note} placeholder="备注" />
   {#if count > 3}
     <text fg="#f00">超过三</text>
@@ -2042,7 +2054,7 @@ let double = $derived(count * 2);
             "<script>let x = $state(",
             "<script></script><view>{#if}",
             "{@const x = }",
-            "<button on:click={>",
+            "<button onclick={>",
             "<input rows=\"\" />",
             "<view style=\"",
             "<view style=\"padding:\">x</view>",
