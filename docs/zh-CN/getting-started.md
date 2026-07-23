@@ -63,7 +63,7 @@ let double = $derived(count * 2);
 </script>
 
 <text>Count: {count} · 双倍 = {double}</text>
-<button style="bg:#ff3e00; fg:#fff" on:click={|| count += 1}>+1</button>
+<button style="bg:#ff3e00; fg:#fff" onclick={|| count += 1}>+1</button>
 ```
 
 ## 离屏渲染:`--png`
@@ -106,8 +106,8 @@ cargo run -p membench -- --windowed --mutate      # 真窗口模式,配合 SV_SH
 |---|---|
 | `crates/sv-reactive` | runes 响应式内核:push-pull 三态脏标记、effect 所有权树 |
 | `crates/sv-ui` | retained 场景树(桌面版 DOM)+ 细粒度绑定原语 |
-| `crates/sv-macro` | `view!` proc-macro 模板前端 |
-| `crates/sv-compiler` | `.svelte` 单文件组件编译器(runes 源变换 + Svelte 模板语法) |
+| `crates/sv-macro` | `view!` proc-macro 模板前端(只剩 parser,模板 IR 与 codegen 共享 sv-compiler 内核) |
+| `crates/sv-compiler` | `.svelte` 单文件组件编译器 + 双前端共享的模板 IR/codegen 内核(runes 源变换 + Svelte 模板语法) |
 | `crates/sv-shell` | winit 窗口 + CPU 光栅壳;可选 vello/wgpu 后端在 `backend-vello` feature 后面 |
 | `examples/*` | 上面列出的五个示例 |
 

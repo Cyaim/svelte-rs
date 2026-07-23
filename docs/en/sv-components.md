@@ -2,7 +2,7 @@
 
 # Authoring UI with `.svelte` Components
 
-svelte-rs has two template front ends that compile to the same target — pinpoint update calls against the retained scene tree in `sv-ui` (no virtual DOM, no runtime diff): **`.svelte` single-file components**, compiled by `sv-compiler` from your `build.rs` (this page's focus), and **the `view!` proc-macro** from `sv-macro` (last section).
+svelte-rs has two template front ends that share a single compilation kernel — a common template IR and one codegen, both living in `sv-compiler`, with only a parser left on each side — and compile to the same target: pinpoint update calls against the retained scene tree in `sv-ui` (no virtual DOM, no runtime diff). The front ends are **`.svelte` single-file components**, compiled by `sv-compiler` from your `build.rs` (this page's focus), and **the `view!` proc-macro** from `sv-macro` (last section).
 
 This is an exploratory prototype; APIs churn. The per-feature status of every Svelte 5 construct lives in the support matrix [../SVELTE-SUPPORT.md](../SVELTE-SUPPORT.md) (Chinese) — when this page and the matrix disagree, the matrix wins.
 
@@ -18,7 +18,7 @@ let double = $derived(count * 2);
 
 <view style="padding:24; gap:12">
   <text font-size="20">Count: {count} · 双倍 = {double}</text>
-  <button on:click={|| count += 1}>+1</button>
+  <button onclick={|| count += 1}>+1</button>
   {#if count > 5}
     <text fg="#ff3e00">超过 5 了!</text>
   {/if}
@@ -66,12 +66,12 @@ Everything below is verified by a compiler test in `crates/sv-compiler/src/lib.r
 <text>Count: {count} · doubled = {double}</text>    <!-- {expr}: any Rust expression -->
 <text fg="#ff3e00" font-size="28">static style attributes</text>
 <Card {title} />                                    <!-- shorthand ≡ title={title} -->
-<button onclick={|| count += 1}>+1</button>         <!-- Svelte 5 attribute form, preferred -->
-<button on:click={|| count = 0}>reset</button>      <!-- legacy alias, still accepted -->
+<button onclick={|| count += 1}>+1</button>         <!-- Svelte 5 attribute form; the on: directive is removed -->
+<button onclick={|| count = 0}>reset</button>
 <text onpointerenter={|| hovers += 1}>hover area</text>
 ```
 
-Mixed static/interpolated text compiles to a single `bind_text` binding; fully static text gets zero bindings. Attribute values are `name="static string"` or `name={rust_expr}`. The event set today: `onclick`/`on:click`, `onpointerenter`, `onpointerleave`, plus keyboard/focus (R1): `onkeydown={|e| ...}` / `onkeyup={|e| ...}` (automatically makes the element focusable; `e.stop_propagation()` cuts bubbling, `e.prevent_default()` cancels the Tab/Enter default layer; a key release reaches handlers but never the default segments — editing, navigation, activation, shortcuts), `onfocus`/`onblur`, and the boolean attribute `autofocus`. Buttons are Tab-focusable and Enter/Space-activatable with no annotation. Text entry uses `<input>` (a self-closing leaf): `placeholder="..."`, two-way `bind:value={x}`, `oninput={|v| ...}`/`onsubmit={|v| ...}` (signature `Fn(&str)`); caret/selection/IME preedit/Ctrl+C/X/V work out of the box, as do drag-select, double-click-to-select-word, triple-click-to-select-all, word motion (Ctrl/⌥+←/→, Ctrl+Backspace/Delete) and undo/redo (Ctrl+Z / Ctrl+Y). Caret and hit-testing geometry come from the same Parley layout that draws the text, so they stay exact under kerning and CJK/Latin font fallback. Multi-line entry uses `<textarea rows="4" />`: same attributes and editing core as `<input>`, except Enter inserts a newline (submit belongs to a button), paste keeps newlines, text wraps at the content width, and the height is `rows` × line height (longer content scrolls instead of growing). ↑/↓ move by **visual** line. Unsupported events are a compile error, not a silent no-op. Inline `style="k:v; ..."` and shorthand style attributes (`fg=`, `font-size=`, …) are the styling mini-language — see [./styling.md](./styling.md).
+Mixed static/interpolated text compiles to a single `bind_text` binding; fully static text gets zero bindings. Attribute values are `name="static string"` or `name={rust_expr}`. The event set today: `onclick`, `onpointerenter`, `onpointerleave` (the `on:` event directive has been removed — writing `on:click` is a compile error that points you at `onclick`), plus keyboard/focus (R1): `onkeydown={|e| ...}` / `onkeyup={|e| ...}` (automatically makes the element focusable; `e.stop_propagation()` cuts bubbling, `e.prevent_default()` cancels the Tab/Enter default layer; a key release reaches handlers but never the default segments — editing, navigation, activation, shortcuts), `onfocus`/`onblur`, and the boolean attribute `autofocus`. Buttons are Tab-focusable and Enter/Space-activatable with no annotation. Text entry uses `<input>` (a self-closing leaf): `placeholder="..."`, two-way `bind:value={x}`, `oninput={|v| ...}`/`onsubmit={|v| ...}` (signature `Fn(&str)`); caret/selection/IME preedit/Ctrl+C/X/V work out of the box, as do drag-select, double-click-to-select-word, triple-click-to-select-all, word motion (Ctrl/⌥+←/→, Ctrl+Backspace/Delete) and undo/redo (Ctrl+Z / Ctrl+Y). Caret and hit-testing geometry come from the same Parley layout that draws the text, so they stay exact under kerning and CJK/Latin font fallback. Multi-line entry uses `<textarea rows="4" />`: same attributes and editing core as `<input>`, except Enter inserts a newline (submit belongs to a button), paste keeps newlines, text wraps at the content width, and the height is `rows` × line height (longer content scrolls instead of growing). ↑/↓ move by **visual** line. Unsupported events are a compile error, not a silent no-op. Inline `style="k:v; ..."` and shorthand style attributes (`fg=`, `font-size=`, …) are the styling mini-language — see [./styling.md](./styling.md).
 
 ### `{#if}` / `{#each}` / `{#key}`
 
@@ -268,8 +268,8 @@ diagnostics that land on generated files back to `.svelte` line/columns, and pri
 rustc-style.
 
 ```sh
-cargo run -p sv-compiler --bin sv-check            # whole workspace
-cargo run -p sv-compiler --bin sv-check -- -p counter-sfc
+cargo run -p sv-compiler --bin sv -- check            # whole workspace
+cargo run -p sv-compiler --bin sv -- check -p counter-sfc
 ```
 
 ```text
@@ -329,7 +329,7 @@ view! { doc, root =>
 | Feature surface | everything on this page | text interpolation, `if`/`for` blocks, `style(closure)`, `on_click(closure)` |
 | Build setup | `build.rs` + `include!` | none — inline macro |
 
-Prefer `view!` when embedding a small reactive UI inline in existing Rust code with zero build-script setup, or when you want everything to stay plain Rust for the IDE. Per ADR-2 (revised), both front ends coexist; merging their compilation kernels is an M1 goal — see [../DESIGN.md](../DESIGN.md) (Chinese).
+Prefer `view!` when embedding a small reactive UI inline in existing Rust code with zero build-script setup, or when you want everything to stay plain Rust for the IDE. Per ADR-2 (revised), both front ends coexist; their compilation kernels are now merged (M1 done): the shared template IR lives in `sv_compiler::template`, there is a single codegen (`sv_compiler::generate_template` is the macro-side entry point), only the `view!` parser remains on the macro side, span precision is intact (macro expression tokens pass through verbatim), and neither surface syntax changed — see [../DESIGN.md](../DESIGN.md) (Chinese).
 
 ## See also
 

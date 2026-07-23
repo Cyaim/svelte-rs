@@ -10,8 +10,9 @@
 - **minor 号(0.X.0)= 破坏性变更**;**patch 号(0.0.X)= 向后兼容**。
 - 破坏性变更必须在本文件 `Changed` / `Removed` 段落写明**迁移方式**。
 - 每次发版前跑 `cargo semver-checks`,漏报的破坏性变更按 bug 处理。
-- 三类**已排期**的破坏性变更清完才会谈 1.0(见 `docs/DESIGN.md` §5):
-  双前端内核合并、`on:` 事件语法收敛、帧调度语义(ADR-6)。
+- 三类**已排期**的破坏性变更——双前端内核合并、`on:` 事件语法收敛、
+  帧调度语义(ADR-6)——**已于 2026-07-22/23 全部落地**(迁移方式见下方
+  [未发布] 的变更/移除段);谈 1.0 还差 crates.io 首发与稳定期。
 
 工作区所有 crate 同版本号发布(sv-reactive / sv-ui / sv-macro / sv-compiler /
 sv-shell),按依赖序推送;`examples/` 不发布。
@@ -139,6 +140,24 @@ sv-shell),按依赖序推送;`examples/` 不发布。
   作为两个前端对 sv-ui 的唯一发射口;`sv-macro` 现依赖 `sv-compiler`。
   对用户无行为变化(两条路线生成的代码形状不变)。
 
+- **双前端内核合并完成(ADR-2 ①,2026-07-23)**:公共模板 IR 转正为
+  `sv_compiler::template`(表达式载荷双态:`.svelte` 源码串+字节偏移 /
+  `view!` 带真 span 的 token 直通),codegen 只剩一份(宏侧入口
+  `sv_compiler::generate_template`),两个前端只剩各自 parser。
+  **两条路线的表面语法与生成代码语义都不变**(`.svelte` 产物逐字节不变、
+  `view!` 行为测试零改动);对库使用者的可见变化是 `sv_compiler` 新增
+  pub 模块 `template` 与函数 `generate_template`。
+
+- **标识符改名(ADR-10 收尾,API breaking)**:`sv_compiler::compile_sv` /
+  `compile_sv_with` / `compile_sv_mapped` → **`compile` / `compile_with` /
+  `compile_mapped`**(`.sv` 后缀已废,名字随之;伞 crate 路径
+  `svelte_rs::compiler::*` 同步变化)。迁移:改函数名即可,签名不变。
+  二进制 `sv-check` → **`sv` + `check` 子命令**:
+  `cargo run -q -p sv-compiler --bin sv -- check [cargo check 参数]`;
+  诊断尾注 `[sv-check: …]` → `[sv check: …]`,LSP/problemMatcher 的
+  diagnostic source 同步为 `sv check`。`.svmap` 磁盘格式与 `__sv_*`
+  内部占位符不变。
+
 - **帧调度(ADR-6,语义 breaking)**:开窗应用的 signal 写入不再当场跑 effect,
   改为攒到帧边界由渲染壳统一冲刷(一次事件连写 N 次 = 一帧一轮)。迁移:
   需要立刻看到结果的地方调 `sv_reactive::tick()`。离屏渲染与测试路径不受影响。
@@ -150,6 +169,11 @@ sv-shell),按依赖序推送;`examples/` 不发布。
 - 长文本溢出时输入框的点击定位改为与绘制同源(此前忽略横向滚移,点击会偏)。
 
 ### 移除
+
+- **遗留 `on:click` 事件指令(语法 breaking,2026-07-23)**:`.svelte` 事件
+  只保 Svelte 5 属性形态。迁移:`on:click={h}` → `onclick={h}`(机械替换);
+  写任何 `on:*` 都会得到指路属性形态的编译错误。`view!` 宏的
+  `on_click(闭包)` 方法形态不受影响(本就不是 `on:` 指令)。
 
 - `sv_shell::ui_font_handle` 与内置字体探测(`font.rs`):字体一律经 fontique
   发现。`FontHandle` 现由 `sv_shell::text` 导出,保留键 0 的语义随之消失。

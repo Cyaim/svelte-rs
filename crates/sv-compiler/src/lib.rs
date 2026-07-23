@@ -123,10 +123,10 @@ pub fn compile(source: &str, fn_name: &str) -> Result<String, CompileError> {
 
 /// 双前端共享内核的宏侧入口:模板 IR 节点 → 建树/绑定语句序列(TokenStream)。
 ///
-/// `view!` 宏(sv-macro)把 token 解析成 [`template::Node`](template::Node)
+/// `view!` 宏(sv-macro)把 token 解析成 [`template::Node`]
 /// 后从这里走**同一份 codegen**。不带 script/样式表/props 上下文:宏模板的
-/// 表达式是 [`template::ExprSrc::Tokens`](template::ExprSrc)(用户亲手写的
-/// 最终 Rust,带真 span),不过 runes 改写、普通变量预克隆与 sourcemap 记录。
+/// 表达式是 [`template::ExprSrc::Tokens`]——用户亲手写的最终 Rust、带真
+/// span——不过 runes 改写、普通变量预克隆与 sourcemap 记录。
 pub fn generate_template(
     nodes: &[template::Node],
 ) -> Result<proc_macro2::TokenStream, CompileError> {

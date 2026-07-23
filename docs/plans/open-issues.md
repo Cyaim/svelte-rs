@@ -16,7 +16,7 @@
   差分 fuzz(增量 vs 全量逐帧对拍)+ 定点测试(证明路径被走、树被复用、坐标逐个
   相同)双守。仍未做:结构变更的增量(那才是陷阱区,继续全量)、walk 优化(步骤 4)。
 - **`.svelte` 语言服务器 `sv-lsp`(LSP MVP)**(此前"未实现",本轮实现):打开/改动
-  `.svelte` → `compile_sv` → `publishDiagnostics` 波浪线。零外部依赖(手写 `Content-Length`
+  `.svelte` → `compile` → `publishDiagnostics` 波浪线。零外部依赖(手写 `Content-Length`
   分帧 + JSON-RPC,协议解析复用 `sv_compiler::check::json`)。纯函数 `Server::handle`
   有单测,stdio 端到端冒烟过。仍未做:补全/跳转/hover(要符号表)。
 - **PAG 差分帧重放 + WebP 解码(全链打通)**(此前"未实现",本轮实现):
@@ -83,6 +83,10 @@
 ### ADR-2 ③(计划 `adr2-3-setup-render-split.md`)
 
 - S1–S4 未做(要动 codegen)。已落地的只有 S5(热重载判据 + 槽位重映射)。
+- **2026-07-23 内核合并(ADR-2 ①完成)后的新前提**:codegen 已是双前端共享
+  的一份(`Cg`),③ 动工时的改造对象是共享内核而非 `.svelte` 专属 codegen;
+  计划 §0.10 "view! 宏不跟 stamp"的预裁决届时需复议(否则 emit 建树词汇表
+  的"唯一发射口"结构又会被拆开)。
 - `tmpl.rs` 还欠 §9 表里的两条:`TNode::If`/`Key` 内联子节点数组、`Binder` 六变体。**刻意没提前加** —— 没有发射方的枚举变体是死代码。
 - `remap_slots` **每次调用泄漏内存**(`TNode` 的 `binds`/`children` 是 `&'static`,改写产物只能新建 + leak)。量级是每次热重载几 KB,且只该出现在 dev 热通道。
 - 热重载的**通道**(编译端产 sig、dev 端推送、运行端重放)整个没有。
@@ -135,9 +139,12 @@
 
 ### R4 发布工程
 
-- 改名(ADR-10 待裁决)**阻塞真实 publish**。
+- ~~改名(ADR-10 待裁决)~~ ✅ 已裁决并落地(`svelte-rs` + `.svelte`;
+  标识符批 2026-07-23:`compile` 族 + `sv` 二进制)。
 - `cargo-semver-checks` 需要已发布基线才有意义。
-- 双前端内核合并 —— API 冻结的前置,独立大件。
+- ~~双前端内核合并~~ ✅ 2026-07-23 落地(公共 IR `sv_compiler::template` +
+  共享 codegen,两前端只剩 parser;span 精度有契约测试守护)。API 冻结前置
+  已全部出清,首发关键路径推进到依赖序发 crates.io。
 
 ## 方法论:这一轮反复出现的几类错
 

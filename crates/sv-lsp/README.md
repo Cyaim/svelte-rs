@@ -2,7 +2,7 @@
 
 `.svelte` 单文件组件的语言服务器(LSP),**最小可用版**。
 
-编辑器每次打开 / 改动 `.svelte`,把全文交给 `sv_compiler::compile_sv` 编译一遍,
+编辑器每次打开 / 改动 `.svelte`,把全文交给 `sv_compiler::compile` 编译一遍,
 编译前端报的错(未知标签、非法属性、runes 改写失败、样式语法……)实时变成
 波浪线(`textDocument/publishDiagnostics`)。
 

@@ -16,9 +16,10 @@ DOM, no diff, no rebuild.** Target platforms: Windows / Linux / macOS / HarmonyO
 ┌──────────────────────────────────────────────────────────────┐
 │ User components: view! templates + $state/$derived/$effect   │
 ├──────────────────────────────────────────────────────────────┤
-│ sv-macro     view! proc-macro frontend (parse → IR → codegen)│
-│ sv-compiler  .svelte single-file-component frontend              │
-│              → both emit calls into sv-ui binding primitives │
+│ sv-macro     view! proc-macro frontend (parser only)         │
+│ sv-compiler  .svelte frontend + shared template IR/codegen   │
+│              → both parsers feed one core that emits calls   │
+│                into sv-ui binding primitives                 │
 ├──────────────────────────────────────────────────────────────┤
 │ sv-reactive  runes kernel: Signal / Derived / Effect         │
 │              thread-local arena + Copy handles, push-pull    │
@@ -90,8 +91,9 @@ is ADR-6 and **not implemented yet**.
 ## Two compiler frontends, one compile target (ADR-2, revised)
 
 Both frontends compile to the same thing: imperative `Doc` tree building plus calls
-into sv-ui binding primitives. Generated code from the two routes is nearly identical,
-which is why a shared core is planned.
+into sv-ui binding primitives. Generated code from the two routes is nearly identical —
+which is why the kernel merge held up; it is now complete, and only the parsers remain
+separate (see below).
 
 The `view!` proc-macro route (`examples/counter`):
 
@@ -116,7 +118,7 @@ let double = $derived(count * 2);
 
 <view style="padding:24; gap:12">
   <text font-size="20">Count: {count} · 双倍 = {double}</text>
-  <button on:click={|| count += 1}>+1</button>
+  <button onclick={|| count += 1}>+1</button>
   {#if count > 5}
     <text fg="#ff3e00">超过 5 了!</text>
   {/if}
@@ -126,7 +128,7 @@ let double = $derived(count * 2);
 | | `view!` macro (sv-macro) | `.svelte` SFC (sv-compiler) |
 |---|---|---|
 | Runes | explicit: `count.get()`, `count.update(..)` | implicit: bare `count` reads, `count += 1` writes — a whole-script source transform |
-| Template syntax | constrained by the Rust tokenizer (quoted text, Rust `if`/`for`) | genuine Svelte: unquoted text, `{#if}{:else}`, `on:click`, `bind:` |
+| Template syntax | constrained by the Rust tokenizer (quoted text, Rust `if`/`for`) | genuine Svelte: unquoted text, `{#if}{:else}`, `onclick`, `bind:` |
 | Diagnostics | spans point into your source | template errors carry `.svelte` line/col; rustc type errors land in (readable, prettyplease-formatted) generated code |
 | Build | expands in place | `build.rs` + `OUT_DIR` + `include!` |
 | Compile target | sv-ui binding primitives | sv-ui binding primitives (same) |
@@ -137,14 +139,15 @@ one compiler core**. Three no-regret steps: (1) merge sv-macro and sv-compiler i
 single core, (2) make templates data rather than generated types, (3) split codegen
 into setup/render — the latter two also serve hot reload.
 
-**Step 1 landed (2026-07-22)**: every emission against sv-ui now goes through one
-place, `sv_compiler::emit` (the binding-primitive call vocabulary plus the rebuild
-closure protocol); the `view!` macro depends on sv-compiler and emits from the same
-vocabulary, so a primitive's signature changes in exactly one file. **Parsing and the
-IR were deliberately left separate**: `view!` carries expressions as Rust tokens with
-real spans, while `.svelte` carries source text with offsets (and runs them through the
-runes transform). Fusing the IRs would trade away the macro route's span precision —
-which is the very reason ADR-2 keeps both frontends. The biggest open risk of the `.svelte` route is IDE
+**Steps 1 and 2 are done (2026-07-22 and 2026-07-23)**: every emission against sv-ui
+goes through one place, `sv_compiler::emit` (the binding-primitive call vocabulary plus
+the rebuild closure protocol), the shared template IR lives in `sv_compiler::template`,
+and there is a single codegen (`sv_compiler::generate_template` is the macro-side entry
+point). **All that remains per frontend is its parser**, so a primitive-signature or
+codegen change touches exactly one place. Span precision was not traded away: the IR's
+expression payload is two-state (`ExprSrc`) — `.svelte` carries source text with byte
+offsets (run through the runes transform), while `view!` carries Rust tokens with real
+spans, passed through verbatim and never touched by the runes rewrite. The biggest open risk of the `.svelte` route is still IDE
 support (no rust-analyzer inside `.svelte`; a Volar-style forwarding LSP is unbuilt).
 See [sv-components](./sv-components.md).
 
@@ -183,8 +186,8 @@ Details and the full API surface: [reactivity](./reactivity.md).
 |---|---|
 | `sv-reactive` | Runes kernel: `state` / `derived` / `effect` / `effect_pre` / `batch` / `untrack` / `on_cleanup` / `create_root` / `provide_context` / `use_context`; thread-local runtime and scheduling |
 | `sv-ui` | Retained scene tree (`Doc`, `ViewNode`, `Style`) and the binding primitives both compilers target: `bind_text`, `bind_style`, `bind_style_patch`, `if_block`, `each_block`, `each_block_else`, `each_block_keyed`, `key_block`, `virtual_list`, `mount`; version counter + `on_mutate` |
-| `sv-macro` | `view!` proc-macro frontend: parse → IR → codegen |
-| `sv-compiler` | `.svelte` SFC frontend: runes source transform, Svelte template syntax, style parsing, `build.rs`/`OUT_DIR` integration (`sv_compiler::build`), errors with `.svelte` line/col |
+| `sv-macro` | `view!` proc-macro frontend: a parser producing sv-compiler's shared template IR (codegen is shared too) |
+| `sv-compiler` | `.svelte` SFC frontend plus the kernel both frontends share (template IR in `sv_compiler::template`, single codegen): runes source transform, Svelte template syntax, style parsing, `build.rs`/`OUT_DIR` integration (`sv_compiler::build`), errors with `.svelte` line/col |
 | `sv-shell` | winit window + renderers: CPU stack (softbuffer + tiny-skia + swash) by default, vello/wgpu behind the `backend-vello` feature with `SV_RENDERER=cpu\|vello` override; `Painter` trait, layout, hit testing, `run_app` / `render_to_png` |
 | `examples/counter` | Counter on the `view!` route (windowed + `--png` offscreen) |
 | `examples/counter-sfc` | Counter on the `.svelte` route (build.rs integration + end-to-end behavior test) |
@@ -201,7 +204,7 @@ One line each; full records (Chinese) in [DESIGN.md](../DESIGN.md).
 | ADR | Decision | Status |
 |---|---|---|
 | ADR-1 | Reactive graph: thread-local arena + `Copy` handles; push-pull three-state dirty marking; no Send/Sync | Implemented |
-| ADR-2 (rev.) | Compile strategy: dual frontends (`view!` + `.svelte`) sharing one compile target; merge into a single compiler core in M1 | Both frontends running; merge planned |
+| ADR-2 (rev.) | Compile strategy: dual frontends (`view!` + `.svelte`) sharing one compile target; merge into a single compiler core in M1 | Implemented — core merged (2026-07-23); only the parsers remain per-frontend |
 | ADR-3 | Rendering: start on a CPU stack, converge on the vello family (Parley text, taffy layout) | CPU stack running |
 | ADR-3b | Backend verdict + switchable `Painter` abstraction; vello as second real backend; text stack moved to swash | Landed |
 | ADR-4 | Window layer: narrow trait, winit is not an architectural premise (no winit HarmonyOS backend) | Planned |

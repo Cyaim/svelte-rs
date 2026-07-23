@@ -28,16 +28,20 @@ cargo run -p counter -- --png out.png   # 离屏渲染一帧(验证渲染,无需
 ## 架构速记
 
 数据流:`state/derived`(sv-reactive)→ effect 精准改场景树(sv-ui)→ 版本号 bump
-→ `on_mutate` → 重绘(sv-shell)。**没有 VDOM/diff**。模板有两个前端(ADR-2 修订版:
-双前端共存,M1 合并内核):`view!` 宏(sv-macro)与 `.svelte` 单文件组件(sv-compiler,
-runes 源变换 + build.rs 集成,示例 examples/counter-sfc)。
+→ `on_mutate` → 重绘(sv-shell)。**没有 VDOM/diff**。模板有两个前端、**一个内核**
+(ADR-2 M1 已完成):`view!` 宏(sv-macro)与 `.svelte` 单文件组件(sv-compiler,
+runes 源变换 + build.rs 集成,示例 examples/counter-sfc)——两者只剩各自 parser,
+汇入公共模板 IR(`sv_compiler::template`)与同一份 codegen。
 
 约束:
 - 响应式是单线程模型(thread-local runtime,句柄 `Copy + !Send`)。
 - derived 计算中禁止写 state(会 panic,对应 Svelte state_unsafe_mutation)。
-- sv-ui 是两个前端的编译目标,但**发射口只有一个**:`sv_compiler::emit`
-  (绑定原语调用词汇表)。改原语签名改那一处 + 它的形状测试即可,
-  不必两边同步(解析/IR/属性名表仍各前端自有)。
+- 编译内核只有一份:IR 表达式载荷是**双态**的(`.svelte` 文本+偏移 / 宏 token
+  带真 span 直通)。改绑定原语签名只改 `sv_compiler::emit` 一处 + 形状测试;
+  改 codegen 在 `sv-compiler/src/codegen.rs` 一处(两前端同时生效,`.svelte`
+  golden 逐字节 + 宏行为/span 测试都会盯着)。属性名表仍各 parser 自有。
+- **宏路径的表达式不过任何改写**(runes/force-move/预克隆都是 `.svelte` 语义)
+  ——`ExprSrc::Tokens` 分支必须保持原样直通,span 精度有契约测试守护。
 - 布局已迁 taffy 0.12(封在 sv-shell layout_tree 内,`Vec<Placed>` 契约);
   文本栈已迁 Parley 0.11 + fontique(封在 sv-shell text.rs 门面,全仓唯一
   parley import;fallback 混排/折行/对齐/光标与选区几何——**线性路径与

@@ -16,8 +16,8 @@ script 块 runes 源变换(裸 `count` → `.get()`、`count += 1` → `.update`
 (build.rs 与 `.rs` 同一次写盘)把诊断搬回 `.svelte`:
 
 ```sh
-cargo run -q -p sv-compiler --bin sv-check              # 默认 --workspace
-cargo run -q -p sv-compiler --bin sv-check -- -p counter-sfc
+cargo run -q -p sv-compiler --bin sv -- check              # 默认 --workspace
+cargo run -q -p sv-compiler --bin sv -- check -p counter-sfc
 ```
 
 把 `Counter.svelte` 的 `{count}` 改成 `{count + "x"}`,实测输出(2026-07-22):
@@ -37,7 +37,7 @@ cargo run -q -p sv-compiler --bin sv-check -- -p counter-sfc
 `.vscode/tasks.json` 里配好了 problemMatcher(Ctrl+Shift+B),这一行会直接变成
 Problems 面板条目 + 编辑器波浪线,**不需要任何 VS Code 扩展**。
 
-**映射不到时绝不吞诊断**:位置退回生成文件并附一句 `[sv-check: …]` 说明,
+**映射不到时绝不吞诊断**:位置退回生成文件并附一句 `[sv check: …]` 说明,
 而且**说明必须是真理由**——降级成因有五种(落在胶水上 / `.svmap` 坏了 /
 `.svelte` 原文找不到 / map 过期 / 锚点表整体作废),给错理由会把人支到错误的方向。
 所以 Problems 面板里出现 `target/**/out/*.rs` 的条目是预期行为。
@@ -62,8 +62,8 @@ relocates each diagnostic through the `.svmap` sidecar (written by build.rs in t
 same pass as the `.rs`):
 
 ```sh
-cargo run -q -p sv-compiler --bin sv-check              # defaults to --workspace
-cargo run -q -p sv-compiler --bin sv-check -- -p counter-sfc
+cargo run -q -p sv-compiler --bin sv -- check              # defaults to --workspace
+cargo run -q -p sv-compiler --bin sv -- check -p counter-sfc
 ```
 
 Output is one rustc-style line per diagnostic (`path:line:col: level[code]: message`),
@@ -71,7 +71,7 @@ which the problemMatcher in `.vscode/tasks.json` turns into Problems-panel entri
 editor squiggles — **no VS Code extension involved**.
 
 **A diagnostic is never dropped.** When it cannot be relocated, the generated-file
-position is kept and a `[sv-check: …]` note explains *why* — and the reason has to be
+position is kept and a `[sv check: …]` note explains *why* — and the reason has to be
 the real one. There are five distinct causes (landed on generated glue / the `.svmap`
 is unreadable / the recorded `.svelte` is gone / the map is stale / the anchor table was
 voided wholesale); reporting the wrong one sends people digging in the wrong place.
