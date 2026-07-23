@@ -225,11 +225,11 @@ full_frames=… skip_frames=…`(字段只增不改;非 `--blit` 模式全为 0)
 | 路径 | frame_avg_ms | p99_ms | 1% low |
 |---|---|---|---|
 | 默认(全量 `render_frame`) | 12.91 | 18.41 | 54fps |
-| `--blit` | **1.90** | **2.89** | **346fps** |
+| `--blit` | **2.18** | **3.35** | **299fps** |
 
-**6.8 倍**;blit_frames=99/100(回卷那一帧位移超视口,按守卫降级整帧)。
+**5.9 倍**;blit_frames=99/100(回卷那一帧位移超视口,按守卫降级整帧)。
 开窗(`SV_SHOW_FPS=1 --windowed`,含 softbuffer 整窗转换/呈现):
-`SV_DAMAGE=0` 55fps → 默认 **113fps**——剩余天花板是 present 的整窗
+`SV_DAMAGE=0` 55fps → 默认 **~100fps**——剩余天花板是 present 的整窗
 逐像素转换,等 `present_with_damage`。**会抓到什么**:
 blit 资格判定被改坏(隔离扫描漏判/整数判定松了)不会在这里现形——那归
 sv-shell 的逐字节差分测试;这里抓的是**性能回归**:blit_frames 掉到个位数

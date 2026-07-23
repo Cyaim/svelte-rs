@@ -115,7 +115,7 @@ impl Layout {
 const ROOT_FONT_SIZE: f32 = 16.0;
 
 /// 继承解析:自身 NAN → 父链向上,根 fallback
-fn resolve_font_size(inner: &DocumentInner, id: ViewId) -> f32 {
+pub(crate) fn resolve_font_size(inner: &DocumentInner, id: ViewId) -> f32 {
     let mut cur = Some(id);
     while let Some(c) = cur {
         let Some(n) = inner.nodes.get(c) else { break };
@@ -1122,7 +1122,7 @@ pub fn paint_tree(doc: &Doc, placed: &[Placed], painter: &mut dyn Painter, scale
 
 /// f32 位级相等(裁剪矩形由同一祖先传播,同源必位同;
 /// 用 `==` 会在 clippy `float_cmp` 上挨骂,语义还没这个准)
-fn rect_bits_eq(a: Rect, b: Rect) -> bool {
+pub(crate) fn rect_bits_eq(a: Rect, b: Rect) -> bool {
     a.x.to_bits() == b.x.to_bits()
         && a.y.to_bits() == b.y.to_bits()
         && a.w.to_bits() == b.w.to_bits()
@@ -1150,14 +1150,7 @@ pub(crate) fn paint_tree_culled(
                 continue;
             };
             if let Some(rects) = cull {
-                let ink = crate::damage::ink_rect(
-                    p,
-                    n.kind,
-                    n.style.text_wrap == sv_ui::TextWrap::Wrap,
-                    scale,
-                    i32::MAX / 4,
-                    crate::damage::INK_PAD,
-                );
+                let ink = crate::damage::node_ink(inner, p, scale, i32::MAX / 4);
                 if !rects.iter().any(|r| ink.intersects(r)) {
                     continue;
                 }
@@ -1607,8 +1600,15 @@ pub fn render_into_cached(
     }
 
     let prev_ok = ctx.prev.as_ref().is_some_and(|s| {
-        s.scale.to_bits() == scale.to_bits() && s.phys_w == phys_w && s.phys_h == phys_h
+        s.doc_id == doc.identity()
+            && s.scale.to_bits() == scale.to_bits()
+            && s.phys_w == phys_w
+            && s.phys_h == phys_h
     });
+
+    // 本帧墨迹只算一次:plan 用它做剔除/损伤/隔离,帧末进快照当"上一帧墨迹"
+    let cur_inks =
+        doc.read(|inner| crate::damage::compute_inks(inner, &layout, scale, phys_w as i32));
 
     let outcome = if !(ctx.enabled && prev_ok) {
         paint_full(doc, &layout, pixmap, scale);
@@ -1616,7 +1616,7 @@ pub fn render_into_cached(
     } else {
         let prev = ctx.prev.as_ref().expect("prev_ok 已保证非空");
         match crate::damage::plan(
-            doc, prev, &layout, &dirty, scale, phys_w, phys_h, caret_flip,
+            doc, prev, &layout, &cur_inks, &dirty, scale, phys_w, phys_h, caret_flip,
         ) {
             crate::damage::DamagePlan::Full => {
                 paint_full(doc, &layout, pixmap, scale);
@@ -1638,7 +1638,8 @@ pub fn render_into_cached(
                                 // scratch 分配失败:退整帧,别丢帧
                                 paint_full(doc, &layout, pixmap, scale);
                                 ctx.stats.full += 1;
-                                ctx.prev = Some(snapshot(doc, &layout, scale, phys_w, phys_h));
+                                ctx.prev =
+                                    Some(snapshot(doc, &layout, cur_inks, scale, phys_w, phys_h));
                                 return (layout, RenderOutcome::Full);
                             };
                             ctx.scratch = Some(p);
@@ -1680,19 +1681,25 @@ pub fn render_into_cached(
         RenderOutcome::Partial { .. } => ctx.stats.partial += 1,
         RenderOutcome::Skip => ctx.stats.skip += 1,
     }
-    ctx.prev = Some(snapshot(doc, &layout, scale, phys_w, phys_h));
+    ctx.prev = Some(snapshot(doc, &layout, cur_inks, scale, phys_w, phys_h));
     (layout, outcome)
 }
 
+/// `inks`:与 `layout.placed` 平行的本帧墨迹(必须按**本帧**节点状态算好传入:
+/// 下一帧样式可能已变,拿新样式估旧帧墨迹会漏,评审发现 #2)。
+/// Partial 帧直接复用 plan 里已算的一份,别每帧算两遍
 fn snapshot(
     doc: &Doc,
     layout: &Rc<Layout>,
+    inks: Vec<crate::damage::PhysRect>,
     scale: f32,
     phys_w: u32,
     phys_h: u32,
 ) -> crate::damage::FrameSnapshot {
     crate::damage::FrameSnapshot {
         offsets: crate::damage::effective_offsets(doc, layout),
+        inks,
+        doc_id: doc.identity(),
         layout: Rc::clone(layout),
         scale,
         phys_w,
@@ -1988,8 +1995,19 @@ pub fn route_wheel_with(
             // 吸附到物理像素网格(shell 设的步长;离屏没设 = 原样):
             // 整数物理位移是 scroll-blit 的入场券,吸附半像素以内肉眼无感。
             // 先吸附再钳制 —— 钳出的 max 本身可以是小数(内容尺寸是小数),
-            // 贴边那一帧走整视口重画,正常
-            let nx = sv_ui::anim::snap_scroll(sx + dx).clamp(0.0, a.max.0);
+            // 贴边那一帧走整视口重画,正常。
+            // **吸附回原地时改用原始值**:慢速触摸板的亚半像素增量若被吸附
+            // 吞掉,事件就永远推不动偏移(每次都从同一格心起算,评审发现
+            // #12)—— 让偏移先小数漂移,跨过半格后自然回到网格
+            let snap_or_raw = |raw: f32, base: f32| {
+                let snapped = sv_ui::anim::snap_scroll(raw);
+                if snapped == base && raw != base {
+                    raw
+                } else {
+                    snapped
+                }
+            };
+            let nx = snap_or_raw(sx + dx, sx).clamp(0.0, a.max.0);
             // 平滑模式下在**进行中的目标**上累加,而不是在"这一帧画到哪儿"
             // 上累加 —— 后者会让连续快滚越滚越慢(每次都从落后的位置起算)
             let base_y = if smooth {
@@ -1997,7 +2015,7 @@ pub fn route_wheel_with(
             } else {
                 sy
             };
-            let ny = sv_ui::anim::snap_scroll(base_y + dy).clamp(0.0, a.max.1);
+            let ny = snap_or_raw(base_y + dy, base_y).clamp(0.0, a.max.1);
             if nx != sx || ny != base_y {
                 if smooth && ny != base_y {
                     sv_ui::anim::scroll_y_to(doc, id, ny);

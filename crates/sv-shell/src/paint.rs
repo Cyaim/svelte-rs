@@ -788,7 +788,9 @@ impl<'a> TinySkiaPainter<'a> {
     /// Mask 是唯一两全的裁法:光栅化照常走完整轮廓,写像素时按位遮罩。
     fn ensure_clip_mask(&mut self) {
         let Some(&top) = self.clips.last() else {
-            self.clip_mask = None;
+            // 无裁剪时**保留**缓存不清:mask_for 按"缓存键 == 当前 top"取,
+            // 留着的旧条目不会被误用;清了的话「有裁剪→无裁剪→同裁剪」的
+            // 交替会白白重建整画布 Mask(评审发现 #17)
             return;
         };
         if self.clip_mask.as_ref().is_some_and(|(r, _)| *r == top) {
@@ -1809,5 +1811,101 @@ mod tests {
                 bbox: (10, 0, 91, 20),
             }]
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Mask 裁剪(描边/路径):差分套件对"两边同错"是盲的,这里直接验像素
+    // -----------------------------------------------------------------
+
+    /// 描边跨越裁剪边界:裁剪外一个字节都不许动,裁剪内要真的画上
+    #[test]
+    fn stroke_respects_clip_mask() {
+        let mut pixmap = Pixmap::new(60, 60).unwrap();
+        let mut p = TinySkiaPainter::new(&mut pixmap);
+        p.push_clip(0.0, 0.0, 60.0, 30.0, 0.0);
+        // 一个 40×40 的框,下半截在裁剪外
+        p.stroke_rounded_rect(10.0, 10.0, 40.0, 40.0, 0.0, 2.0, Color::rgb(255, 0, 0));
+        p.pop_clip();
+        let px = |x: u32, y: u32| {
+            let i = ((y * 60 + x) * 4) as usize;
+            &pixmap.data()[i..i + 4]
+        };
+        assert_ne!(px(10, 10), &[0, 0, 0, 0], "裁剪内的上边框应画上");
+        for y in 30..60u32 {
+            for x in 0..60u32 {
+                assert_eq!(px(x, y), &[0, 0, 0, 0], "裁剪外 ({x},{y}) 不许有描边出血");
+            }
+        }
+    }
+
+    /// fill_path / stroke_path 跨越裁剪边界:曾是"路径不吃裁剪"的已知缺口
+    #[test]
+    fn paths_respect_clip_mask() {
+        let mut pixmap = Pixmap::new(40, 40).unwrap();
+        let mut p = TinySkiaPainter::new(&mut pixmap);
+        p.push_clip(0.0, 0.0, 40.0, 20.0, 0.0);
+        let path = [
+            PathCmd::MoveTo(5.0, 5.0),
+            PathCmd::LineTo(35.0, 5.0),
+            PathCmd::LineTo(35.0, 35.0),
+            PathCmd::LineTo(5.0, 35.0),
+            PathCmd::Close,
+        ];
+        p.fill_path(&path, PathFill::NonZero, Color::rgb(0, 128, 0));
+        p.stroke_path(
+            &path,
+            &StrokeStyle {
+                width: 2.0,
+                ..StrokeStyle::default()
+            },
+            Color::rgb(0, 0, 255),
+        );
+        p.pop_clip();
+        let data = pixmap.data();
+        for y in 20..40usize {
+            for x in 0..40usize {
+                let i = (y * 40 + x) * 4;
+                assert_eq!(
+                    &data[i..i + 4],
+                    &[0, 0, 0, 0],
+                    "裁剪外 ({x},{y}) 不许有路径像素"
+                );
+            }
+        }
+        let inside = (10 * 40 + 10) * 4;
+        assert_ne!(&data[inside..inside + 4], &[0, 0, 0, 0], "裁剪内应画上");
+    }
+
+    /// A→B→A 交替裁剪下 Mask 缓存不错用:每段描边都只落在各自裁剪内
+    #[test]
+    fn alternating_clips_use_correct_masks() {
+        let mut pixmap = Pixmap::new(60, 30).unwrap();
+        let mut p = TinySkiaPainter::new(&mut pixmap);
+        let stroke = |p: &mut TinySkiaPainter, c: Color| {
+            p.stroke_rounded_rect(-10.0, 5.0, 80.0, 20.0, 0.0, 2.0, c);
+        };
+        p.push_clip(0.0, 0.0, 20.0, 30.0, 0.0); // A
+        stroke(&mut p, Color::rgb(255, 0, 0));
+        p.pop_clip();
+        p.push_clip(40.0, 0.0, 20.0, 30.0, 0.0); // B
+        stroke(&mut p, Color::rgb(0, 255, 0));
+        p.pop_clip();
+        p.push_clip(0.0, 0.0, 20.0, 30.0, 0.0); // A 复用
+        stroke(&mut p, Color::rgb(0, 0, 255));
+        p.pop_clip();
+        let data = pixmap.data();
+        // 中缝 [20,40) 任何 y 都不许有像素(三段裁剪都不含这一列)
+        for y in 0..30usize {
+            for x in 20..40usize {
+                let i = (y * 60 + x) * 4;
+                assert_eq!(&data[i..i + 4], &[0, 0, 0, 0], "裁剪缝 ({x},{y}) 有泄漏");
+            }
+        }
+        // A 区被红后蓝覆画(上边框在 y=6 附近):蓝分量该在
+        let a = (6 * 60 + 5) * 4;
+        assert!(data[a + 2] > 0, "A 区应有(最后画的)蓝描边");
+        // B 区:绿描边
+        let b = (6 * 60 + 45) * 4;
+        assert!(data[b + 1] > 0, "B 区应有绿描边");
     }
 }

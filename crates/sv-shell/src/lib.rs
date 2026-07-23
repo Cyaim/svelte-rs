@@ -1743,6 +1743,222 @@ mod tests {
         h.frame(false);
     }
 
+    // PROBE(verifier GEOM_EPS): Measure 帧里亚 EPS(0.008 ≤ 0.01)的兄弟位移
+    // 被 rect_close 判为"没动"→ 不收损伤。文本字形按物理像素取整
+    // (paint.rs g.x.round()),0.496→0.504 跨半像素 → 整像素跳变;
+    // View 填充边缘的 AA 覆盖度也随小数坐标变。若确实漏损伤,
+    // BlitHarness 的逐字节对拍应当 panic。
+    #[test]
+    fn probe_sub_eps_measure_shift_stale_pixels() {
+        let doc = Doc::new();
+        let d = doc.clone();
+        let (a, _scope) = create_root(move || {
+            let root = d.root();
+            d.update_style(root, |s| {
+                s.direction = sv_ui::Direction::Row;
+            });
+            let a = d.create_view();
+            d.update_style(a, |s| {
+                s.width = Some(100.496);
+                s.height = Some(60.0);
+                s.bg = Some(sv_ui::Color::rgb(200, 30, 30));
+            });
+            d.append(root, a);
+            let b = d.create_view();
+            d.update_style(b, |s| {
+                s.width = Some(200.0);
+                s.height = Some(60.0);
+                s.bg = Some(sv_ui::Color::rgb(30, 30, 200));
+            });
+            d.append(root, b);
+            let t = d.create_text("Hello subpixel world 0123456789");
+            d.append(root, t);
+            a
+        });
+        let mut h = BlitHarness::new(doc.clone(), 900, 200, 1.0);
+        // Δwidth = 0.008 < GEOM_EPS=0.01:B 与 t 各右移 0.008,
+        // Measure 差分应把它们当"没动"跳过
+        doc.update_style(a, |s| s.width = Some(100.504));
+        let o = h.frame(false);
+        eprintln!("PROBE sub-eps measure outcome: {o:?}");
+        assert!(
+            matches!(o, RenderOutcome::Partial { .. }),
+            "亚 EPS 位移帧应走 Partial(否则本探针测不到目标路径),实际 {o:?}"
+        );
+    }
+
+    /// 评审 PoC #0/#5:定高盒子里的大字号文本,字形尾巴垂在 border-box
+    /// 之外(绘制端对 overflow:Visible 不裁)。换色帧与滚动帧的损伤都必须
+    /// 盖住尾巴 —— 墨迹模型不带纵向文本溢出时这两个都会红
+    #[test]
+    fn blit_render_matches_full_render_with_text_overflow_tails() {
+        let doc = Doc::new();
+        let d = doc.clone();
+        let ((tall, scroller), _scope) = create_root(move || {
+            let root = d.root();
+            d.update_style(root, |s| {
+                s.padding = 12.0.into();
+                s.gap = 10.0;
+            });
+            // 定高 24 大字号 40:约 25px 字形尾巴垂进下方的滚动区
+            let tall = d.create_text("大字尾巴 gY");
+            d.update_style(tall, |s| {
+                s.height = Some(24.0);
+                s.font_size = 40.0;
+            });
+            d.append(root, tall);
+            let scroller = d.create_view();
+            d.update_style(scroller, |s| {
+                s.height = Some(200.0);
+                s.overflow = sv_ui::Overflow::Scroll;
+                s.gap = 6.0;
+            });
+            d.append(root, scroller);
+            for i in 0..12 {
+                let t = d.create_text(&format!("行 {i} 的内容,长一点确保有内容"));
+                d.update_style(t, |s| s.text_wrap = sv_ui::TextWrap::Wrap);
+                d.append(scroller, t);
+            }
+            // 滚动区里也放一个定高小盒大字文本(Paint 帧损伤要盖尾巴)
+            let inner_tall = d.create_text("内 gj");
+            d.update_style(inner_tall, |s| {
+                s.height = Some(20.0);
+                s.font_size = 36.0;
+            });
+            d.append(scroller, inner_tall);
+            (tall, scroller)
+        });
+        let mut h = BlitHarness::new(doc.clone(), 420, 420, 1.0);
+        // 换色帧:尾巴的旧颜色必须被重画掉
+        doc.update_style(tall, |s| s.fg = Some(sv_ui::Color::rgb(200, 30, 30)));
+        h.frame(false);
+        // 滚动帧:header 尾巴悬进视口,搬移必须被拒或尾巴区被补画
+        doc.set_scroll(scroller, 0.0, 13.0);
+        h.frame(false);
+        doc.set_scroll(scroller, 0.0, 2.0);
+        h.frame(false);
+    }
+
+    /// 评审 PoC #1/#6:父 View 的继承/分组绘制属性(fg 沿链继承、opacity
+    /// 逐级相乘)变化时,损伤必须盖住**溢出到父盒之外的后代**
+    #[test]
+    fn damage_covers_inherited_group_props_on_overflowing_children() {
+        let doc = Doc::new();
+        let d = doc.clone();
+        let ((parent, wrap_parent), _scope) = create_root(move || {
+            let root = d.root();
+            d.update_style(root, |s| {
+                s.padding = 10.0.into();
+                s.gap = 30.0;
+            });
+            // 窄父 + NoWrap 长文本子:字形横向溢出父盒很远
+            let parent = d.create_view();
+            d.update_style(parent, |s| {
+                s.width = Some(100.0);
+                s.height = Some(30.0);
+            });
+            d.append(root, parent);
+            let long = d.create_text("NoWrap overflowing text 0123456789 ABCDEFGH");
+            d.append(parent, long);
+            // 定高父 + 折行高子:纵向溢出
+            let wrap_parent = d.create_view();
+            d.update_style(wrap_parent, |s| {
+                s.width = Some(120.0);
+                s.height = Some(30.0);
+            });
+            d.append(root, wrap_parent);
+            let tallc = d.create_text("折行的长文本内容会折出很多行来,远远高过定高的父容器盒子。");
+            d.update_style(tallc, |s| s.text_wrap = sv_ui::TextWrap::Wrap);
+            d.append(wrap_parent, tallc);
+            (parent, wrap_parent)
+        });
+        let mut h = BlitHarness::new(doc.clone(), 460, 260, 1.0);
+        doc.update_style(parent, |s| s.opacity = 0.4);
+        h.frame(false);
+        doc.update_style(parent, |s| s.fg = Some(sv_ui::Color::rgb(30, 120, 30)));
+        h.frame(false);
+        doc.update_style(wrap_parent, |s| s.opacity = 0.5);
+        h.frame(false);
+        doc.update_style(wrap_parent, |s| s.opacity = 1.0);
+        h.frame(false);
+    }
+
+    /// 评审 #3/#7/#11 + #16:嵌套滚动 —— 外层滚动会把内层(以及自己)的
+    /// 半透明 thumb 一起搬走;内层单独滚、双双同滚也都要逐字节对
+    #[test]
+    fn blit_render_matches_full_render_with_nested_scrollers() {
+        let doc = Doc::new();
+        let d = doc.clone();
+        let ((outer, inner_sc), _scope) = create_root(move || {
+            let root = d.root();
+            d.update_style(root, |s| s.padding = 10.0.into());
+            let outer = d.create_view();
+            d.update_style(outer, |s| {
+                s.height = Some(220.0);
+                s.overflow = sv_ui::Overflow::Scroll;
+                s.gap = 8.0;
+                s.bg = Some(sv_ui::Color::rgb(250, 250, 252));
+            });
+            d.append(root, outer);
+            for i in 0..4 {
+                let t = d.create_text(&format!("外层第 {i} 段,折行的长文本让外层有得滚。"));
+                d.update_style(t, |s| s.text_wrap = sv_ui::TextWrap::Wrap);
+                d.append(outer, t);
+            }
+            // 内层纵向滚动区(有自己的 thumb)
+            let inner_sc = d.create_view();
+            d.update_style(inner_sc, |s| {
+                s.height = Some(90.0);
+                s.overflow = sv_ui::Overflow::Scroll;
+                s.gap = 4.0;
+            });
+            d.append(outer, inner_sc);
+            for i in 0..10 {
+                let t = d.create_text(&format!("内层行 {i}"));
+                d.append(inner_sc, t);
+            }
+            for i in 4..8 {
+                let t = d.create_text(&format!("外层第 {i} 段,继续加长内容。"));
+                d.update_style(t, |s| s.text_wrap = sv_ui::TextWrap::Wrap);
+                d.append(outer, t);
+            }
+            (outer, inner_sc)
+        });
+        let mut h = BlitHarness::new(doc.clone(), 400, 300, 1.0);
+        doc.set_scroll(inner_sc, 0.0, 7.0); // 内层单独滚
+        h.frame(false);
+        doc.set_scroll(outer, 0.0, 15.0); // 外层滚(内层 thumb 在搬移区里)
+        h.frame(false);
+        doc.set_scroll(outer, 0.0, 30.0);
+        doc.set_scroll(inner_sc, 0.0, 14.0); // 双双同滚
+        h.frame(false);
+        doc.set_scroll(outer, 0.0, 0.0);
+        h.frame(false);
+    }
+
+    /// 评审 #2:NoWrap↔Wrap 切换帧 —— 旧帧真实画过的溢出字形,墨迹必须按
+    /// **旧帧当时的样式**估(快照存的 ink),拿新样式估会漏掉
+    #[test]
+    fn damage_covers_wrap_toggle_ink_change() {
+        let doc = Doc::new();
+        let d = doc.clone();
+        let (t, _scope) = create_root(move || {
+            let root = d.root();
+            d.update_style(root, |s| s.padding = 10.0.into());
+            let t = d.create_text("这是一段挺长的文本内容 toggling wrap 0123456789");
+            d.update_style(t, |s| s.width = Some(120.0));
+            d.append(root, t);
+            t
+        });
+        let mut h = BlitHarness::new(doc.clone(), 420, 160, 1.0);
+        doc.update_style(t, |s| s.text_wrap = sv_ui::TextWrap::Wrap);
+        h.frame(false);
+        doc.update_style(t, |s| s.text_wrap = sv_ui::TextWrap::NoWrap);
+        h.frame(false);
+        doc.update_style(t, |s| s.text_wrap = sv_ui::TextWrap::Wrap);
+        h.frame(false);
+    }
+
     /// 焦点环金样:获焦节点绘制后应多出一条外扩 2px 的 StrokeRect,
     /// 失焦后命令流回到原样
     #[test]
