@@ -3742,7 +3742,7 @@ cd",
             let btn = doc.create_button("悬停我");
             doc.append(doc.root(), btn);
             *t.borrow_mut() = Some(btn);
-            sv_ui::tooltip(&doc, btn, 10, |d, root| {
+            sv_ui::tooltip(&doc, btn, 10, "提示内容", |d, root| {
                 let txt = d.create_text("提示内容");
                 d.append(root, txt);
             });

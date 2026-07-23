@@ -28,7 +28,7 @@ let picked = $state(String::from("(未选)"));
 
     <button style="padding:8; radius:6; bg:#ddddea; fg:#222233"
             {@attach |doc: &sv_ui::Doc, id: sv_ui::ViewId| {
-                sv_ui::tooltip(doc, id, 400, |d, root| {
+                sv_ui::tooltip(doc, id, 400, "悬停 400ms 出现的提示", |d, root| {
                     d.update_style(root, |s| {
                         s.padding = 6.0.into();
                         s.bg = Some(sv_ui::Color::rgb(40, 40, 48));
