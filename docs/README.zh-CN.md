@@ -18,13 +18,14 @@
 
 ## 参考资料
 
-- [DESIGN.md](DESIGN.md) — 架构设计与决策记录(ADR-1..9)。**改架构前先读它**。
+- [DESIGN.md](DESIGN.md) — 架构设计与决策记录(ADR-1..10)。**改架构前先读它**。
 - [SVELTE-SUPPORT.md](SVELTE-SUPPORT.md) — Svelte 5 语法/特性支持矩阵,77 项。
 - [CSS-SUPPORT.md](CSS-SUPPORT.md) — 现代 CSS 差距矩阵,91 项。
+- [plans/](plans/) — 工作计划,尤其是 [plans/open-issues.md](plans/open-issues.md):已知缺口的唯一登记处(CLAUDE.md 必读)。
 
 ## 调研报告
 
-25 份联网核实的调研报告(2026-07),ADR 的依据:
+26 份联网核实的调研报告(2026-07),ADR 的依据:
 
 | # | 报告 |
 |---|---|
@@ -53,6 +54,7 @@
 | 23 | [taffy 布局接入+文本换行](research/23-taffy-text-wrap.md) |
 | 24 | [Parley 迁移+AccessKit](research/24-parley-accesskit.md) |
 | 25 | [弹层体系+发布工程](research/25-overlay-release-engineering.md) |
+| 26 | [arco.design 视觉标准组件库(sv-arco)可行性](research/26-arco-design-ui-kit.md) |
 
 ## 约定
 

@@ -1,4 +1,4 @@
-# 未了结问题登记(截至 2026-07-22)
+# 未了结问题登记(截至 2026-07-23)
 
 > 这一批工作横跨增量布局、ADR-2 ③、`sv check`、以及三种动画格式。
 > 每条线各自的 README / 计划文档里都写了缺口,但**散着放就等于没写** ——
@@ -6,6 +6,24 @@
 >
 > 规矩:**已知但没做**的写在这里;**不知道**的也写在这里并标明。
 > 一条缺口从这里消失,只能是因为它被做掉了或被明确判为不做,不能因为被遗忘。
+
+## ✅ 2026-07-23 复核轮已修复
+
+- **🔴 `sv-vap` largesize box 溢出 panic**(复核新发现,非本表原有):`find_vapc`
+  对 size==1 的 64 位 largesize 做 `p + size`,debug 溢出 panic、release 环绕后
+  越界切片 panic,打破"任何输入绝不 panic"承诺。已改 `checked_add` + 回归测试。
+  同轮修 `VapConfig` 数值 `as u32` 截断(2^32+1→1),超 u32 一律报 `BadGeometry`/`BadRect`。
+- **§5.2 三道穷尽解构闸门只装了一道**:`Style::eq` 与 `to_taffy` 补上无 `..` 的
+  穷尽解构,给 `Style` 加字段而漏改 = 编译错误(此前只有 `layout_relevant` 有)。
+- **`sv check` 包络档措辞**:`check.rs` 把"节点级近似"改为"行级近似",与
+  `sourcemap.rs` 设计注释一致(节点栈未做,只能定位到行)。
+- **`update_overlay_anchor` 埋雷注释**:注释原说"重走一遍就够"(暗示可降 Position),
+  实际靠 `OverlayRegistry` 重建级承重,已改注释说明降级会静默丢锚点更新。
+- **#7(下表)**:`CLAUDE.md` 的构建产物路径已订正为"默认 `./target`,重定向那行默认注释掉"。
+- **文档横向同步**:CHANGELOG 补本轮(增量布局/`sv check`/三动画格式 + `bump` 必传
+  破坏性变更);两语 `performance.md` 把已落地的帧调度/局部布局移出"尚未实现";
+  DESIGN.md 的整帧基准数改以 membench README 为准(并订正 `bump` 点计数 34→42);
+  docs/README 与根 README 的 ADR-1..10 / 调研 ×26 / 新 crate 与示例清单 / plans 入口。
 
 ## 🔴 会咬人的(动手前必须先处理)
 
@@ -15,14 +33,14 @@
 | 2 | `sv-pag` 的 `BitmapSequence` 布局是**单源**(只有 libpag 的 C++ 那一份;libpag-lite 没有它) | 同上 | 它恰好是本 crate 最核心的结构,交叉印证缺位 |
 | 3 | 位图序列帧档在真实素材里的**占比未知** | — | 它直接决定"c2 免 libpag"这条路线能覆盖多少素材。核实了"能读",没核实"设计师实际会不会这么导" |
 | 4 | `sv-lottie` 只测过手写固件,**没跑过真实资产**(Tiger、Noto emoji 之类) | `crates/sv-lottie` | 同 #1。"渐变均值色好不好看""轨道遮罩会糊成什么样"目前全是按 velato 源码推断 |
-| 5 | velato 在**合法** Lottie 上会 `todo!()` panic(六处,解析期);`catch_unwind` 是创可贴,**渲染期残余风险没覆盖** | `sv-lottie/src/lib.rs` | 根治要给上游提 PR。渲染期那条(`animated.rs` 的 `vertices.last().unwrap()`)现在没有任何防护 |
+| 5 | velato 在**合法** Lottie 上会在导入期 panic(**七处**:4 个 `todo!()` + 3 个 `unimplemented!()`,见 `lib.rs:154-168`);`catch_unwind` 只兜解析期 | `sv-lottie/src/lib.rs` | 根治要给上游提 PR。渲染期(`Renderer::append`)刻意不加 unwind 屏障(每帧热路径);velato 0.11 的两处渲染期 `unwrap`(`animated.rs:257`、`render.rs:306`)读下来均被上一行守住、判为不可达,但**这不是上游 API 承诺**,真炸只能靠调用方兜。裁剪栈污染由 `PainterSink::Drop` 补 `pop_clip` 覆盖 |
 
 ## ⚠️ 已知的不实/未查明
 
 | # | 问题 | 位置 |
 |---|---|---|
 | 6 | **membench `deep` 两档与 `virtual 3000` 档比上一版慢 3–10%,没查明原因。** 已排除"留着布局树导致的内存压力"(关掉留树 `deep` 一点没变)。也可能是上一版基线本身偏乐观 —— 两批数字之间隔了十来个提交 | `examples/membench/README.md` |
-| 7 | `CLAUDE.md` 写"构建产物在 `C:/cargo-target/svelte-rs`",而 `.cargo/config.toml` 里那行是**注释掉的**,实际在仓库内 `./target` | `CLAUDE.md` / `.cargo/config.toml` |
+| 7 | ~~`CLAUDE.md` 的构建产物路径与 `.cargo/config.toml`(注释掉的 `target-dir`)不符~~ **✅ 2026-07-23 已订正** | `CLAUDE.md` |
 | 8 | `sv check` 的映射覆盖率 80.5%,**胶水代码(runes 改写产物)映射不回去**。这是设计边界不是 bug,但要防止有人当它是 bug 去"修" | `crates/sv-compiler/src/sourcemap.rs` |
 
 ## 各条线的欠账

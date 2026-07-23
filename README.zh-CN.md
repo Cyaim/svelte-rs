@@ -78,7 +78,7 @@ cargo run -p showcase -- --png out.png  # 离屏渲染一帧(无需窗口)
 参考资料(中文):[架构设计与 ADR](docs/DESIGN.md) ·
 [Svelte 支持矩阵(77 项)](docs/SVELTE-SUPPORT.md) ·
 [现代 CSS 差距矩阵(91 项)](docs/CSS-SUPPORT.md) ·
-[调研报告 ×25](docs/README.zh-CN.md#调研报告)
+[调研报告 ×26](docs/README.zh-CN.md#调研报告)
 
 ## 仓库结构
 
@@ -87,9 +87,10 @@ cargo run -p showcase -- --png out.png  # 离屏渲染一帧(无需窗口)
 | `crates/sv-reactive` | runes 响应式内核 |
 | `crates/sv-ui` | retained 场景树 + 细粒度绑定原语 |
 | `crates/sv-macro` | `view!` 宏前端 |
-| `crates/sv-compiler` | `.sv` 单文件组件编译器前端 |
+| `crates/sv-compiler` | `.sv` 单文件组件编译器前端(含 `sv check`) |
 | `crates/sv-shell` | winit 窗口壳 + CPU/vello 渲染器 |
-| `examples/` | showcase · counter · counter-sfc · todo-sfc · membench |
+| `crates/sv-vap` · `sv-pag` · `sv-lottie` | 动画格式解析器(VAP / PAG / Lottie) |
+| `examples/` | showcase · counter(-sfc) · todo-sfc · settings-sfc · input-demo · overlay-demo · membench · vap-gift |
 
 ## 现状
 

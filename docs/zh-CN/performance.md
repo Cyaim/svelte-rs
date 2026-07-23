@@ -155,13 +155,18 @@ READY backend=<cpu|vello> mutate=<bool> virtual=<bool> nodes=<n> signals=<n> bui
 
 注意:vello 离屏计时含纹理回读(≈7 ms),相对窗口路径略高估帧成本。
 
+## 本页初稿之后已落地
+
+- **帧调度——批量 flush(ADR-6,2026-07-22 落地)。** 开窗路径的写入不再当场跑 effect,而是攒到帧边界、由渲染壳统一冲刷一次。仍未做的是与 vsync 的**深度**对齐(mailbox 呈现模式)——那才是让 vello 窗口口径突破 60 fps 的关键,见 DESIGN.md ADR-6 / ADR-9。
+- **变更分级 + 局部布局(本轮)。** 版本 bump 现在分 Paint / Position / 重建三级;滚动、打字、换色不再触发全树重布局(约 6000 节点滚动列表:全量 29ms → 滚动帧 0.66ms)。剩下的缺口是结构/文本变更的增量 `mark_dirty`,它们目前仍整棵重建布局树。
+
 ## 计划中,尚未实现
 
-以下均不存在于当前代码,路线图与 ADR 见 [DESIGN.md](../DESIGN.md):
+路线图与 ADR 见 [DESIGN.md](../DESIGN.md):
 
-- **帧调度(ADR-6)** — vsync 对齐的批量 flush + mailbox/immediate 呈现模式选项。目前写入即同步 flush;正是缺这个呈现模式选项,vello 窗口才被钉在 60 fps。
+- **脏矩形绘制** — 当前真正的瓶颈。滚动帧整帧 12.45ms,其中布局只占 0.66ms,剩下约 12ms 全是绘制,且每帧整窗重画。它也是动画省电的共同前置(Lottie/PAG/VAP 一跑就整窗重绘)。
 - **增量场景编码** — RecordingPainter 命令流 diff,让全量建树档的帧成本也降下来。
-- **局部布局** — dirty 子树 relayout。目前任何版本 bump 都全树重布局,缓存只对完全静止的帧有效。
+- **mailbox 呈现模式(ADR-6 / ADR-9)** — 把 vello 窗口钉在 60 fps 的那个呈现模式选项。
 - **滚动物理** — 惯性、像素级 offset,落在 `virtual_list` 之上。
 
 ## 相关阅读

@@ -155,13 +155,18 @@ READY backend=<cpu|vello> mutate=<bool> virtual=<bool> nodes=<n> signals=<n> bui
 
 Caveat: offscreen vello timing includes texture readback (≈7 ms), slightly overstating frame cost relative to the windowed path.
 
+## Landed since the first draft of this page
+
+- **Frame pacing — batched flush (ADR-6, landed 2026-07-22).** Windowed writes no longer run effects on the spot; they accumulate to the frame boundary and the shell flushes once. What is still open is the *deep* vsync alignment (a mailbox present mode) that would let the vello window break past 60 fps — see DESIGN.md ADR-6 / ADR-9.
+- **Change classification + partial layout (this round).** A version bump is now graded Paint / Position / rebuild; scroll, typing and colour changes no longer trigger a full relayout (≈6k-node scroll list: full 29 ms → scroll frame 0.66 ms). The remaining gap is incremental `mark_dirty` for structural/text changes, which still rebuild the whole layout tree.
+
 ## Planned, not implemented
 
-None of the following exists yet; the roadmap and ADRs live in [DESIGN.md](../DESIGN.md) (Chinese):
+The roadmap and ADRs live in [DESIGN.md](../DESIGN.md) (Chinese):
 
-- **Frame pacing (ADR-6)** — vsync-aligned batched flush plus a mailbox/immediate present option. Today writes flush synchronously, and the missing present-mode choice is exactly what pins the vello window at 60 fps.
+- **Dirty-rectangle painting** — the current true bottleneck. A scroll frame is 12.45 ms end-to-end but only 0.66 ms of that is layout; the other ~12 ms is paint, redrawn full-window every frame. This is also the shared prerequisite for animation power savings (Lottie/PAG/VAP redraw the whole window while playing).
 - **Incremental scene encoding** — diffing the RecordingPainter command stream, to cut frame cost for full-materialization scenes too.
-- **Partial layout** — dirty-subtree relayout. Today any version bump relayouts the entire tree; the cache only helps fully static frames.
+- **Mailbox present mode (ADR-6 / ADR-9)** — the present-mode choice that pins the vello window at 60 fps.
 - **Scroll physics** — inertia and pixel-level offsets on top of `virtual_list`.
 
 ## See also
