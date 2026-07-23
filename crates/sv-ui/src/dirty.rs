@@ -62,7 +62,13 @@ pub enum DirtyItem {
     /// 测量恒为 `200 × 行高×rows`,与内容无关(`render.rs` 的 `measure_leaf`)。
     /// 哪天做了 auto-size input,这一条要升级成 [`DirtyItem::Measure`] ——
     /// 分级的地方留了注释。
-    Paint,
+    ///
+    /// **带 `id`**(脏矩形消费端的依据):打字/勾选/换色/焦点这些帧,
+    /// 消费端只需重画该节点的矩形。写入口都知道自己在写哪个节点,
+    /// 这里带上是零成本;不带的话 Paint 帧永远只能整窗重画。
+    /// 焦点切换是**两个**节点的绘制变更(旧环消失 + 新环出现),
+    /// `focus`/`blur` 各 bump 一条。
+    Paint { id: ViewId },
     /// 只挪位置:布局树可以复用,但产出的坐标要重算一遍(滚动、弹层锚点)。
     ///
     /// 滚动偏移根本不进 taffy —— 它是产出坐标时对子原点的一次平移。
@@ -101,7 +107,7 @@ impl DirtyItem {
     /// 这条变更要不要重建布局树
     pub fn needs_rebuild(self) -> bool {
         match self {
-            DirtyItem::Paint | DirtyItem::Position { .. } => false,
+            DirtyItem::Paint { .. } | DirtyItem::Position { .. } => false,
             DirtyItem::Measure { .. }
             | DirtyItem::Structure { .. }
             | DirtyItem::InheritFontSize { .. }
@@ -112,7 +118,7 @@ impl DirtyItem {
 
     /// 这条变更要不要重新产出坐标(重建布局树的一定要,只挪位置的也要)
     pub fn needs_rewalk(self) -> bool {
-        !matches!(self, DirtyItem::Paint)
+        !matches!(self, DirtyItem::Paint { .. })
     }
 }
 
@@ -355,7 +361,9 @@ mod tests {
     fn overflow_cap_discards_and_flags() {
         let mut log = DirtyLog::default();
         for _ in 0..DIRTY_LOG_CAP + 10 {
-            log.push(DirtyItem::Paint);
+            log.push(DirtyItem::Paint {
+                id: crate::ViewId::default(),
+            });
         }
         assert!(log.overflowed);
         assert!(log.items.is_empty(), "溢出后要把日志丢掉,不能继续吃内存");
@@ -369,8 +377,9 @@ mod tests {
     #[test]
     fn paint_only_log_needs_nothing() {
         let mut log = DirtyLog::default();
-        log.push(DirtyItem::Paint);
-        log.push(DirtyItem::Paint);
+        let id = crate::ViewId::default();
+        log.push(DirtyItem::Paint { id });
+        log.push(DirtyItem::Paint { id });
         assert!(!log.needs_rebuild());
         assert!(!log.needs_rewalk());
     }
@@ -378,7 +387,9 @@ mod tests {
     #[test]
     fn position_needs_rewalk_but_not_rebuild() {
         let mut log = DirtyLog::default();
-        log.push(DirtyItem::Paint);
+        log.push(DirtyItem::Paint {
+            id: crate::ViewId::default(),
+        });
         log.push(DirtyItem::Position {
             id: crate::ViewId::default(),
         });

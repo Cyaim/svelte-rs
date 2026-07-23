@@ -610,7 +610,9 @@ impl Doc {
         match inner.nodes.get(id).map(|n| n.kind) {
             // 输入框的 value 复用 text 字段;测量与内容无关。
             // 【做 auto-size input 时这一条要改成 Measure】
-            Some(ElementKind::TextInput) | Some(ElementKind::Checkbox) => dirty::DirtyItem::Paint,
+            Some(ElementKind::TextInput) | Some(ElementKind::Checkbox) => {
+                dirty::DirtyItem::Paint { id }
+            }
             _ => dirty::DirtyItem::Measure { id },
         }
     }
@@ -629,7 +631,7 @@ impl Doc {
             n.accessible_label = new;
         }
         // a11y 名称不进布局也不进绘制几何
-        self.bump(dirty::DirtyItem::Paint);
+        self.bump(dirty::DirtyItem::Paint { id });
     }
 
     /// 设无障碍描述(`aria-description`)。tooltip 用它把提示文本挂到目标控件上,
@@ -646,7 +648,7 @@ impl Doc {
             }
             n.accessible_description = new;
         }
-        self.bump(dirty::DirtyItem::Paint);
+        self.bump(dirty::DirtyItem::Paint { id });
     }
 
     /// 本树的身份标识(布局/绘制缓存键;同一棵树的所有 Doc 克隆同值)
@@ -705,7 +707,7 @@ impl Doc {
         // **游离节点**:还没 append,不在任何父的 children 里,布局上什么都不做。
         // 显式定为 Paint 而不是漏掉,是因为一次 `{#each}` 建表会 create+append
         // 各一条 —— 若这里也记结构脏,日志预算白白少一半、且每条都是假的
-        self.bump(dirty::DirtyItem::Paint);
+        self.bump(dirty::DirtyItem::Paint { id });
         id
     }
 
@@ -763,7 +765,7 @@ impl Doc {
             }
             a.frame = frame;
         }
-        self.bump(dirty::DirtyItem::Paint);
+        self.bump(dirty::DirtyItem::Paint { id });
     }
 
     /// 播放 / 暂停。不改任何几何,纯绘制(暂停帧照样要画出来)
@@ -778,7 +780,7 @@ impl Doc {
             }
             a.playing = playing;
         }
-        self.bump(dirty::DirtyItem::Paint);
+        self.bump(dirty::DirtyItem::Paint { id });
     }
 
     /// 换内容(占位 → 真素材,或切一个新素材)。**固有尺寸可能变 → Measure**
@@ -916,7 +918,7 @@ impl Doc {
             n.checked = checked;
         }
         // 复选框的测量只看字号(方框恒为字号见方),勾不勾是纯绘制
-        self.bump(dirty::DirtyItem::Paint);
+        self.bump(dirty::DirtyItem::Paint { id });
     }
 
     pub fn set_style(&self, id: ViewId, style: Style) {
@@ -936,7 +938,7 @@ impl Doc {
         self.bump(if relevant {
             dirty::DirtyItem::Measure { id }
         } else {
-            dirty::DirtyItem::Paint
+            dirty::DirtyItem::Paint { id }
         });
         if font_size_changed {
             // 字号继承在建树时就地解析,taffy 不知道它 —— 改一个 View 的字号,
@@ -968,7 +970,7 @@ impl Doc {
         self.bump(if relevant {
             dirty::DirtyItem::Measure { id }
         } else {
-            dirty::DirtyItem::Paint
+            dirty::DirtyItem::Paint { id }
         });
         if font_size_changed {
             self.bump(dirty::DirtyItem::InheritFontSize { subtree_root: id });
@@ -984,7 +986,7 @@ impl Doc {
             n.on_click = Some(Rc::new(f));
         }
         // 注册回调不改任何几何
-        self.bump(dirty::DirtyItem::Paint);
+        self.bump(dirty::DirtyItem::Paint { id });
     }
 
     /// 取出点击回调(clone 出来调用,避免调用期间持有树的借用)
@@ -1005,7 +1007,7 @@ impl Doc {
             n.on_pointer_enter = Some(Rc::new(f));
         }
         // 同上
-        self.bump(dirty::DirtyItem::Paint);
+        self.bump(dirty::DirtyItem::Paint { id });
     }
 
     pub fn set_on_pointer_leave(&self, id: ViewId, f: impl Fn() + 'static) {
@@ -1017,7 +1019,7 @@ impl Doc {
             n.on_pointer_leave = Some(Rc::new(f));
         }
         // 同上
-        self.bump(dirty::DirtyItem::Paint);
+        self.bump(dirty::DirtyItem::Paint { id });
     }
 
     /// 取出悬停进入回调(同 [`Doc::click_handler`]:clone 出来调用,不持树借用)
@@ -1047,7 +1049,7 @@ impl Doc {
             n.on_pointer_down = Some(Rc::new(f));
         }
         // 同上
-        self.bump(dirty::DirtyItem::Paint);
+        self.bump(dirty::DirtyItem::Paint { id });
     }
 
     pub fn set_on_pointer_up(&self, id: ViewId, f: impl Fn() + 'static) {
@@ -1059,7 +1061,7 @@ impl Doc {
             n.on_pointer_up = Some(Rc::new(f));
         }
         // 同上
-        self.bump(dirty::DirtyItem::Paint);
+        self.bump(dirty::DirtyItem::Paint { id });
     }
 
     pub fn pointer_down_handler(&self, id: ViewId) -> Option<Rc<dyn Fn()>> {
@@ -1100,7 +1102,7 @@ impl Doc {
             n.focusable = focusable;
         }
         // 可获焦位不进 to_taffy
-        self.bump(dirty::DirtyItem::Paint);
+        self.bump(dirty::DirtyItem::Paint { id });
     }
 
     pub fn focusable(&self, id: ViewId) -> bool {
@@ -1120,7 +1122,7 @@ impl Doc {
             n.accepts_text = accepts;
         }
         // 同上
-        self.bump(dirty::DirtyItem::Paint);
+        self.bump(dirty::DirtyItem::Paint { id });
     }
 
     pub fn set_on_key(&self, id: ViewId, f: impl Fn(&KeyEvent) + 'static) {
@@ -1132,7 +1134,7 @@ impl Doc {
             n.on_key = Some(Rc::new(f));
         }
         // 同上
-        self.bump(dirty::DirtyItem::Paint);
+        self.bump(dirty::DirtyItem::Paint { id });
     }
 
     /// 取出键盘回调(同 [`Doc::click_handler`]:clone 出来调用,不持树借用)
@@ -1151,7 +1153,7 @@ impl Doc {
             n.on_key_capture = Some(Rc::new(f));
         }
         // 同上
-        self.bump(dirty::DirtyItem::Paint);
+        self.bump(dirty::DirtyItem::Paint { id });
     }
 
     pub fn key_capture_handler(&self, id: ViewId) -> Option<KeyHandler> {
@@ -1171,7 +1173,7 @@ impl Doc {
             n.on_focus_change = Some(Rc::new(f));
         }
         // 同上
-        self.bump(dirty::DirtyItem::Paint);
+        self.bump(dirty::DirtyItem::Paint { id });
     }
 
     pub fn focus_change_handler(&self, id: ViewId) -> Option<Rc<dyn Fn(bool)>> {
@@ -1187,10 +1189,10 @@ impl Doc {
         self.0.borrow().focused
     }
 
-    /// 移焦到指定节点:先旧节点失焦回调、再新节点获焦回调、bump 一次
+    /// 移焦到指定节点:先旧节点失焦回调、再新节点获焦回调、再 bump
     /// (相等剪枝;节点不存在则不动)
     pub fn focus(&self, id: ViewId) {
-        let (old_cb, new_cb) = {
+        let (old, old_cb, new_cb) = {
             let mut inner = self.0.borrow_mut();
             if inner.focused == Some(id) || inner.nodes.get(id).is_none() {
                 return;
@@ -1200,7 +1202,7 @@ impl Doc {
                 .and_then(|o| inner.nodes.get(o))
                 .and_then(|n| n.on_focus_change.clone());
             let new_cb = inner.nodes.get(id).and_then(|n| n.on_focus_change.clone());
-            (old_cb, new_cb)
+            (old, old_cb, new_cb)
         };
         if let Some(cb) = old_cb {
             cb(false);
@@ -1208,24 +1210,29 @@ impl Doc {
         if let Some(cb) = new_cb {
             cb(true);
         }
-        // 焦点环是渲染壳合成绘制,不进树
-        self.bump(dirty::DirtyItem::Paint);
+        // 焦点环是渲染壳合成绘制,不进树。焦点切换是**两个**节点的绘制变更:
+        // 旧环消失 + 新环出现,各记一条,脏矩形消费端才知道两块都要重画
+        if let Some(old) = old {
+            self.bump(dirty::DirtyItem::Paint { id: old });
+        }
+        self.bump(dirty::DirtyItem::Paint { id });
     }
 
     /// 清焦点(Esc 的默认行为)
     pub fn blur(&self) {
-        let old_cb = {
+        let (old, old_cb) = {
             let mut inner = self.0.borrow_mut();
             let Some(old) = inner.focused.take() else {
                 return;
             };
-            inner.nodes.get(old).and_then(|n| n.on_focus_change.clone())
+            let cb = inner.nodes.get(old).and_then(|n| n.on_focus_change.clone());
+            (old, cb)
         };
         if let Some(cb) = old_cb {
             cb(false);
         }
-        // 同上
-        self.bump(dirty::DirtyItem::Paint);
+        // 同上:失焦只影响旧焦点节点那一块
+        self.bump(dirty::DirtyItem::Paint { id: old });
     }
 
     /// 树 DFS 序收集所有 focusable 节点(与 `Placed` 绘制序同构 → Tab 序
@@ -1330,7 +1337,7 @@ impl Doc {
             input.placeholder = placeholder.to_string();
         }
         // 输入框测量恒为 200×行高×rows,与内容/占位符无关
-        self.bump(dirty::DirtyItem::Paint);
+        self.bump(dirty::DirtyItem::Paint { id });
     }
 
     /// 多行模式(`<textarea>`):Enter 换行、粘贴保留换行、按内容宽折行。
@@ -1383,7 +1390,7 @@ impl Doc {
             }
         }
         // 同上 —— 这是打字帧的大红利
-        self.bump(dirty::DirtyItem::Paint);
+        self.bump(dirty::DirtyItem::Paint { id });
     }
 
     /// 当前选中文本(无选区返回 Some("");非 TextInput 返回 None)
@@ -1426,7 +1433,7 @@ impl Doc {
             input.on_input = Some(Rc::new(f));
         }
         // 同上
-        self.bump(dirty::DirtyItem::Paint);
+        self.bump(dirty::DirtyItem::Paint { id });
     }
 
     pub fn set_on_submit(&self, id: ViewId, f: impl Fn(&str) + 'static) {
@@ -1438,7 +1445,7 @@ impl Doc {
             input.on_submit = Some(Rc::new(f));
         }
         // 同上
-        self.bump(dirty::DirtyItem::Paint);
+        self.bump(dirty::DirtyItem::Paint { id });
     }
 
     // -----------------------------------------------------------------------
@@ -1486,7 +1493,7 @@ impl Doc {
             n.on_scroll = Some(Rc::new(f));
         }
         // 同上
-        self.bump(dirty::DirtyItem::Paint);
+        self.bump(dirty::DirtyItem::Paint { id });
     }
 
     pub fn scroll_handler(&self, id: ViewId) -> Option<Rc<dyn Fn(f32, f32)>> {

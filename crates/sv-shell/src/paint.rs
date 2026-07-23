@@ -759,10 +759,15 @@ fn path_bbox_i32(path: &[PathCmd]) -> (i32, i32, i32, i32) {
 pub struct TinySkiaPainter<'a> {
     pixmap: &'a mut Pixmap,
     /// 累积交集后的裁剪矩形栈(物理像素;top 即当前生效裁剪)。
-    /// v0 裁决(调研 22 §2.3):手动矩形交集,不用 tiny-skia Mask——
-    /// Mask 每层要分配整画布 w×h 字节且嵌套逐像素相乘,与 CPU 栈能力
-    /// 冻结(ADR-3b)相悖;圆角裁剪为矩形近似(角部最多溢出 ~radius²px)
+    /// v0 裁决(调研 22 §2.3):手动矩形交集,不用 tiny-skia Mask 做**常规**
+    /// 裁剪——Mask 每层要分配整画布 w×h 字节,与 CPU 栈能力冻结(ADR-3b)
+    /// 相悖;圆角裁剪为矩形近似(角部最多溢出 ~radius²px)。
+    /// 例外见 [`Self::ensure_clip_mask`]:描边与任意路径**必须**走 Mask。
     clips: Vec<[f32; 4]>,
+    /// 描边/路径用的裁剪 Mask(键 = 生效裁剪矩形)。懒建 + 按矩形值缓存:
+    /// 没有"裁剪内描边/路径"的帧一个字节都不分配;滚动帧里裁剪矩形
+    /// 整帧不变,Mask 只建一次
+    clip_mask: Option<([f32; 4], tiny_skia::Mask)>,
 }
 
 impl<'a> TinySkiaPainter<'a> {
@@ -770,7 +775,38 @@ impl<'a> TinySkiaPainter<'a> {
         Self {
             pixmap,
             clips: Vec::new(),
+            clip_mask: None,
         }
+    }
+
+    /// 保证 `clip_mask` 与当前生效裁剪一致(无裁剪时清掉)。
+    ///
+    /// 描边不能几何裁剪(收缩轮廓会造出幻影边),又不能放任出血:
+    /// 视口底缘被裁一半的输入框,它的下边框会画到滚动区**外面**
+    /// (真机可见的悬浮边框碎片),而且出血距离 = 节点越界深度,无上界 ——
+    /// 脏矩形的"墨迹范围"就此失去边界,损伤重画会漏掉这些像素。
+    /// Mask 是唯一两全的裁法:光栅化照常走完整轮廓,写像素时按位遮罩。
+    fn ensure_clip_mask(&mut self) {
+        let Some(&top) = self.clips.last() else {
+            self.clip_mask = None;
+            return;
+        };
+        if self.clip_mask.as_ref().is_some_and(|(r, _)| *r == top) {
+            return;
+        }
+        let mask = tiny_skia::Mask::new(self.pixmap.width(), self.pixmap.height());
+        let Some(mut mask) = mask else {
+            self.clip_mask = None; // 分配失败:退回出血(画多不画错)
+            return;
+        };
+        let mut pb = PathBuilder::new();
+        if let Some(rect) = tiny_skia::Rect::from_xywh(top[0], top[1], top[2], top[3]) {
+            pb.push_rect(rect);
+        }
+        if let Some(path) = pb.finish() {
+            mask.fill_path(&path, FillRule::Winding, true, Transform::identity());
+        }
+        self.clip_mask = Some((top, mask));
     }
 
     /// 绘制矩形与当前裁剪求交;None = 完全被裁掉
@@ -877,6 +913,18 @@ fn skia_color(c: Color) -> tiny_skia::Color {
     tiny_skia::Color::from_rgba8(c.r, c.g, c.b, c.a)
 }
 
+/// 当前生效裁剪的 Mask(无裁剪 / 缓存不一致时 None)。
+/// 自由函数而不是方法:调用点同时要 `&mut pixmap`,方法会整借 `self`
+fn mask_for<'m>(
+    cache: &'m Option<([f32; 4], tiny_skia::Mask)>,
+    clips: &[[f32; 4]],
+) -> Option<&'m tiny_skia::Mask> {
+    match (cache, clips.last()) {
+        (Some((r, m)), Some(top)) if r == top => Some(m),
+        _ => None,
+    }
+}
+
 fn rounded_rect_path(pb: &mut PathBuilder, x: f32, y: f32, w: f32, h: f32, r: f32) {
     let r = r.min(w / 2.0).min(h / 2.0);
     if r <= 0.5 {
@@ -961,8 +1009,9 @@ impl Painter for TinySkiaPainter<'_> {
         width: f32,
         color: Color,
     ) {
-        // 视口外整体剔除;部分越界时不几何裁剪(描边收缩会造出幻影边,
-        // 允许出血,滚动容器边框在 push_clip 之外绘制,实践中罕见触发)
+        // 视口外整体剔除;部分越界时**不几何裁剪**(描边收缩会造出幻影边),
+        // 改走 Mask:光栅化完整轮廓、写像素时遮罩 —— 被视口裁一半的
+        // 输入框不再把下边框画到滚动区外(那是脏矩形无法覆盖的无界出血)
         if self.clipped(x, y, w, h).is_none() {
             return;
         }
@@ -985,8 +1034,14 @@ impl Painter for TinySkiaPainter<'_> {
                 width,
                 ..Stroke::default()
             };
-            self.pixmap
-                .stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+            self.ensure_clip_mask();
+            self.pixmap.stroke_path(
+                &path,
+                &paint,
+                &stroke,
+                Transform::identity(),
+                mask_for(&self.clip_mask, &self.clips),
+            );
         }
     }
 
@@ -1066,10 +1121,10 @@ impl Painter for TinySkiaPainter<'_> {
         let mut paint = Paint::default();
         paint.set_color(skia_color(color));
         paint.anti_alias = true;
-        // 裁剪:矩形裁剪走 Mask 太贵(见 push_clip 的矩形交集裁决),这里
-        // 用 tiny-skia 的 clip_mask 参数传 None,靠调用方保证路径在裁剪内。
-        // **已知缺口**:滚动容器内的路径图标不会被裁掉;等真有这个场景再补
-        // (补法是把 clips 栈末项转成 Mask 传进来)
+        // 裁剪走懒建的矩形 Mask(与描边同一份缓存)。曾是「已知缺口:
+        // 滚动容器内的路径图标不会被裁掉」—— ensure_clip_mask 落地后补上;
+        // 无裁剪场景仍零成本(不建 Mask)
+        self.ensure_clip_mask();
         self.pixmap.fill_path(
             &p,
             &paint,
@@ -1078,7 +1133,7 @@ impl Painter for TinySkiaPainter<'_> {
                 PathFill::EvenOdd => FillRule::EvenOdd,
             },
             Transform::identity(),
-            None,
+            mask_for(&self.clip_mask, &self.clips),
         );
     }
 
@@ -1102,9 +1157,15 @@ impl Painter for TinySkiaPainter<'_> {
             },
             ..Stroke::default()
         };
-        // 裁剪同 fill_path:见那边的已知缺口注释
-        self.pixmap
-            .stroke_path(&p, &paint, &stroke, Transform::identity(), None);
+        // 裁剪同 fill_path:懒建矩形 Mask
+        self.ensure_clip_mask();
+        self.pixmap.stroke_path(
+            &p,
+            &paint,
+            &stroke,
+            Transform::identity(),
+            mask_for(&self.clip_mask, &self.clips),
+        );
     }
 
     fn draw_image(&mut self, x: f32, y: f32, w: f32, h: f32, img: &PixelImage) {
