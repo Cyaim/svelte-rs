@@ -14,8 +14,9 @@
   帧调度语义(ADR-6)——**已于 2026-07-22/23 全部落地**(迁移方式见下方
   [未发布] 的变更/移除段);谈 1.0 还差 crates.io 首发与稳定期。
 
-工作区所有 crate 同版本号发布(sv-reactive / sv-ui / sv-macro / sv-compiler /
-sv-shell),按依赖序推送;`examples/` 不发布。
+首发 crate(同版本号、依赖序推送):sv-reactive → sv-ui → sv-compiler →
+sv-macro → sv-shell → 伞 crate svelte-rs;sv-lsp / sv-pag / sv-lottie / sv-vap
+暂不随首发,`examples/` 不发布。
 
 ## [未发布]
 
@@ -147,13 +148,18 @@ sv-shell),按依赖序推送;`examples/` 不发布。
   **两条路线的表面语法与生成代码语义都不变**(`.svelte` 产物逐字节不变、
   `view!` 行为测试零改动);对库使用者的可见变化是 `sv_compiler` 新增
   pub 模块 `template` 与函数 `generate_template`。
+  唯一的宏表面收紧:`placeholder`/`bind_value`/`on_input`/`on_submit`
+  用在 `<input>` 以外的标签上,从"编译通过、运行时静默无效"改为**解析期
+  编译错误**(指到属性名;对齐 `.svelte` 前端的标签守卫)。迁移:删掉
+  这些本来就无效的属性即可。
 
 - **标识符改名(ADR-10 收尾,API breaking)**:`sv_compiler::compile_sv` /
   `compile_sv_with` / `compile_sv_mapped` → **`compile` / `compile_with` /
   `compile_mapped`**(`.sv` 后缀已废,名字随之;伞 crate 路径
   `svelte_rs::compiler::*` 同步变化)。迁移:改函数名即可,签名不变。
-  二进制 `sv-check` → **`sv` + `check` 子命令**:
-  `cargo run -q -p sv-compiler --bin sv -- check [cargo check 参数]`;
+  二进制 `sv-check` → **`cargo-sv` + `check` 子命令**(即 `cargo sv check`;
+  避开与 Linux runit `/usr/bin/sv` 的撞名):
+  `cargo run -q -p sv-compiler --bin cargo-sv -- check [cargo check 参数]`;
   诊断尾注 `[sv-check: …]` → `[sv check: …]`,LSP/problemMatcher 的
   diagnostic source 同步为 `sv check`。`.svmap` 磁盘格式与 `__sv_*`
   内部占位符不变。

@@ -763,7 +763,7 @@ fn e2e_bad_sv_reports_on_sv_line() {
     )
     .unwrap();
 
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_sv"))
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_cargo-sv"))
         .arg("check")
         .current_dir(&root)
         .env("CARGO_TARGET_DIR", root.join("target"))

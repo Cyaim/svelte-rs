@@ -1,9 +1,9 @@
 //! 模板数据面(ADR-2 无悔三步 ②:"生成数据而非生成类型";调研 09 §5.2/5.3)
 //!
-//! 一个 `.sv` 编成两面:
+//! 一个 `.svelte` 编成两面:
 //!
 //! ```text
-//! counter.sv ──sv-compiler──┬── 代码面(经 rustc):script 体 + 表达式槽位闭包表(binders)
+//! counter.svelte ──sv-compiler──┬── 代码面(经 rustc):script 体 + 表达式槽位闭包表(binders)
 //!                           └── 数据面(不经 rustc):[`Template`] 结构表 + 静态样式声明
 //! ```
 //!
@@ -54,10 +54,10 @@ use crate::{
 // 数据面
 // ---------------------------------------------------------------------------
 
-/// 一个模板(一个 `.sv` 的模板块;`{#if}`/`{#each}` 的分支体各是**独立子模板**)
+/// 一个模板(一个 `.svelte` 的模板块;`{#if}`/`{#each}` 的分支体各是**独立子模板**)
 #[derive(Clone, Copy, Debug)]
 pub struct Template {
-    /// 稳定 id:`"src/counter.sv#0"`(文件 + 块序号)。热重载按它索引实例
+    /// 稳定 id:`"src/counter.svelte#0"`(文件 + 块序号)。热重载按它索引实例
     pub id: &'static str,
     pub roots: &'static [TNode],
     /// 槽位签名表,**下标即槽位号**。热重载判据:签名一致 = 只推数据面即可
@@ -921,13 +921,13 @@ mod tests {
             },
         ];
         static A: Template = Template {
-            id: "src/counter.sv#0",
+            id: "src/counter.svelte#0",
             roots: &[],
             sig: SIG,
         };
         // 改了结构(roots 不同)但槽位签名一致 → 可热换
         static B: Template = Template {
-            id: "src/counter.sv#0",
+            id: "src/counter.svelte#0",
             roots: &[TNode::Elem {
                 kind: ElementKind::Text,
                 label: "新加的一行",
@@ -941,7 +941,7 @@ mod tests {
 
         // 表达式变了(hash 变)→ 必须重编译
         static C: Template = Template {
-            id: "src/counter.sv#0",
+            id: "src/counter.svelte#0",
             roots: &[],
             sig: &[
                 SlotSig {
@@ -965,7 +965,7 @@ mod tests {
         // "不能热换",注释还写成"新增插值" —— 而这个 fixture 其实是**少了**一个槽位。
         // 判据(方案 §5.2)明说子集合法:旧表里多出来的 binder 闲置着,没人引用就没关系
         static D: Template = Template {
-            id: "src/counter.sv#0",
+            id: "src/counter.svelte#0",
             roots: &[],
             sig: &[SlotSig {
                 kind: SlotKind::Text,
@@ -980,7 +980,7 @@ mod tests {
 
         // 不同模板 id 之间不谈热换
         static E: Template = Template {
-            id: "src/other.sv#0",
+            id: "src/other.svelte#0",
             roots: &[],
             sig: SIG,
         };

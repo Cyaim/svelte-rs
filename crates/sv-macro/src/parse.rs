@@ -140,7 +140,7 @@ fn parse_element(input: ParseStream) -> Result<Node> {
             ));
         }
     };
-    let attrs = parse_attrs(input)?;
+    let attrs = parse_attrs(input, &tag)?;
 
     // 自闭合:`<view />`、`<button ... />`(button label 为空串)
     if input.peek(Token![/]) {
@@ -181,24 +181,27 @@ fn parse_element(input: ParseStream) -> Result<Node> {
 }
 
 /// 属性名表:宏表面语法(`on_click(闭包)` 方法形态)→ 共享 IR 属性名
-/// (`.svelte` 的 `onclick={闭包}` 词汇)。表面语法校验在此,发射在共享 codegen
-const ATTRS: &[(&str, &str)] = &[
-    ("style", "style"),
-    ("on_click", "onclick"),
-    ("on_key_down", "onkeydown"),
-    ("on_key_up", "onkeyup"),
-    ("on_focus", "onfocus"),
-    ("on_blur", "onblur"),
-    ("placeholder", "placeholder"),
-    ("bind_value", "bind:value"),
-    ("on_input", "oninput"),
-    ("on_submit", "onsubmit"),
-    ("on_scroll", "onscroll"),
-    ("aria_label", "aria-label"),
-    ("bind_scroll_y", "bind:scrolly"),
+/// (`.svelte` 的 `onclick={闭包}` 词汇)。第三列 = 仅限 `<input>` 的属性
+/// (共享 codegen 有同款标签守卫,但**必须在这里先拦**——错误要带属性名的
+/// 真 span,进了 codegen 就只剩宏调用点整体 span 了)。
+/// 表面语法校验在此,发射在共享 codegen
+const ATTRS: &[(&str, &str, bool)] = &[
+    ("style", "style", false),
+    ("on_click", "onclick", false),
+    ("on_key_down", "onkeydown", false),
+    ("on_key_up", "onkeyup", false),
+    ("on_focus", "onfocus", false),
+    ("on_blur", "onblur", false),
+    ("placeholder", "placeholder", true),
+    ("bind_value", "bind:value", true),
+    ("on_input", "oninput", true),
+    ("on_submit", "onsubmit", true),
+    ("on_scroll", "onscroll", false),
+    ("aria_label", "aria-label", false),
+    ("bind_scroll_y", "bind:scrolly", false),
 ];
 
-fn parse_attrs(input: ParseStream) -> Result<Vec<Attr>> {
+fn parse_attrs(input: ParseStream, tag: &Tag) -> Result<Vec<Attr>> {
     let mut attrs: Vec<Attr> = Vec::new();
     while !(input.peek(Token![>]) || input.peek(Token![/])) {
         if input.is_empty() {
@@ -208,7 +211,7 @@ fn parse_attrs(input: ParseStream) -> Result<Vec<Attr>> {
             .parse()
             .map_err(|e| Error::new(e.span(), "期望属性名(style/on_click)、`>` 或 `/>`"))?;
         let surface = name.to_string();
-        let Some((_, ir_name)) = ATTRS.iter().find(|(s, _)| *s == surface) else {
+        let Some((_, ir_name, input_only)) = ATTRS.iter().find(|(s, _, _)| *s == surface) else {
             return Err(Error::new(
                 name.span(),
                 format!(
@@ -216,6 +219,12 @@ fn parse_attrs(input: ParseStream) -> Result<Vec<Attr>> {
                 ),
             ));
         };
+        if *input_only && *tag != Tag::Input {
+            return Err(Error::new(
+                name.span(),
+                format!("属性 `{surface}` 只能用在 <input> 上"),
+            ));
+        }
         if attrs.iter().any(|a| a.name == *ir_name) {
             return Err(Error::new(name.span(), format!("属性 `{name}` 重复")));
         }
@@ -401,5 +410,18 @@ mod tests {
         let (line, _col, msg) = err_at("doc, parent =>\n<view badattr(1)></view>");
         assert!(msg.contains("未知属性"), "{msg}");
         assert_eq!(line, 2, "行号应落在用户源码第 2 行");
+    }
+
+    /// input 族属性用错标签必须在解析期拦下,错误指到属性名——
+    /// 穿透到共享 codegen 只会得到"view! 内部错误"+ 整宏 span(评审发现 #0)
+    #[test]
+    fn input_only_attr_on_wrong_tag_points_at_attr_name() {
+        let (line, col, msg) = err_at(r#"doc, parent => <view placeholder("x") />"#);
+        assert!(msg.contains("只能用在"), "{msg}");
+        assert_eq!((line, col), (1, 21), "应指到 placeholder 属性名");
+        let (_, _, msg) = err_at("doc, parent => <button on_input(f)>\"x\"</button>");
+        assert!(msg.contains("只能用在"), "{msg}");
+        let (_, _, msg) = err_at("doc, parent => <text bind_value(sig) />");
+        assert!(msg.contains("只能用在"), "{msg}");
     }
 }

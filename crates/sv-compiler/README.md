@@ -16,8 +16,8 @@ script 块 runes 源变换(裸 `count` → `.get()`、`count += 1` → `.update`
 (build.rs 与 `.rs` 同一次写盘)把诊断搬回 `.svelte`:
 
 ```sh
-cargo run -q -p sv-compiler --bin sv -- check              # 默认 --workspace
-cargo run -q -p sv-compiler --bin sv -- check -p counter-sfc
+cargo run -q -p sv-compiler --bin cargo-sv -- check              # 默认 --workspace
+cargo run -q -p sv-compiler --bin cargo-sv -- check -p counter-sfc
 ```
 
 把 `Counter.svelte` 的 `{count}` 改成 `{count + "x"}`,实测输出(2026-07-22):
@@ -62,8 +62,8 @@ relocates each diagnostic through the `.svmap` sidecar (written by build.rs in t
 same pass as the `.rs`):
 
 ```sh
-cargo run -q -p sv-compiler --bin sv -- check              # defaults to --workspace
-cargo run -q -p sv-compiler --bin sv -- check -p counter-sfc
+cargo run -q -p sv-compiler --bin cargo-sv -- check              # defaults to --workspace
+cargo run -q -p sv-compiler --bin cargo-sv -- check -p counter-sfc
 ```
 
 Output is one rustc-style line per diagnostic (`path:line:col: level[code]: message`),

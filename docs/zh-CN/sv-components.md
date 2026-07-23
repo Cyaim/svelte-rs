@@ -264,8 +264,8 @@ cargo run -p counter-sfc -- --png out.png   # 离屏渲染一帧,无需窗口
 文件上的诊断重映射回 `.svelte` 的行列,按 rustc 风格打印。
 
 ```sh
-cargo run -p sv-compiler --bin sv -- check            # 整个工作区
-cargo run -p sv-compiler --bin sv -- check -p counter-sfc
+cargo run -p sv-compiler --bin cargo-sv -- check            # 整个工作区
+cargo run -p sv-compiler --bin cargo-sv -- check -p counter-sfc
 ```
 
 ```text

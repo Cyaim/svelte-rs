@@ -1,12 +1,16 @@
-//! `sv` —— svelte-rs 的开发工具入口(ADR-10 标识符改名:原 `sv-check` 二进制)。
+//! `cargo-sv` —— svelte-rs 的开发工具入口(cargo 子命令:`cargo sv <子命令>`;
+//! ADR-10 标识符改名:原 `sv-check` 二进制。取 `cargo-sv` 而非裸 `sv` 是刻意的:
+//! 裸 `sv` 会与 Linux runit 的 `/usr/bin/sv` 撞名,cargo-* 前缀由 cargo 分发、
+//! 无 PATH 遮蔽,且与调研 06 的 `cargo sv check` 设想逐字吻合)。
 //!
 //! 目前唯一的子命令是 `check`:跑 `cargo check`,把落在生成 `.rs` 上的
 //! rustc 诊断搬回 `.svelte`。
 //!
 //! 用法:
 //! ```sh
-//! cargo run -q -p sv-compiler --bin sv -- check              # 默认 --workspace
-//! cargo run -q -p sv-compiler --bin sv -- check -p counter-sfc
+//! cargo run -q -p sv-compiler --bin cargo-sv -- check    # 仓库内;默认 --workspace
+//! cargo run -q -p sv-compiler --bin cargo-sv -- check -p counter-sfc
+//! cargo sv check                                         # cargo install 后
 //! ```
 //! `check` 之后的参数原样透传给 `cargo check`(features/target 都照用)。
 //! 输出是 rustc 风格的单行 `路径:行:列: level[code]: 消息`,
@@ -21,8 +25,12 @@ use sv_compiler::check::{Line, Session, scrape_build_script_error};
 
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
-    let usage = "sv —— svelte-rs 开发工具\n\n\
-                 用法: sv check [cargo check 的参数...]\n\
+    // `cargo sv ...` 分发形态:cargo 会把子命令名自身作为第一个参数传入
+    if args.first().map(String::as_str) == Some("sv") {
+        args.remove(0);
+    }
+    let usage = "cargo sv —— svelte-rs 开发工具\n\n\
+                 用法: cargo sv check [cargo check 的参数...]\n\
                  `check` 把 rustc 落在生成 .rs 上的诊断搬回 .svelte;\n\
                  不给额外参数时等价于 `cargo check --workspace`。";
     match args.first().map(String::as_str) {
@@ -34,7 +42,7 @@ fn main() {
             return;
         }
         Some(other) => {
-            eprintln!("sv: 未知子命令 `{other}`\n\n{usage}");
+            eprintln!("cargo sv: 未知子命令 `{other}`\n\n{usage}");
             std::process::exit(2);
         }
         None => {

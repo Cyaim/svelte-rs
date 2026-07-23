@@ -2013,7 +2013,7 @@ let rows = $derived(vec![count; 3]);
     /// 点名的"编译器/解析器无 fuzz"缺口。
     ///
     /// `compile` 的契约是"畸形输入 → `Err(CompileError)`,**绝不 panic**":
-    /// `.sv` 是构建期跑的,一个坏文件应当给出可读的编译错误,而不是 `unwrap`
+    /// `.svelte` 是构建期跑的,一个坏文件应当给出可读的编译错误,而不是 `unwrap`
     /// 崩掉 build.rs(那对用户是一句没有上下文的 `thread panicked at ...`)。
     /// 但解析器里有几十处 `unwrap`/切片,没有测试守住这条契约。
     ///
@@ -2065,6 +2065,10 @@ let double = $derived(count * 2);
             "<view>{#if}</view>",
             "<view>{#if x}{/each}</view>",
             "<view>{#each}</view>",
+            // 索引名过了模板层的宽校验但不是合法 Ident(纯数字/No 类字符):
+            // codegen 层须 Err 而非 format_ident! panic(评审发现 #5)
+            "<view>{#each xs as x, 0}<text>a</text>{/each}</view>",
+            "<view>{#each xs as x, \u{b3}}<text>a</text>{/each}</view>",
             "<script>let x = $state(",
             "<script></script><view>{#if}",
             "{@const x = }",

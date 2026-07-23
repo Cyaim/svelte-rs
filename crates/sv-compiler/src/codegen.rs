@@ -1770,7 +1770,12 @@ impl Cg<'_> {
         let mut pat_binds = HashSet::new();
         collect_pat_idents(&pat, &mut pat_binds);
         inner_scope.shadowed.extend(pat_binds.iter().cloned());
-        inner_scope.plain.extend(pat_binds.iter().cloned());
+        // 预克隆是 `.svelte` 前端的人体工学语义;宏路径(Tokens)保持
+        // "行值移动语义原样交给 rustc"——兄弟节点复用行值是借用错误而不是
+        // 隐式克隆(硬约束:Tokens 不过任何改写,契约测试钉着)
+        if matches!(pat_src, ExprSrc::Text { .. }) {
+            inner_scope.plain.extend(pat_binds.iter().cloned());
+        }
 
         // keyed:按 key 复用行作用域
         if let Some(key_src) = key {
@@ -1825,10 +1830,18 @@ impl Cg<'_> {
         } else {
             let idx_binding = match index {
                 Some(idx) => {
-                    // 文本形态按原样重造(与既有 sourcemap 锚点行为一致);
-                    // Tokens 形态直通用户 Ident,unused 警告指到用户源码
-                    let id = match idx {
-                        ExprSrc::Text { src, .. } => format_ident!("{src}"),
+                    // 文本形态可失败解析(`{#each xs as x, 0}` 这类非法名要走
+                    // CompileError 而不是 format_ident! panic——"畸形输入绝不
+                    // panic"契约);Tokens 形态直通用户 Ident,unused 警告指到
+                    // 用户源码
+                    let id: syn::Ident = match idx {
+                        ExprSrc::Text { src, .. } => syn::parse_str(src).map_err(|_| {
+                            CompileError::at_offset(
+                                self.source,
+                                idx.offset(),
+                                format!("{{#each}} 的索引名 `{src}` 不是合法标识符"),
+                            )
+                        })?,
                         ExprSrc::Tokens(ts) => syn::parse2(ts.clone()).map_err(|e| {
                             CompileError::at_offset(
                                 self.source,
@@ -1839,11 +1852,23 @@ impl Cg<'_> {
                     };
                     let name = id.to_string();
                     inner_scope.shadowed.insert(name.clone());
-                    inner_scope.plain.insert(name);
+                    // 同上:索引名的预克隆语义只属于 `.svelte` 前端
+                    if matches!(idx, ExprSrc::Text { .. }) {
+                        inner_scope.plain.insert(name);
+                    }
                     quote! { let #id = __index; }
                 }
                 None => quote! { let _ = __index; },
             };
+            // 空行体:退化为空闭包(与旧宏 codegen 同款)——否则模式绑定的
+            // unused 警告会落到宏用户的源码上(SFC 有 #[allow] 伞,宏没有)
+            if children.is_empty() && else_children.is_empty() {
+                return Ok(emit::each_block(
+                    &parent_ident(),
+                    list_expr.to_token_stream(),
+                    quote! { |_, _, _, _| {} },
+                ));
+            }
             let children_ts = self.emit_nodes(children, &inner_scope)?;
             // 行闭包被逐行反复调用:开头对外层普通变量做每次调用的预克隆
             let outer_pre = preclones(&children_ts, scope);

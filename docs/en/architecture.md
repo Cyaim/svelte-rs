@@ -84,9 +84,11 @@ and that wiring was decided at compile time. Equality pruning exists at two leve
 `Doc` setters (`set_text` / `set_style` / `set_checked`) skip the version bump when
 the value is unchanged, so the renderer never repaints for a no-op write.
 
-One current limitation: writes flush synchronously (correct, but not frame-aligned).
-Frame scheduling — batching writes into a pre → render → layout → paint pipeline —
-is ADR-6 and **not implemented yet**.
+Under a window the path is **frame-aligned** (ADR-6, landed): a signal write only
+enqueues and requests a frame; the shell flushes effects at the top of the frame.
+Call `sv_reactive::tick()` when you need the result immediately (the flush escape
+hatch). Offscreen rendering and tests have no scheduler — writes still flush
+synchronously, unchanged.
 
 ## Two compiler frontends, one compile target (ADR-2, revised)
 
@@ -139,7 +141,8 @@ one compiler core**. Three no-regret steps: (1) merge sv-macro and sv-compiler i
 single core, (2) make templates data rather than generated types, (3) split codegen
 into setup/render — the latter two also serve hot reload.
 
-**Steps 1 and 2 are done (2026-07-22 and 2026-07-23)**: every emission against sv-ui
+**Step 1 is done, in two stages (2026-07-22 emit unification; 2026-07-23 kernel
+merge)**: every emission against sv-ui
 goes through one place, `sv_compiler::emit` (the binding-primitive call vocabulary plus
 the rebuild closure protocol), the shared template IR lives in `sv_compiler::template`,
 and there is a single codegen (`sv_compiler::generate_template` is the macro-side entry
@@ -176,7 +179,8 @@ effect(move || println!("{}", double.get()));    // first run is synchronous
 - Writing state inside a derived computation **panics** (the equivalent of Svelte's
   `state_unsafe_mutation` error).
 - Deliberate divergence from Svelte: effects run synchronously at creation instead of
-  being deferred to a microtask. Frame-aligned scheduling comes later (ADR-6).
+  being deferred to a microtask. Under a window, subsequent writes batch to the frame
+  boundary (ADR-6, landed).
 
 Details and the full API surface: [reactivity](./reactivity.md).
 
@@ -209,7 +213,7 @@ One line each; full records (Chinese) in [DESIGN.md](../DESIGN.md).
 | ADR-3b | Backend verdict + switchable `Painter` abstraction; vello as second real backend; text stack moved to swash | Landed |
 | ADR-4 | Window layer: narrow trait, winit is not an architectural premise (no winit HarmonyOS backend) | Planned |
 | ADR-5 | HarmonyOS: technically feasible (Tier-2 targets, XComponent + GLES path proven by Flutter/Servo ports), second-tier priority | Planned (M3 spike) |
-| ADR-6 | Frame scheduling: batch writes into a frame pipeline with `flush_sync` escape hatch | **Not implemented** — biggest open design point |
+| ADR-6 | Frame scheduling: batch writes into a frame pipeline with a `tick()` escape hatch | Landed (2026-07-22) — windowed writes batch to the frame boundary |
 | ADR-7 | `each` blocks: keyed reconcile. `each_block_keyed` (key-based row reuse, state-preserving reorder) exists; per-item-signal reconcile is the target shape | Partially implemented |
 | ADR-8 | CSS: real syntax, closed subset, compile-time stylesheets, never a runtime selector engine | C1 landed; C2 planned |
 | ADR-9 | Scale: viewport virtualization (`virtual_list`) decouples frame cost from logical widget count — measured 1M controls, CPU backend, p99 5.28 ms / 1% low 174 fps | Landed |

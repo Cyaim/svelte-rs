@@ -137,6 +137,21 @@
 - 音频没管(这些 mp4 带 AAC 礼物音效)。
 - 手写 JSON 取值器假设值里**不含转义引号**。
 
+### 内核合并(2026-07-23 对抗评审)遗留的存量小项
+
+- **`idents_within` 把 `expr.field` 的字段名当变量使用**(`sv-compiler/src/codegen.rs`
+  的 walk 不区分成员访问):`.svelte` 侧当行内有 `s.x` 且字段名 `x` 撞上普通变量名
+  时会多发一行无意义的预克隆(无害但冗余)。修法:跳过"前一 token 是单个 `.`"的
+  ident,**注意 `0..n` 的 `n` 前一 token 也是 `.`(range),须看再前一 token 是否
+  也是 `.` 才能区分**;修复会让部分 golden 少一行死克隆,需随之重录——刻意没在
+  内核合并批里做(那批的验收基线是 .svelte 产物逐字节不变)。宏路径不受影响
+  (Tokens 形态已不进 plain 集合,契约测试钉着)。
+- **暂不首发的 crate 未设 `publish = false`**(sv-lsp / sv-pag / sv-lottie / sv-vap):
+  CHANGELOG 首发清单已写明六 crate 口径,但没有机器可查的约束;依赖序脚本或
+  `cargo publish --workspace` 有误发风险。定夺后给四个 Cargo.toml 加
+  `publish = false`(注意 publish-readiness CI job 按 `select(.publish != [])`
+  过滤,加了会自动跳过它们的元数据检查——行为正确但覆盖面变化要知情)。
+
 ### R4 发布工程
 
 - ~~改名(ADR-10 待裁决)~~ ✅ 已裁决并落地(`svelte-rs` + `.svelte`;

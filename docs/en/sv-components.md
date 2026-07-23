@@ -268,8 +268,8 @@ diagnostics that land on generated files back to `.svelte` line/columns, and pri
 rustc-style.
 
 ```sh
-cargo run -p sv-compiler --bin sv -- check            # whole workspace
-cargo run -p sv-compiler --bin sv -- check -p counter-sfc
+cargo run -p sv-compiler --bin cargo-sv -- check            # whole workspace
+cargo run -p sv-compiler --bin cargo-sv -- check -p counter-sfc
 ```
 
 ```text

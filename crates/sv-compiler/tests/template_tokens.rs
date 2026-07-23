@@ -165,6 +165,72 @@ fn each_pat_and_index_tokens_survive() {
     assert!(out.to_string().contains("each_block"), "应发射 each_block");
 }
 
+/// 宏路径不过预克隆(硬约束):each 行值只有行绑定的那一次克隆,
+/// 不得出现 `.svelte` 式的节点级/闭包级 `Clone::clone(&名字)` 注入——
+/// 兄弟节点复用行值应交给 rustc 报借用错误,而不是隐式克隆
+#[test]
+fn tokens_each_row_gets_exactly_one_clone() {
+    let nodes = vec![Node::Each {
+        list: ExprSrc::Tokens(TokenStream::from_str("items.get()").unwrap()),
+        pat: ExprSrc::Tokens(TokenStream::from_str("row_item").unwrap()),
+        index: None,
+        key: None,
+        children: vec![
+            Node::Text {
+                segments: vec![Segment::Expr(ExprSrc::Tokens(
+                    TokenStream::from_str("row_item").unwrap(),
+                ))],
+            },
+            Node::If {
+                arms: vec![Arm {
+                    cond: ExprSrc::Tokens(TokenStream::from_str("cond_flag").unwrap()),
+                    children: vec![Node::Text {
+                        segments: vec![Segment::Static("x".into())],
+                    }],
+                }],
+                else_children: vec![],
+                offset: 0,
+            },
+        ],
+        else_children: vec![],
+        offset: 0,
+    }];
+    let out = sv_compiler::generate_template(&nodes).unwrap().to_string();
+    assert_eq!(
+        out.matches("Clone :: clone").count(),
+        1,
+        "each 行应只有行绑定一次克隆,不得注入预克隆:{out}"
+    );
+    assert!(
+        !out.contains("Clone :: clone (& row_item)"),
+        "宏路径不得对行绑定做预克隆:{out}"
+    );
+}
+
+/// 空 for 体退化为空行闭包(与旧宏一致):不发行绑定,宏用户不会收到
+/// unused_variables 告警(宏展开没有 SFC 的 #[allow] 伞)
+#[test]
+fn tokens_each_empty_body_emits_empty_row() {
+    let nodes = vec![Node::Each {
+        list: ExprSrc::Tokens(TokenStream::from_str("xs.clone()").unwrap()),
+        pat: ExprSrc::Tokens(TokenStream::from_str("unused_row").unwrap()),
+        index: None,
+        key: None,
+        children: vec![],
+        else_children: vec![],
+        offset: 0,
+    }];
+    let out = sv_compiler::generate_template(&nodes).unwrap().to_string();
+    assert!(
+        out.contains("| _ , _ , _ , _ | { }"),
+        "空行体应发空闭包:{out}"
+    );
+    assert!(
+        !out.contains("Clone :: clone"),
+        "空行体不应发行绑定克隆:{out}"
+    );
+}
+
 /// 单臂 If + else 嵌套(宏的 else-if 脱糖形态)在共享内核上语义成立
 #[test]
 fn macro_if_else_chain_emits_nested_if_blocks() {

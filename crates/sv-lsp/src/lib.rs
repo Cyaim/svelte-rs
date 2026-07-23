@@ -1,15 +1,15 @@
-//! `.sv` 语言服务器(LSP)——最小可用版(MVP)。
+//! `.svelte` 语言服务器(LSP)——最小可用版(MVP)。
 //!
 //! # 它做什么
 //!
-//! 编辑器每次打开 / 改动一个 `.sv` 文件,就把全文交给 `sv_compiler::compile`
+//! 编辑器每次打开 / 改动一个 `.svelte` 文件,就把全文交给 `sv_compiler::compile`
 //! 编译一遍;编译前端报的错(未知标签、非法属性、runes 改写失败、样式语法……)
 //! 原地变成 `textDocument/publishDiagnostics`,在编辑器里画波浪线。
 //!
 //! # 它**不**做什么(与 `sv check` 的分工)
 //!
 //! - 不跑 `cargo check`:那是 `sv check`(二进制)的活,拿 rustc 的类型错并按
-//!   source map 搬回 `.sv`。LSP 这层只做**编译前端**能立刻算出的错 —— 快、
+//!   source map 搬回 `.svelte`。LSP 这层只做**编译前端**能立刻算出的错 —— 快、
 //!   不落盘、每次击键都能重算,是编辑期最高频的一档。
 //! - 不做补全 / 跳转 / hover:那些要真嵌套包络与符号表(`lsp-spike.md` §3),
 //!   本 MVP 不碰。textDocumentSync 用 Full(每次传全文),省掉增量同步的状态机。
@@ -220,7 +220,7 @@ impl Server {
         ])))
     }
 
-    /// 编译一遍 `.sv`,把编译前端的错变成一条 publishDiagnostics。
+    /// 编译一遍 `.svelte`,把编译前端的错变成一条 publishDiagnostics。
     fn diagnostics(&self, uri: &str, text: &str) -> Out {
         let diags = match sv_compiler::compile(text, "component") {
             Ok(_) => Vec::new(),
@@ -317,7 +317,7 @@ mod tests {
     fn valid_sv_publishes_empty_diagnostics() {
         let mut srv = Server::new();
         let msg = format!(
-            r#"{{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{{"textDocument":{{"uri":"file:///a.sv","text":{}}}}}}}"#,
+            r#"{{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{{"textDocument":{{"uri":"file:///a.svelte","text":{}}}}}}}"#,
             serialize(&Value::Str(
                 "<script></script>\n<view><text>hi</text></view>\n".to_string()
             ))
@@ -330,7 +330,7 @@ mod tests {
             Some("textDocument/publishDiagnostics")
         );
         let diags = v.get("params").and_then(|p| p.get("diagnostics")).unwrap();
-        assert_eq!(diags.as_arr().len(), 0, "合法 .sv 不该报诊断:{m}");
+        assert_eq!(diags.as_arr().len(), 0, "合法 .svelte 不该报诊断:{m}");
     }
 
     #[test]
@@ -339,14 +339,14 @@ mod tests {
         // <anim> 是未知标签 → 编译前端报错
         let src = "<script></script>\n<view><anim /></view>\n";
         let msg = format!(
-            r#"{{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{{"textDocument":{{"uri":"file:///b.sv","text":{}}}}}}}"#,
+            r#"{{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{{"textDocument":{{"uri":"file:///b.svelte","text":{}}}}}}}"#,
             serialize(&Value::Str(src.to_string()))
         );
         let out = srv.handle(&parse(&msg));
         let Out::Send(m) = &out[0] else { panic!() };
         let v = parse(m);
         let diags = v.get("params").and_then(|p| p.get("diagnostics")).unwrap();
-        assert_eq!(diags.as_arr().len(), 1, "坏 .sv 应报一条诊断:{m}");
+        assert_eq!(diags.as_arr().len(), 1, "坏 .svelte 应报一条诊断:{m}");
         let d = &diags.as_arr()[0];
         // 0-based:错误在第 2 行(index 1)
         let line = d
@@ -370,7 +370,7 @@ mod tests {
         // 改成坏的
         let bad = "<script></script><view><anim /></view>";
         let change = format!(
-            r#"{{"jsonrpc":"2.0","method":"textDocument/didChange","params":{{"textDocument":{{"uri":"file:///c.sv"}},"contentChanges":[{{"text":{}}}]}}}}"#,
+            r#"{{"jsonrpc":"2.0","method":"textDocument/didChange","params":{{"textDocument":{{"uri":"file:///c.svelte"}},"contentChanges":[{{"text":{}}}]}}}}"#,
             serialize(&Value::Str(bad.to_string()))
         );
         let out = srv.handle(&parse(&change));
@@ -386,7 +386,7 @@ mod tests {
         );
 
         // 关闭 → 清空诊断
-        let close = r#"{"jsonrpc":"2.0","method":"textDocument/didClose","params":{"textDocument":{"uri":"file:///c.sv"}}}"#;
+        let close = r#"{"jsonrpc":"2.0","method":"textDocument/didClose","params":{"textDocument":{"uri":"file:///c.svelte"}}}"#;
         let out = srv.handle(&parse(close));
         let Out::Send(m) = &out[0] else { panic!() };
         assert_eq!(

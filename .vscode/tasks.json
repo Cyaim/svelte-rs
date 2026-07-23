@@ -19,7 +19,7 @@
       "label": "sv check (workspace)",
       "type": "shell",
       "command": "cargo",
-      "args": ["run", "-q", "-p", "sv-compiler", "--bin", "sv", "--", "check"],
+      "args": ["run", "-q", "-p", "sv-compiler", "--bin", "cargo-sv", "--", "check"],
       "group": { "kind": "build", "isDefault": true },
       "presentation": { "reveal": "silent", "panel": "dedicated", "clear": true },
       "problemMatcher": {
@@ -48,7 +48,7 @@
         "-p",
         "sv-compiler",
         "--bin",
-        "sv",
+        "cargo-sv",
         "--",
         "check",
         "-p",

@@ -4,7 +4,7 @@
 //! 解析成 JSON 交给 [`sv_lsp::Server::handle`],再把返回的每条消息按同样的
 //! 帧格式写回 stdout。所有语义都在 lib 里(纯函数、有测试),这里薄到不必测。
 //!
-//! 编辑器接法(VS Code 等):把本二进制配成 `.sv` 的 language server,stdio 通道。
+//! 编辑器接法(VS Code 等):把本二进制配成 `.svelte` 的 language server,stdio 通道。
 
 use std::io::{Read, Write};
 
