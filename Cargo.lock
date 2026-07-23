@@ -2840,6 +2840,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "sv-lsp"
+version = "0.0.1"
+dependencies = [
+ "sv-compiler",
+]
+
+[[package]]
 name = "sv-macro"
 version = "0.0.1"
 dependencies = [
