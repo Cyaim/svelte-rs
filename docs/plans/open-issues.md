@@ -19,11 +19,13 @@
   `.sv` → `compile_sv` → `publishDiagnostics` 波浪线。零外部依赖(手写 `Content-Length`
   分帧 + JSON-RPC,协议解析复用 `sv_compiler::check::json`)。纯函数 `Server::handle`
   有单测,stdio 端到端冒烟过。仍未做:补全/跳转/hover(要符号表)。
-- **PAG 差分帧重放**(此前"未实现",本轮实现):`sv_pag::replay_frame` 从最近关键帧
-  逐帧覆盖贴脏矩形还原整帧,**仍零依赖**(解码器注入回调);`sv_shell::register_pag`
-  把重放结果进 Frames 注册表 → 场景树。假解码器脱离真 WebP 验证了铺底/覆盖/裁剪/
-  畸形安全。**唯一仍缺的是 WebP 解码器本身** —— 本环境 crates.io 镜像不可达、
-  装不了任何解码器 crate,故做成注入 seam;选定并接上解码器是一步纯胶水。
+- **PAG 差分帧重放 + WebP 解码(全链打通)**(此前"未实现",本轮实现):
+  `sv_pag::replay_frame`(**仍零依赖**,解码器注入回调)从最近关键帧逐帧覆盖脏矩形
+  还原整帧;`sv_shell::register_pag` 进 Frames 注册表 → 场景树。**WebP 解码已接上**:
+  网络恢复后加了 `image-webp`(纯 Rust,MIT/Apache)到 sv-shell,
+  `register_pag_webp` 用它解码;端到端测试**用真编码的 WebP 字节**(image-webp 编码
+  →解码→重放→注册)跑通,不是假解码器。仍缺:**真实 `.pag` 素材验证**(仓库仍无
+  真文件,固件是手工构造 + 真 WebP 块);容器解析本身仍未在 AE 导出的真 `.pag` 上验过。
 - **Lottie 矢量档接入场景树**(此前"未实现",本轮实现):`sv-shell` 新增
   `sv-lottie` 依赖 + `register_vector`/`render_vector` + `PainterSink` 桥
   (`sv_lottie::PathSink` → `Painter` 同形动词转发);矢量动画节点现在每帧

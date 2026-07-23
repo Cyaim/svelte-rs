@@ -118,6 +118,36 @@ where
     Some(register_frames(frames))
 }
 
+/// 用内置的纯 Rust WebP 解码器(`image-webp`)注册一段 PAG 位图序列。
+///
+/// 这是 [`register_pag`] 的便利封装:PAG 位图序列帧块导出即 WebP
+/// (`sv-pag` README 的核实表),这里把解码器定死为 `image-webp`,调用方不必自带。
+/// 需要别的编码(PNG/JPEG)或别的解码器时,直接用 [`register_pag`] 注入自己的。
+pub fn register_pag_webp(seq: &sv_pag::BitmapSequence) -> Option<u64> {
+    register_pag(seq, decode_webp)
+}
+
+/// WebP 字节 → [`sv_pag::DecodedImage`](直通 RGBA8)。解不了返回 `None`。
+fn decode_webp(bytes: &[u8]) -> Option<sv_pag::DecodedImage> {
+    let mut dec = image_webp::WebPDecoder::new(std::io::Cursor::new(bytes)).ok()?;
+    let (width, height) = dec.dimensions();
+    let mut buf = vec![0u8; dec.output_buffer_size()?];
+    dec.read_image(&mut buf).ok()?;
+    // has_alpha → 已是 RGBA;否则是 RGB,补 alpha=255 铺成 RGBA
+    let rgba = if dec.has_alpha() {
+        buf
+    } else {
+        buf.chunks_exact(3)
+            .flat_map(|p| [p[0], p[1], p[2], 255])
+            .collect()
+    };
+    Some(sv_pag::DecodedImage {
+        width,
+        height,
+        rgba,
+    })
+}
+
 /// 直通 RGBA8 → 预乘 RGBA8(`c' = c*a/255`,四舍五入)。
 fn premultiply(rgba: &[u8]) -> Vec<u8> {
     rgba.chunks_exact(4)
@@ -456,6 +486,77 @@ mod tests {
             }],
         };
         assert!(register_pag(&bad, decode).is_none(), "解不了应整段拒绝");
+    }
+
+    #[test]
+    fn pag_webp_decodes_real_frames_end_to_end() {
+        use sv_pag::{BitmapFrame, BitmapRect, BitmapSequence};
+        reset_for_test();
+
+        // 用 image-webp 真编码两张纯色 WebP(2×2 红、2×2 绿)—— 真解码器、真字节,
+        // 不是假解码器。验证 decode_webp + register_pag_webp 整条链在真 WebP 上跑通。
+        fn webp(color: [u8; 4]) -> Vec<u8> {
+            let rgba: Vec<u8> = (0..4).flat_map(|_| color).collect(); // 2×2
+            let mut out = Vec::new();
+            image_webp::WebPEncoder::new(std::io::Cursor::new(&mut out))
+                .encode(&rgba, 2, 2, image_webp::ColorType::Rgba8)
+                .expect("编码 WebP 应成功");
+            out
+        }
+        let red = webp([255, 0, 0, 255]);
+        let green = webp([0, 255, 0, 255]);
+
+        // 先自证 decode_webp 能把它解回来
+        let d = decode_webp(&red).expect("应解出 WebP");
+        assert_eq!((d.width, d.height), (2, 2));
+        assert_eq!(&d.rgba[0..4], &[255, 0, 0, 255], "解码首像素应红");
+
+        let seq = BitmapSequence {
+            width: 2,
+            height: 2,
+            frame_rate: 30.0,
+            frames: vec![
+                BitmapFrame {
+                    is_keyframe: true,
+                    bitmaps: vec![BitmapRect {
+                        x: 0,
+                        y: 0,
+                        bytes: &red,
+                    }],
+                },
+                BitmapFrame {
+                    is_keyframe: true,
+                    bitmaps: vec![BitmapRect {
+                        x: 0,
+                        y: 0,
+                        bytes: &green,
+                    }],
+                },
+            ],
+        };
+        let h = register_pag_webp(&seq).expect("真 WebP 应重放并注册");
+        assert_eq!(frame_count(h), 2);
+        assert_ne!(
+            frame(h, 0).unwrap().id(),
+            frame(h, 1).unwrap().id(),
+            "红帧与绿帧应是不同的图"
+        );
+
+        // 非 WebP 字节 → 解码失败 → 整段拒绝
+        let bad = BitmapSequence {
+            width: 2,
+            height: 2,
+            frame_rate: 30.0,
+            frames: vec![BitmapFrame {
+                is_keyframe: true,
+                bitmaps: vec![BitmapRect {
+                    x: 0,
+                    y: 0,
+                    bytes: b"not a webp",
+                }],
+            }],
+        };
+        assert!(register_pag_webp(&bad).is_none(), "非 WebP 应整段拒绝");
     }
 
     #[test]

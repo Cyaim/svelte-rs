@@ -19,8 +19,8 @@ mod vello_backend;
 
 pub use a11y::{A11yCache, build_tree_update, dispatch_action, incremental_tree_update};
 pub use animation::{
-    frame, frame_count, register_frames, register_pag, register_vector, unregister,
-    unregister_vector,
+    frame, frame_count, register_frames, register_pag, register_pag_webp, register_vector,
+    unregister, unregister_vector,
 };
 // 矢量动画资产类型:下游用 `Lottie::from_slice` 解析后交给 `register_vector`
 pub use sv_lottie::{Error as LottieError, Lottie};
