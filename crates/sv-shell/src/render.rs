@@ -1063,7 +1063,7 @@ fn report_too_deep(id: ViewId) {
         h.get()
     });
     if n <= 3 || n.is_multiple_of(600) {
-        eprintln!(
+        log::warn!(
             "sv-shell: 子树嵌套超过 {MAX_TREE_DEPTH} 层(节点 {id:?}),\
              该子树按叶子处理以避免栈溢出;累计 {n} 次"
         );
@@ -1409,7 +1409,7 @@ pub fn render_frame(doc: &Doc, phys_w: u32, phys_h: u32, scale: f32) -> (Pixmap,
     let mut pixmap = match Pixmap::new(phys_w.max(1), phys_h.max(1)) {
         Some(p) => p,
         None => {
-            eprintln!("sv-shell: {phys_w}×{phys_h} pixmap 分配失败,本帧退化为 1×1");
+            log::warn!("sv-shell: {phys_w}×{phys_h} pixmap 分配失败,本帧退化为 1×1");
             Pixmap::new(1, 1).expect("1×1 pixmap 分配不可能失败")
         }
     };

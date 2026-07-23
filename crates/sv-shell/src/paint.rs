@@ -188,12 +188,11 @@ fn image_byte_len(width: u32, height: u32) -> Option<usize> {
 /// 刻意**不覆盖**退化 dst(`w<=0`/`h<=0`):零尺寸矩形是日常合法情形
 /// (折叠的 flex 项、滚出视口的节点),打进去只会把日志淹掉。
 ///
-/// 为什么是 `eprintln!` 而不是 `log::warn!`(tiny-skia 自己在
-/// `shaders/pattern.rs:101` 用的是后者):sv-shell 没有 `log` 依赖,
-/// 为一条诊断引一个门面依赖是另一个裁决;壳层现有的错误路径
-/// (`vello_backend.rs` 的 render 失败)也都是 eprintln
+/// 走 `log::warn!` 门面(2026-07-23 裁决:壳层诊断统一经 `log`,后端由应用自选,
+/// 换后端不用碰库)。不装后端时 `log` 是零成本;装了(env_logger /
+/// tracing-subscriber+tracing-log / …)这条 warn 就进那个后端。
 pub(crate) fn warn_dropped_image(why: &str, img: &PixelImage) {
-    eprintln!(
+    log::warn!(
         "sv-shell: draw_image 丢弃一张图({why}):声称 {}×{},实有 {} 字节",
         img.width,
         img.height,
