@@ -113,8 +113,11 @@ impl Doc {
             true
         });
         if changed {
-            // 锚点变 → resolve_anchor 的结果变。弹层的内部布局没变,
-            // 但它整体要挪到新位置:重走一遍产出坐标就够
+            // 锚点变 → resolve_anchor 的结果变。**必须定 OverlayRegistry(重建级),
+            // 不能降成 Position。** 直觉会觉得"内部布局没变、重走一遍产坐标就够",
+            // 但 Position 级重走时弹层原点取自**建树期克隆**的 OverlayTree.entry.anchor
+            // (render.rs 里 walk 不回读活注册表),锚点更新会被静默丢掉——弹层不跟着挪。
+            // 谁想把这里降级,得先让 walk 重读注册表,否则 fuzz 也抓不到(不覆盖锚点操作)。
             self.bump(crate::dirty::DirtyItem::OverlayRegistry);
         }
     }

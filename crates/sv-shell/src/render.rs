@@ -205,6 +205,40 @@ struct MeasureCtx {
 /// 与 Painter 边界同理;调研 23 §2.2 映射表)
 fn to_taffy(s: &sv_ui::Style) -> taffy::Style {
     use taffy::prelude::*;
+    // 穷尽解构闸门(计划 §5.2 三道之一,与 sv_ui 的 Style::eq / dirty::layout_relevant 对齐):
+    // 给 Style 加字段而不在这里过一遍 = 编译错误,逼作者判断它是否进 taffy 布局。
+    // 绑到 `_` 只为形成编译期门禁,实际映射仍走下面的 `s.field`。
+    let sv_ui::Style {
+        direction: _,
+        gap: _,
+        padding: _,
+        margin: _,
+        border: _,
+        width: _,
+        height: _,
+        min_width: _,
+        min_height: _,
+        max_width: _,
+        max_height: _,
+        flex_grow: _,
+        flex_shrink: _,
+        flex_wrap: _,
+        justify_content: _,
+        align_items: _,
+        align_self: _,
+        overflow: _,
+        overflow_x: _,
+        // 影响文本测量,经 measure_leaf 进布局,但不落 taffy::Style:
+        font_size: _,
+        text_wrap: _,
+        // 以下纯绘制,不影响布局:
+        bg: _,
+        fg: _,
+        corner_radius: _,
+        opacity: _,
+        cursor: _,
+        text_align: _,
+    } = s;
     let dim = |v: Option<f32>| v.map_or(Dimension::auto(), Dimension::length);
     let bw = s.border.map(|b| b.width).unwrap_or(0.0);
     taffy::Style {
