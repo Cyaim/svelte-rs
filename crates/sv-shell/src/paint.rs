@@ -795,45 +795,62 @@ mod glyph_cache {
     use std::cell::RefCell;
     use std::collections::HashMap;
 
-    use swash::scale::{Render, ScaleContext, Source};
-    use swash::zeno::{Format, Placement};
+    use swash::scale::image::Content;
+    use swash::scale::{Render, ScaleContext, Source, StrikeWith};
+    use swash::zeno::Placement;
 
     use super::GlyphKey;
 
     const CAP: usize = 2048;
 
-    thread_local! {
-        static CTX: RefCell<ScaleContext> = RefCell::new(ScaleContext::new());
-        static HOT: RefCell<HashMap<GlyphKey, (Placement, Vec<u8>)>> =
-            RefCell::new(HashMap::new());
-        static COLD: RefCell<HashMap<GlyphKey, (Placement, Vec<u8>)>> =
-            RefCell::new(HashMap::new());
+    /// 一个字形的光栅产物 + 内容类型。`color` 时 `data` 是**直通 RGBA**
+    /// (4 字节/像素,彩色 emoji);否则是 alpha 覆盖度(1 字节/像素,单色字形)。
+    #[derive(Clone)]
+    pub struct Raster {
+        pub placement: Placement,
+        pub data: Vec<u8>,
+        pub color: bool,
     }
 
-    fn rasterize(key: GlyphKey) -> (Placement, Vec<u8>) {
+    thread_local! {
+        static CTX: RefCell<ScaleContext> = RefCell::new(ScaleContext::new());
+        static HOT: RefCell<HashMap<GlyphKey, Raster>> = RefCell::new(HashMap::new());
+        static COLD: RefCell<HashMap<GlyphKey, Raster>> = RefCell::new(HashMap::new());
+    }
+
+    fn rasterize(key: GlyphKey) -> Raster {
         CTX.with(|ctx| {
             let mut ctx = ctx.borrow_mut();
             // 按字形键里的字体身份取 FontRef(调研 24 P0;单字体阶段即 UI 字体)
             let font = crate::text::FontHandle { key: key.font_key }.font_ref();
             let mut scaler = ctx.builder(font).size(key.px()).hint(false).build();
-            // Outline → alpha 覆盖度位图;Placement 的 top 是基线上方距离
-            Render::new(&[Source::Outline])
-                .format(Format::Alpha)
-                .render(&mut scaler, key.id)
-                .map(|img| (img.placement, img.data))
-                .unwrap_or((
-                    Placement {
-                        left: 0,
-                        top: 0,
-                        width: 0,
-                        height: 0,
-                    },
-                    Vec::new(),
-                ))
+            // **先试彩色**(COLR 分层轮廓 / CBDT/sbix 彩色位图),回退单色轮廓。
+            // 彩色字形(emoji)出 RGBA,单色出 alpha 覆盖度 —— 按 img.content 区分。
+            Render::new(&[
+                Source::ColorOutline(0),
+                Source::ColorBitmap(StrikeWith::BestFit),
+                Source::Outline,
+            ])
+            .render(&mut scaler, key.id)
+            .map(|img| Raster {
+                placement: img.placement,
+                data: img.data,
+                color: img.content == Content::Color,
+            })
+            .unwrap_or(Raster {
+                placement: Placement {
+                    left: 0,
+                    top: 0,
+                    width: 0,
+                    height: 0,
+                },
+                data: Vec::new(),
+                color: false,
+            })
         })
     }
 
-    pub fn with<R>(key: GlyphKey, f: impl FnOnce(&Placement, &[u8]) -> R) -> R {
+    pub fn with<R>(key: GlyphKey, f: impl FnOnce(&Placement, &[u8], bool) -> R) -> R {
         HOT.with(|h| {
             let mut hot = h.borrow_mut();
             if !hot.contains_key(&key) {
@@ -850,8 +867,8 @@ mod glyph_cache {
                 }
                 hot.insert(key, entry);
             }
-            let (p, cov) = &hot[&key];
-            f(p, cov)
+            let r = &hot[&key];
+            f(&r.placement, &r.data, r.color)
         })
     }
 }
@@ -987,14 +1004,26 @@ impl Painter for TinySkiaPainter<'_> {
         let (pw, ph) = (self.pixmap.width(), self.pixmap.height());
         let data = self.pixmap.pixels_mut();
         for g in glyphs {
-            glyph_cache::with(g.key, |placement, coverage| {
+            glyph_cache::with(g.key, |placement, gdata, is_color| {
                 // 基线原点 → 位图左上角(top 是基线到位图顶的距离,向上为正)
                 let x0 = g.x.round() as i32 + placement.left;
                 let y0 = g.y.round() as i32 - placement.top;
                 let (w, h) = (placement.width as usize, placement.height as usize);
                 for yy in 0..h {
                     for xx in 0..w {
-                        let cov = coverage[yy * w + xx];
+                        // 彩色字形(emoji):gdata 是直通 RGBA(4 字节/像素),用字形自身
+                        // 颜色 + 字形 alpha 合成(元素不透明度经 color.a 乘入);
+                        // 单色字形:gdata 是 alpha 覆盖度,按 fg 填。两者复用 blend_pixel。
+                        let (glyph_color, cov) = if is_color {
+                            let i = (yy * w + xx) * 4;
+                            let ga = gdata[i + 3];
+                            (
+                                Color::rgba(gdata[i], gdata[i + 1], gdata[i + 2], color.a),
+                                ga,
+                            )
+                        } else {
+                            (color, gdata[yy * w + xx])
+                        };
                         if cov == 0 {
                             continue;
                         }
@@ -1004,7 +1033,7 @@ impl Painter for TinySkiaPainter<'_> {
                         {
                             continue;
                         }
-                        blend_pixel(data, pw, ph, px, py, color, cov);
+                        blend_pixel(data, pw, ph, px, py, glyph_color, cov);
                     }
                 }
             });
