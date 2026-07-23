@@ -272,7 +272,8 @@ pub fn dispatch_action(doc: &Doc, action: Action, target: NodeId) -> bool {
             } else {
                 -A11Y_SCROLL_STEP
             };
-            doc.set_scroll(id, x, (y + dy).max(0.0));
+            // 与滚轮同款吸附:落在物理像素网格上,scroll-blit 才有机会接手
+            doc.set_scroll(id, x, sv_ui::anim::snap_scroll(y + dy).max(0.0));
             true
         }
         _ => false,

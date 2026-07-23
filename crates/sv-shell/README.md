@@ -33,6 +33,27 @@ fn main() {
 
 `RUST_LOG=warn` 起手即可看到壳层诊断。
 
+## 脏矩形与 scroll-blit / Damage & scroll-blit
+
+CPU 呈现路径默认启用**局部重画**:滚动帧把上一帧像素按位移搬一段、只重画
+新露出的条与滚动条列(scroll-blit);打字/勾选/换色/焦点/光标闪烁只重画对应
+矩形(脏日志 `DirtyItem::Paint { id }` 定位)。任何吃不准的形态(弹层开着、
+矢量动画、结构变更、小数位移、视口内有外来绘制)自动降级为多画,方向永远
+是"多画不错画";与全量渲染**逐字节相同**由 `blit_render_matches_full_render_*`
+差分测试守着。实测(release)3000 控件滚动场景:离屏 12.9 → 1.9ms/帧(6.8×),
+开窗 55 → 113fps。
+
+环境变量:
+
+| 变量 | 含义 |
+|---|---|
+| `SV_DAMAGE=0` | 关闭脏矩形/scroll-blit,恒整帧重画(怀疑画错时的一键排除法) |
+| `SV_SHOW_FPS=1` | 连续重绘 + 每 30 帧打印帧率 |
+| `SV_RENDERER=cpu\|vello` | 呈现后端(vello 走自己的场景缓存,不经此路径) |
+
+离屏(`render_frame` / `--png`)与 vello 后端不走损伤路径,行为不变。
+后续项:softbuffer `present_with_damage`(目前 present 仍整窗转换拷贝)。
+
 ## 许可 / License
 
 MIT OR Apache-2.0

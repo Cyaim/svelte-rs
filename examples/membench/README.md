@@ -24,6 +24,7 @@ cargo build --release -p membench          # 数字一律用 release 跑,dev 档
 | `--no-render` | 关 | 只建树不渲染(量建树时间/内存) |
 | `--hold-secs N` | 6 | 打印后驻留,给外部采样 WorkingSet/Private |
 | `--windowed` | 关 | 开真窗口(配 `SV_SHOW_FPS=1`),所有场景都支持 |
+| `--blit` | 关 | 仅 cpu 离屏:持久缓冲 + 脏矩形/scroll-blit(`render_into_cached`,事件循环同款),对照默认的全量 `render_frame` |
 | `--depth N` | 200 | 仅 deep:嵌套层数 |
 | `--text-pool N` | 0 | 仅 text:0 = 每帧生成没见过的串;N = 在 N 个串里循环 |
 | `--wrap` | 关 | 仅 text:定宽容器 + 长段落折行 |
@@ -214,6 +215,26 @@ its stack`,退出码 127,**不打印任何上下文**),`--depth 600 --no-render`
   会涨到滚动档的水平,这是最隐蔽的一类回归(功能全对,就是一直在重算);
 - 滚动区簿记退化成 O(n²)(比如每帧为每个滚动容器重新扫全树算内容尺寸)→
   与 rows 的差值随规模放大。
+
+**`--blit` 变体(scroll-blit / 脏矩形)**:同一场景改走事件循环同款的
+持久缓冲 + 损伤渲染(`render_into_cached`),整数位移滚动帧只搬像素 +
+重画露出的条。READY 行尾部追加 `blit=… blit_frames=… partial_frames=…
+full_frames=… skip_frames=…`(字段只增不改;非 `--blit` 模式全为 0)。
+实测(release,3000 控件、100 帧、13px 整数步,2026-07-23):
+
+| 路径 | frame_avg_ms | p99_ms | 1% low |
+|---|---|---|---|
+| 默认(全量 `render_frame`) | 12.91 | 18.41 | 54fps |
+| `--blit` | **1.90** | **2.89** | **346fps** |
+
+**6.8 倍**;blit_frames=99/100(回卷那一帧位移超视口,按守卫降级整帧)。
+开窗(`SV_SHOW_FPS=1 --windowed`,含 softbuffer 整窗转换/呈现):
+`SV_DAMAGE=0` 55fps → 默认 **113fps**——剩余天花板是 present 的整窗
+逐像素转换,等 `present_with_damage`。**会抓到什么**:
+blit 资格判定被改坏(隔离扫描漏判/整数判定松了)不会在这里现形——那归
+sv-shell 的逐字节差分测试;这里抓的是**性能回归**:blit_frames 掉到个位数
+说明入场券发不出去(量化没接上/快照失效太勤),avg 回到两位数说明
+剔除或搬移本身退化。
 
 ### `churn` —— 结构搅动 / keyed each reconcile
 

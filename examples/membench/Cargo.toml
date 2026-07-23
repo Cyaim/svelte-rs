@@ -12,3 +12,5 @@ backend-vello = ["sv-shell/backend-vello"]
 sv-reactive = { workspace = true }
 sv-ui = { workspace = true }
 sv-shell = { workspace = true }
+# --blit 模式的持久 framebuffer(与 sv-shell 同版本约束)
+tiny-skia = "0.11"
