@@ -467,7 +467,9 @@ pub fn render(msg: &json::Value, maps: &mut Maps) -> Rendered {
                         MapKind::Between => {
                             "  (位置由相邻锚点插值得出:主 span 落在标点或 runes 改写的残骸上)"
                         }
-                        MapKind::Envelope => "  (位置为行级近似:主 span 落在生成的胶水上;节点栈未做,只能定位到行)",
+                        MapKind::Envelope => {
+                            "  (位置为行级近似:主 span 落在生成的胶水上;节点栈未做,只能定位到行)"
+                        }
                     };
                     context.extend(excerpt(&sv_source, m.line, m.col));
                     context.push(format!("   = 生成文件对应位置: {file}:{line}:{col}"));

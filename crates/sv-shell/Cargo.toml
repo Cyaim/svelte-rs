@@ -15,6 +15,8 @@ description = "桌面渲染壳:winit 窗口 + CPU 自绘(softbuffer/tiny-skia/sw
 [dependencies]
 sv-reactive = { workspace = true }
 sv-ui = { workspace = true }
+# 矢量动画:velato 求值 → PathSink 路径动词,壳侧桥到 Painter(AnimSource::Vector)
+sv-lottie = { workspace = true }
 winit = "0.30"
 softbuffer = "0.4"
 tiny-skia = "0.11"

@@ -9,6 +9,12 @@
 
 ## ✅ 2026-07-23 复核轮已修复
 
+- **Lottie 矢量档接入场景树**(此前"未实现",本轮实现):`sv-shell` 新增
+  `sv-lottie` 依赖 + `register_vector`/`render_vector` + `PainterSink` 桥
+  (`sv_lottie::PathSink` → `Painter` 同形动词转发);矢量动画节点现在每帧
+  现算路径直发 `Painter`,不落位图。端到端记录型测试守住"发出填充路径 +
+  裁剪栈平衡"。顺带确认"`PathCmd` 等公开但不可命名"的洞本 PR 已通过
+  `paint` 的 re-export 补上(sv-lottie `path.rs` 的旧注释已随之更新)。
 - **🔴 `sv-vap` largesize box 溢出 panic**(复核新发现,非本表原有):`find_vapc`
   对 size==1 的 64 位 largesize 做 `p + size`,debug 溢出 panic、release 环绕后
   越界切片 panic,打破"任何输入绝不 panic"承诺。已改 `checked_add` + 回归测试。
@@ -77,13 +83,17 @@
 |---|---|---|---|---|
 | **VAP** | ✅ `sv-vap` | ✅(需外部 H.264 解码) | ✅ `examples/vap-gift` 端到端 | ✅ **10 个素材,含与 Python 参考逐字节对拍** |
 | **PAG** | ✅ `sv-pag`(位图序列档) | ❌ 缺 WebP 解码 + 差分帧重放 | — | 🔴 **零** |
-| **Lottie** | ✅ `sv-lottie` | ✅(自己发路径命令) | ❌ `AnimSource::Vector` 未接 | ❌ 只有手写固件 |
+| **Lottie** | ✅ `sv-lottie` | ✅(自己发路径命令) | ✅ **2026-07-23 已接**(`register_vector` + `render_vector`) | ❌ 只有手写固件 |
 
 共同欠账:
 
-- **`<animation src>` 前端标签未做**(`.sv` / `view!` 都没有)。
+- **`<animation src>` 前端标签未做**(`.sv` / `view!` 都没有)。运行期 API 已齐
+  (`create_animation` + `register_frames`/`register_vector`),缺的是模板层糖。
 - **动画帧仍整窗重绘**。分级只让布局归零(`set_anim_frame` 是 Paint 级),绘制端没有脏矩形。ADR-6 里那段"别指望零功耗自动成立"依然成立。
-- `AnimSource::Vector` 在 `sv_shell::animation::image_for` 里恒返回 `None` —— 它要走 sv-lottie 的 `RenderSink` 直接发路径命令,不产生位图,接线是另一件事。
+- ~~`AnimSource::Vector` 恒返回 `None`~~ **✅ 2026-07-23 已接线**:壳侧新增
+  `PainterSink`(sv_lottie `PathSink` → `Painter` 的同形动词转发)+ `render_vector`
+  每帧经 velato 现算路径直发 `Painter`;裁剪成对、句柄失效静默不画,有端到端
+  记录型测试守着(`vector_registers_and_renders_paths_into_the_painter`)。
 - **没有解码器**:`sv-pag` 交出 WebP 字节、`sv-vap` 要 RGB24 输入,两者都把解码挡在外面。"引哪个解码器"是一次独立的重裁决,且与平台强相关。
 
 ### `draw_image` 的已知近似

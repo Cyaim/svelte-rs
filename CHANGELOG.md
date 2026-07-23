@@ -35,7 +35,9 @@ sv-shell),按依赖序推送;`examples/` 不发布。
   - `sv-pag`(PAG):零依赖纯 Rust 解析位图序列帧容器档(WebP 解码与真实素材
     验证未做,见 `docs/plans/open-issues.md`)。
   - `sv-lottie`(Lottie):基于 velato(`default-features=false`,依赖树无
-    vello/wgpu),自发路径命令走 tiny-skia 像素;`AnimSource::Vector` 尚未接场景树。
+    vello/wgpu),自发路径命令走 tiny-skia 像素;**`AnimSource::Vector` 已接入
+    场景树**——壳侧 `register_vector` 注册 + 绘制路径 `render_vector` 每帧现算
+    路径直发 `Painter`(不落位图,缩放无损),裁剪栈成对平衡。
 - **`Painter::draw_image`**:CPU(tiny-skia)/ vello / Recording 三后端统一图像绘制,
   是三种动画格式的共同地基;`ElementKind::Animation` 单一 kind 装所有格式,
   `set_anim_frame` 定级 Paint(一秒 60 次换帧零布局)。

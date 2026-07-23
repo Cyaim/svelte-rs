@@ -2872,6 +2872,7 @@ dependencies = [
  "parley",
  "pollster",
  "softbuffer",
+ "sv-lottie",
  "sv-reactive",
  "sv-ui",
  "swash",

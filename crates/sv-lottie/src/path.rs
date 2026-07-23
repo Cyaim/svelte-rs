@@ -11,8 +11,12 @@
 //! —— 连 `Painter::fill_path` 都因此调不动。
 //!
 //! 所以本模块把这套词汇按**同名同形**复制一份,并让 [`PathSink`] 的方法签名
-//! 与 `Painter` 的路径动词逐字对齐。等 sv-shell 补上那一行 re-export,
-//! 桥接就退化成一个纯搬运的 `for` 循环(README 里有原文)。
+//! 与 `Painter` 的路径动词逐字对齐。
+//!
+//! **更新(2026-07-23)**:sv-shell 已把 `PathCmd`/`PathFill`/`StrokeStyle`/
+//! `LineCap`/`LineJoin` 从 `paint` re-export 出来,桥接如预言退化成
+//! `sv_shell::animation::PainterSink` 里那个纯搬运的 `match`(同形动词逐个转)。
+//! 本模块仍保留独立词汇——**不反向依赖 sv-shell**(会成循环:shell 依赖 lottie)。
 //!
 //! 坐标口径同 `Painter`:**物理像素,变换已由调用方烘焙进坐标**
 //! (`Painter` 的路径动词不收 transform 参数,这是 sv-shell 的既有不变量)。

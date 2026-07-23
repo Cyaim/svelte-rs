@@ -702,11 +702,16 @@ sv-compiler / sv-macro / sv-build)**空闲**;`runa`、`sylph` 被占。
   这推翻了"lottie 要等 vello 成为默认后端"的隐含前提。
   已落地:velato → Painter 路径词汇的 RenderSink 桥、时间轴/播放状态、
   57 条测试(固件是代码内嵌的手写 lottie,不下载不入库)。
-  **未落地**:接帧循环、进场景树、a11y/reduced-motion —— 都要动 sv-shell/sv-ui。
+  **✅ 2026-07-23 进场景树已接**:sv-shell 依赖 sv-lottie,壳侧
+  `register_vector` 注册资产 + 绘制路径 `render_vector` 经 `PainterSink`
+  (`PathSink` → `Painter` 同形动词转发)每帧现算路径直发 `Painter`,
+  `AnimSource::Vector` 不再恒返回 `None`;端到端记录型测试守着。
+  **仍未落地**:`<animation src>` 模板糖、a11y/reduced-motion。
   **降级项**(每条都有 `RenderStats` 计数器,不静默):渐变退化为纯色、
   任意路径裁剪忽略、混合模式与图像画刷丢弃。
-  **上游风险**:velato 在**合法** Lottie 上会 `todo!()` panic(六处,解析期),
-  用 `catch_unwind` 接住转 Error —— 创可贴,根治要给上游提 PR。
+  **上游风险**:velato 在**合法** Lottie 上会在导入期 panic(**七处**:
+  4 `todo!()` + 3 `unimplemented!()`),用 `catch_unwind` 接住转 Error ——
+  创可贴,根治要给上游提 PR。
 - [PAG 两篇:生态核实 / 接入形态裁决](plans/pag-1-ecology.md)
   ——**裁决:现在不做**。运行期绑 libpag 是**硬否**(其 C++ 闭包含 pathkit
   「extracted from the Skia library」与 skcms,ADR-3 排除 skia-safe 的理由

@@ -1001,15 +1001,29 @@ pub fn paint_tree(doc: &Doc, placed: &[Placed], painter: &mut dyn Painter, scale
             match n.kind {
                 ElementKind::Animation => {
                     // 贴在**内容盒**上(扣掉 padding 与边框),与文本同口径。
-                    // 素材没接上 / 帧号越界 / 矢量档 → 什么都不画。
+                    // 素材没接上 / 帧号越界 / 句柄失效 → 什么都不画。
                     // **刻意不画占位方块**:占位方块会让"素材没接上"看起来像
                     // "接上了但内容是灰的",而这两者查的方向完全不同
-                    if let Some(a) = n.anim.as_deref()
-                        && let Some(img) = crate::animation::image_for(a)
-                    {
+                    if let Some(a) = n.anim.as_deref() {
                         let cw = (p.rect.w - s.padding.horizontal()) * scale - bw * 2.0;
                         let ch = (p.rect.h - s.padding.vertical()) * scale - bw * 2.0;
-                        painter.draw_image(x + inset, y + inset_top, cw, ch, &img);
+                        match a.source {
+                            sv_ui::AnimSource::Frames { .. } => {
+                                if let Some(img) = crate::animation::image_for(a) {
+                                    painter.draw_image(x + inset, y + inset_top, cw, ch, &img);
+                                }
+                            }
+                            // 矢量档(Lottie):每帧现算路径,直接发到 Painter,不落位图
+                            sv_ui::AnimSource::Vector { handle } => {
+                                crate::animation::render_vector(
+                                    handle,
+                                    a.frame,
+                                    (x + inset, y + inset_top, cw, ch),
+                                    op,
+                                    painter,
+                                );
+                            }
+                        }
                     }
                 }
                 ElementKind::Text => {
