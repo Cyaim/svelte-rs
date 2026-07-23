@@ -26,7 +26,7 @@ research reports — is currently Chinese-only and linked as-is.
 
 ## Research
 
-Twenty-six internet-verified research reports (Chinese) that back the ADRs, 2026-07:
+Twenty-seven internet-verified research reports (Chinese) that back the ADRs, 2026-07:
 
 | # | Report |
 |---|---|
@@ -56,6 +56,7 @@ Twenty-six internet-verified research reports (Chinese) that back the ADRs, 2026
 | 24 | [Parley migration + AccessKit](research/24-parley-accesskit.md) |
 | 25 | [Overlay system + release engineering](research/25-overlay-release-engineering.md) |
 | 26 | [arco.design-style component-kit feasibility (sv-arco)](research/26-arco-design-ui-kit.md) |
+| 27 | [Commercialization-gap update (follow-up to #19)](research/27-commercialization-gap-update.md) |
 
 ## Conventions
 

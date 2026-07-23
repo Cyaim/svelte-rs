@@ -78,7 +78,7 @@ cargo run -p showcase -- --png out.png  # 离屏渲染一帧(无需窗口)
 参考资料(中文):[架构设计与 ADR](docs/DESIGN.md) ·
 [Svelte 支持矩阵(77 项)](docs/SVELTE-SUPPORT.md) ·
 [现代 CSS 差距矩阵(91 项)](docs/CSS-SUPPORT.md) ·
-[调研报告 ×26](docs/README.zh-CN.md#调研报告)
+[调研报告 ×27](docs/README.zh-CN.md#调研报告)
 
 ## 仓库结构
 
