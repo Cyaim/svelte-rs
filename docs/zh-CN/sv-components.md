@@ -2,7 +2,7 @@
 
 # 用 `.svelte` 组件写界面
 
-svelte-rs 有两个模板前端,编译目标相同——对 `sv-ui` 保留式场景树的定点更新调用(没有虚拟 DOM,运行时零 diff):**`.svelte` 单文件组件**,由 `sv-compiler` 在 `build.rs` 阶段编译(本页主角);**`view!` 过程宏**,来自 `sv-macro`(见最后一节)。
+svelte-rs 有两个模板前端,共享同一个编译内核(公共模板 IR 与唯一一份 codegen 都在 `sv-compiler`,两个前端只剩各自的 parser),编译目标相同——对 `sv-ui` 保留式场景树的定点更新调用(没有虚拟 DOM,运行时零 diff):**`.svelte` 单文件组件**,由 `sv-compiler` 在 `build.rs` 阶段编译(本页主角);**`view!` 过程宏**,来自 `sv-macro`(见最后一节)。
 
 本项目是探索原型,API 随时会变。每一项 Svelte 5 语法的支持状态以支持矩阵 [../SVELTE-SUPPORT.md](../SVELTE-SUPPORT.md) 为准——本页与矩阵冲突时,以矩阵为准。
 
@@ -18,7 +18,7 @@ let double = $derived(count * 2);
 
 <view style="padding:24; gap:12">
   <text font-size="20">Count: {count} · 双倍 = {double}</text>
-  <button on:click={|| count += 1}>+1</button>
+  <button onclick={|| count += 1}>+1</button>
   {#if count > 5}
     <text fg="#ff3e00">超过 5 了!</text>
   {/if}
@@ -66,12 +66,12 @@ v0 已知限制:字段/索引赋值(`pos.x = 1`)不改写——请用 `pos.updat
 <text>Count: {count} · doubled = {double}</text>    <!-- {expr}:任意 Rust 表达式 -->
 <text fg="#ff3e00" font-size="28">静态样式属性</text>
 <Card {title} />                                    <!-- 简写 ≡ title={title} -->
-<button onclick={|| count += 1}>+1</button>         <!-- Svelte 5 事件属性形态,推荐 -->
-<button on:click={|| count = 0}>reset</button>      <!-- 遗留别名,仍然接受 -->
+<button onclick={|| count += 1}>+1</button>         <!-- Svelte 5 事件属性形态;on: 指令已移除 -->
+<button onclick={|| count = 0}>reset</button>
 <text onpointerenter={|| hovers += 1}>悬停区</text>
 ```
 
-静态与插值混排的文本编译成单个 `bind_text` 绑定;全静态文本零绑定。属性值形态是 `name="静态字符串"` 或 `name={rust_表达式}`。当前事件集:`onclick`/`on:click`、`onpointerenter`、`onpointerleave`,以及键盘/焦点(R1):`onkeydown={|e| ...}` / `onkeyup={|e| ...}`(自动把元素设为可获焦;`e.stop_propagation()` 截断冒泡、`e.prevent_default()` 取消 Tab/Enter 默认层;抬起只到回调,不触发编辑/导航/激活/快捷键这些默认段)、`onfocus`/`onblur`、布尔属性 `autofocus`。按钮无需任何标注即可用 Tab 聚焦、Enter/Space 激活。文本输入用 `<input>`(自闭合叶子):`placeholder="..."`、`bind:value={x}` 双向绑定、`oninput={|v| ...}`/`onsubmit={|v| ...}`(签名 `Fn(&str)`);光标/选区/IME 预编辑/Ctrl+C/X/V 开箱即用,拖拽选择/双击选词/三击全选/词跳(Ctrl/⌥+←/→、Ctrl+Backspace/Delete)/撤销重做(Ctrl+Z / Ctrl+Y)同样内置。光标与命中几何与绘制出自同一次 Parley 排版,kerning 与 CJK/Latin 字体 fallback 下依旧精确。多行输入用 `<textarea rows="4" />`:与 `<input>` 共用全部属性与编辑内核,区别是 Enter 换行(提交交给按钮)、粘贴保留换行、文本按内容宽折行、高度 = `rows` × 行高(内容再长也不撑高,靠上滚),↑/↓ 按**视觉行**移动。未支持的事件写了会编译报错而不是静默失效。内联 `style="k:v; ..."` 与样式简写属性(`fg=`、`font-size=` 等)属于样式迷你语言,见 [./styling.md](./styling.md)。
+静态与插值混排的文本编译成单个 `bind_text` 绑定;全静态文本零绑定。属性值形态是 `name="静态字符串"` 或 `name={rust_表达式}`。当前事件集:`onclick`、`onpointerenter`、`onpointerleave`(`on:` 事件指令已整体移除——写 `on:click` 会得到指路 `onclick` 的编译错误),以及键盘/焦点(R1):`onkeydown={|e| ...}` / `onkeyup={|e| ...}`(自动把元素设为可获焦;`e.stop_propagation()` 截断冒泡、`e.prevent_default()` 取消 Tab/Enter 默认层;抬起只到回调,不触发编辑/导航/激活/快捷键这些默认段)、`onfocus`/`onblur`、布尔属性 `autofocus`。按钮无需任何标注即可用 Tab 聚焦、Enter/Space 激活。文本输入用 `<input>`(自闭合叶子):`placeholder="..."`、`bind:value={x}` 双向绑定、`oninput={|v| ...}`/`onsubmit={|v| ...}`(签名 `Fn(&str)`);光标/选区/IME 预编辑/Ctrl+C/X/V 开箱即用,拖拽选择/双击选词/三击全选/词跳(Ctrl/⌥+←/→、Ctrl+Backspace/Delete)/撤销重做(Ctrl+Z / Ctrl+Y)同样内置。光标与命中几何与绘制出自同一次 Parley 排版,kerning 与 CJK/Latin 字体 fallback 下依旧精确。多行输入用 `<textarea rows="4" />`:与 `<input>` 共用全部属性与编辑内核,区别是 Enter 换行(提交交给按钮)、粘贴保留换行、文本按内容宽折行、高度 = `rows` × 行高(内容再长也不撑高,靠上滚),↑/↓ 按**视觉行**移动。未支持的事件写了会编译报错而不是静默失效。内联 `style="k:v; ..."` 与样式简写属性(`fg=`、`font-size=` 等)属于样式迷你语言,见 [./styling.md](./styling.md)。
 
 ### `{#if}` / `{#each}` / `{#key}`
 
@@ -264,8 +264,8 @@ cargo run -p counter-sfc -- --png out.png   # 离屏渲染一帧,无需窗口
 文件上的诊断重映射回 `.svelte` 的行列,按 rustc 风格打印。
 
 ```sh
-cargo run -p sv-compiler --bin sv-check            # 整个工作区
-cargo run -p sv-compiler --bin sv-check -- -p counter-sfc
+cargo run -p sv-compiler --bin cargo-sv -- check            # 整个工作区
+cargo run -p sv-compiler --bin cargo-sv -- check -p counter-sfc
 ```
 
 ```text
@@ -320,7 +320,7 @@ view! { doc, root =>
 | 特性面 | 本页全部内容 | 文本插值、`if`/`for` 块、`style(闭包)`、`on_click(闭包)` |
 | 构建配置 | `build.rs` + `include!` | 无——宏内联展开 |
 
-想在现有 Rust 代码里内联嵌一小块响应式 UI、不想碰构建脚本,或希望一切保持纯 Rust 以获得完整 IDE 体验时,选 `view!`。按 ADR-2(修订版),双前端共存;合并两者的编译内核是 M1 目标——见 [../DESIGN.md](../DESIGN.md)。
+想在现有 Rust 代码里内联嵌一小块响应式 UI、不想碰构建脚本,或希望一切保持纯 Rust 以获得完整 IDE 体验时,选 `view!`。按 ADR-2(修订版),双前端共存;两者的编译内核已合并(M1 完成):公共模板 IR 在 `sv_compiler::template`,codegen 只有一份(宏侧入口 `sv_compiler::generate_template`),`view!` 侧只剩自己的 parser,span 精度不受影响(宏表达式 token 原样直通),两边表面语法都没变——见 [../DESIGN.md](../DESIGN.md)。
 
 ## 相关阅读
 

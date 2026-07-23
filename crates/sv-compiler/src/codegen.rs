@@ -139,6 +139,27 @@ pub fn generate(
     Ok((format!("{HEADER}{formatted}"), anchors))
 }
 
+/// 双前端共享内核的宏侧入口:模板节点 → 建树/绑定语句序列。
+///
+/// 与 [`generate`] 的差别:不带 script/样式表/props 上下文(`view!` 模板的
+/// 表达式已是最终 Rust,见 [`crate::template::ExprSrc::Tokens`]),产出的是
+/// 语句流而非完整组件源文件——外层的 `__doc`/`__parent` 绑定由宏壳自己包。
+/// 错误在实践中不可达(宏 parser 在解析期已用真 span 校验完表面语法),
+/// 返回 Result 只为内核契约完整。
+pub(crate) fn generate_template(nodes: &[Node]) -> Result<TokenStream, CompileError> {
+    let script = ScriptOutput::empty();
+    let registry = PropsRegistry::new();
+    let sheet = StyleSheet::default();
+    let mut cg = Cg {
+        source: "",
+        script: &script,
+        registry: &registry,
+        sheet: &sheet,
+        n: 0,
+    };
+    cg.emit_nodes(nodes, &Scope::default())
+}
+
 fn pascal(snake: &str) -> String {
     snake
         .split('_')
@@ -203,12 +224,24 @@ impl Cg<'_> {
     }
 
     fn parse_expr(&self, e: &ExprSrc) -> Result<syn::Expr, CompileError> {
-        crate::sourcemap::parse_str_at(&e.src, e.offset).map_err(|err| {
-            CompileError::at_offset(self.source, e.offset, format!("表达式解析失败: {err}"))
-        })
+        match e {
+            ExprSrc::Text { src, offset } => {
+                crate::sourcemap::parse_str_at(src, *offset).map_err(|err| {
+                    CompileError::at_offset(self.source, *offset, format!("表达式解析失败: {err}"))
+                })
+            }
+            // 宏前端:token 已带真 span,syn::parse2 原样保留。
+            // 解析失败在这里只可能是内部错误(宏 parser 只放行合法 syn::Expr)
+            ExprSrc::Tokens(ts) => syn::parse2(ts.clone()).map_err(|err| {
+                CompileError::at_offset(self.source, 0, format!("表达式解析失败: {err}"))
+            }),
+        }
     }
 
-    /// 解析模板表达式并做 runes 读写改写
+    /// 解析模板表达式;`.svelte` 文本形态再做 runes 读写改写。
+    /// Tokens 形态(view! 宏)**不过任何改写**:runes 隐式反应性与
+    /// force-move 都是 `.svelte` 表面语法的语义,宏路径的表达式是用户
+    /// 亲手写的最终 Rust,原样直通才能保住 span 与借用语义
     fn expr(
         &self,
         e: &ExprSrc,
@@ -216,15 +249,44 @@ impl Cg<'_> {
         force_move: bool,
     ) -> Result<syn::Expr, CompileError> {
         let mut expr = self.parse_expr(e)?;
-        script::rewrite_template_expr(
-            &self.script.vars,
-            &scope.locals,
-            &scope.shadowed,
-            &mut expr,
-            force_move,
-        )
-        .map_err(|msg| CompileError::at_offset(self.source, e.offset, msg))?;
+        if let ExprSrc::Text { offset, .. } = e {
+            script::rewrite_template_expr(
+                &self.script.vars,
+                &scope.locals,
+                &scope.shadowed,
+                &mut expr,
+                force_move,
+            )
+            .map_err(|msg| CompileError::at_offset(self.source, *offset, msg))?;
+        }
         Ok(expr)
+    }
+
+    /// 无副作用地尝试解析载荷(不改写、不报错)——探测「裸变量名」形态用
+    fn probe_expr(&self, e: &ExprSrc) -> Option<syn::Expr> {
+        match e {
+            ExprSrc::Text { src, offset } => crate::sourcemap::parse_str_at(src, *offset).ok(),
+            ExprSrc::Tokens(ts) => syn::parse2(ts.clone()).ok(),
+        }
+    }
+
+    /// `bind:value` / `bind:scrolly` / `bind:checked` 的信号表达式:
+    /// 反应式变量名直传句柄(绕开 runes 改写,不 `.get()`);
+    /// 其它表达式走常规解析。Tokens 形态本就不改写,恒直传
+    fn signal_expr(&self, e: &ExprSrc, scope: &Scope) -> Result<TokenStream, CompileError> {
+        if matches!(e, ExprSrc::Text { .. })
+            && let Some(syn::Expr::Path(p)) = self.probe_expr(e)
+            && p.path.segments.len() == 1
+            && self
+                .script
+                .vars
+                .contains(&p.path.segments[0].ident.to_string())
+        {
+            let id = p.path.segments[0].ident.clone();
+            return Ok(quote! { #id });
+        }
+        let x = self.expr(e, scope, false)?;
+        Ok(quote! { #x })
     }
 
     /// 值闭包(if 条件 / each 列表 / key)的表达式:若引用普通变量,
@@ -333,7 +395,6 @@ impl Cg<'_> {
             Node::Each {
                 list,
                 pat,
-                pat_offset,
                 index,
                 key,
                 children,
@@ -343,8 +404,7 @@ impl Cg<'_> {
                 EachParts {
                     list,
                     pat,
-                    pat_offset: *pat_offset,
-                    index: index.as_deref(),
+                    index: index.as_ref(),
                     key: key.as_ref(),
                     children,
                     else_children,
@@ -370,7 +430,7 @@ impl Cg<'_> {
                 let syn::Expr::Call(call_expr) = expr else {
                     return Err(CompileError::at_offset(
                         self.source,
-                        call.offset,
+                        call.offset(),
                         "{@render} 需要调用形式,如 {@render row(item)}",
                     ));
                 };
@@ -413,7 +473,7 @@ impl Cg<'_> {
                 let mut fmt = String::from("[debug]");
                 let mut exprs = Vec::new();
                 for a in args {
-                    let label = a.src.replace('{', "{{").replace('}', "}}");
+                    let label = a.display_src().replace('{', "{{").replace('}', "}}");
                     fmt.push_str(&format!(" {label} = {{:?}} ·"));
                     exprs.push(self.expr(a, scope, false)?);
                 }
@@ -606,7 +666,13 @@ impl Cg<'_> {
                     AttrValue::Str { value, offset } => {
                         style_setters.extend(style::parse_style(self.source, value, *offset)?);
                     }
-                    AttrValue::Expr(_) => {
+                    // 宏前端专属:`style(闭包)` 闭包直传 bind_style(响应式,
+                    // 闭包里读 signal 自动追踪)。`.svelte` 的 parser 产不出
+                    // Tokens 形态,文本前端的动态样式仍走 style: 指令
+                    AttrValue::Expr(ExprSrc::Tokens(closure)) => {
+                        ts.extend(quote! { ::sv_ui::bind_style(&__doc, #el, #closure); });
+                    }
+                    AttrValue::Expr(ExprSrc::Text { .. }) => {
                         return Err(CompileError::at_offset(
                             self.source,
                             attr.offset,
@@ -655,7 +721,7 @@ impl Cg<'_> {
                     }
                     // 简写 class:muted → 条件即同名变量
                     AttrValue::Str { value, .. } if value.is_empty() => {
-                        let e = ExprSrc {
+                        let e = ExprSrc::Text {
                             src: cls.to_string(),
                             offset: attr.offset,
                         };
@@ -878,8 +944,8 @@ impl Cg<'_> {
         let mut bind_scrolly: Option<TokenStream> = None;
         for attr in attrs {
             match attr.name.as_str() {
-                // Svelte 5 事件属性与遗留 on: 指令都认
-                "onclick" | "on:click" => match &attr.value {
+                // Svelte 5 事件属性形态(遗留 on: 指令已移除,拒绝分支在下面统一指路)
+                "onclick" => match &attr.value {
                     AttrValue::Expr(e) => {
                         let handler = self.expr(e, scope, true)?;
                         ts.extend(emit::on_click(&el, handler.to_token_stream()));
@@ -987,14 +1053,22 @@ impl Cg<'_> {
                             "placeholder 只能用在 <input>/<textarea> 上",
                         ));
                     }
-                    let AttrValue::Str { value, .. } = &attr.value else {
-                        return Err(CompileError::at_offset(
-                            self.source,
-                            attr.offset,
-                            "placeholder v0 只支持静态字符串",
-                        ));
-                    };
-                    ts.extend(emit::placeholder(&el, quote! { #value }));
+                    match &attr.value {
+                        AttrValue::Str { value, .. } => {
+                            ts.extend(emit::placeholder(&el, quote! { #value }));
+                        }
+                        // 宏前端:`placeholder(表达式)` 任意表达式直传
+                        AttrValue::Expr(ExprSrc::Tokens(e)) => {
+                            ts.extend(emit::placeholder(&el, e.clone()));
+                        }
+                        AttrValue::Expr(ExprSrc::Text { .. }) => {
+                            return Err(CompileError::at_offset(
+                                self.source,
+                                attr.offset,
+                                "placeholder v0 只支持静态字符串",
+                            ));
+                        }
+                    }
                 }
                 "value" if tag.is_text_input() => {
                     let AttrValue::Expr(e) = &attr.value else {
@@ -1028,20 +1102,7 @@ impl Cg<'_> {
                             "bind:value 的值应为 {反应式变量}",
                         ));
                     };
-                    let sig_ts = if let Ok(syn::Expr::Path(p)) =
-                        crate::sourcemap::parse_str_at::<syn::Expr>(&e.src, e.offset)
-                        && p.path.segments.len() == 1
-                        && self
-                            .script
-                            .vars
-                            .contains(&p.path.segments[0].ident.to_string())
-                    {
-                        let id = p.path.segments[0].ident.clone();
-                        quote! { #id }
-                    } else {
-                        let x = self.expr(e, scope, false)?;
-                        quote! { #x }
-                    };
+                    let sig_ts = self.signal_expr(e, scope)?;
                     ts.extend(emit::bind_value(&el, sig_ts));
                 }
                 "oninput" | "onsubmit" => {
@@ -1089,20 +1150,7 @@ impl Cg<'_> {
                             "bind:scrolly 的值应为 {反应式变量}",
                         ));
                     };
-                    let sig_ts = if let Ok(syn::Expr::Path(p)) =
-                        crate::sourcemap::parse_str_at::<syn::Expr>(&e.src, e.offset)
-                        && p.path.segments.len() == 1
-                        && self
-                            .script
-                            .vars
-                            .contains(&p.path.segments[0].ident.to_string())
-                    {
-                        let id = p.path.segments[0].ident.clone();
-                        quote! { #id }
-                    } else {
-                        let x = self.expr(e, scope, false)?;
-                        quote! { #x }
-                    };
+                    let sig_ts = self.signal_expr(e, scope)?;
                     bind_scrolly = Some(sig_ts);
                 }
                 // bind:checked:<checkbox> 双向绑定
@@ -1121,20 +1169,7 @@ impl Cg<'_> {
                             "bind:checked 的值应为 {反应式变量}",
                         ));
                     };
-                    let sig_ts = if let Ok(syn::Expr::Path(p)) =
-                        crate::sourcemap::parse_str_at::<syn::Expr>(&e.src, e.offset)
-                        && p.path.segments.len() == 1
-                        && self
-                            .script
-                            .vars
-                            .contains(&p.path.segments[0].ident.to_string())
-                    {
-                        let id = p.path.segments[0].ident.clone();
-                        quote! { #id }
-                    } else {
-                        let x = self.expr(e, scope, false)?;
-                        quote! { #x }
-                    };
+                    let sig_ts = self.signal_expr(e, scope)?;
                     ts.extend(quote! {
                         {
                             let __b_sig = #sig_ts;
@@ -1233,13 +1268,14 @@ impl Cg<'_> {
                         ),
                     ));
                 }
-                name if name.starts_with("on:") && name != "on:click" => {
-                    // SVELTE-SUPPORT 裁决:on: 是待移除的遗留形态,新事件只进属性形态
+                name if name.starts_with("on:") => {
+                    // SVELTE-SUPPORT 裁决:on: 指令已移除(对齐 Svelte 5),事件只有属性形态
                     let hint = match name {
+                        "on:click" => "点击事件用属性形态 onclick={|| ...}",
                         "on:keydown" => "键盘事件用属性形态 onkeydown={|e| ...}",
                         "on:focus" => "焦点事件用属性形态 onfocus={...}",
                         "on:blur" => "焦点事件用属性形态 onblur={...}",
-                        _ => "on: 是待移除的遗留形态,新事件只进属性形态(如 onclick)",
+                        _ => "on: 指令已移除,事件用属性形态(如 onclick={...})",
                     };
                     return Err(CompileError::at_offset(
                         self.source,
@@ -1398,8 +1434,7 @@ impl Cg<'_> {
                 Some(attr) => match &attr.value {
                     AttrValue::Expr(e) => {
                         // 零参 snippet 名作为 prop:自动包成 sv_ui::Snippet
-                        if let Ok(syn::Expr::Path(p)) =
-                            crate::sourcemap::parse_str_at::<syn::Expr>(&e.src, e.offset)
+                        if let Some(syn::Expr::Path(p)) = self.probe_expr(e)
                             && p.path.segments.len() == 1
                             && scope
                                 .snippets
@@ -1414,8 +1449,7 @@ impl Cg<'_> {
                         }
                         // $bindable + 裸反应式变量名:直接传句柄(双向绑定零胶水)
                         if field.bindable
-                            && let Ok(syn::Expr::Path(p)) =
-                                crate::sourcemap::parse_str_at::<syn::Expr>(&e.src, e.offset)
+                            && let Some(syn::Expr::Path(p)) = self.probe_expr(e)
                             && p.qself.is_none()
                             && p.path.segments.len() == 1
                             && self
@@ -1710,7 +1744,6 @@ impl Cg<'_> {
         let EachParts {
             list,
             pat: pat_src,
-            pat_offset,
             index,
             key,
             children,
@@ -1718,19 +1751,31 @@ impl Cg<'_> {
             offset,
         } = parts;
         let list_expr = self.value_closure_expr(list, scope)?;
-        let pat = crate::sourcemap::parse_with_at(syn::Pat::parse_single, pat_src, pat_offset)
-            .map_err(|e| {
-                CompileError::at_offset(
-                    self.source,
-                    pat_offset,
-                    format!("{{#each}} 模式解析失败: {e}"),
-                )
-            })?;
+        let pat_offset = pat_src.offset();
+        let pat = match pat_src {
+            ExprSrc::Text { src, offset } => {
+                crate::sourcemap::parse_with_at(syn::Pat::parse_single, src, *offset)
+            }
+            // 宏前端:模式 token 带真 span 直通(E0382 等借用错误指到用户模式)
+            ExprSrc::Tokens(ts) => syn::parse::Parser::parse2(syn::Pat::parse_single, ts.clone()),
+        }
+        .map_err(|e| {
+            CompileError::at_offset(
+                self.source,
+                pat_offset,
+                format!("{{#each}} 模式解析失败: {e}"),
+            )
+        })?;
         let mut inner_scope = scope.clone();
         let mut pat_binds = HashSet::new();
         collect_pat_idents(&pat, &mut pat_binds);
         inner_scope.shadowed.extend(pat_binds.iter().cloned());
-        inner_scope.plain.extend(pat_binds.iter().cloned());
+        // 预克隆是 `.svelte` 前端的人体工学语义;宏路径(Tokens)保持
+        // "行值移动语义原样交给 rustc"——兄弟节点复用行值是借用错误而不是
+        // 隐式克隆(硬约束:Tokens 不过任何改写,契约测试钉着)
+        if matches!(pat_src, ExprSrc::Text { .. }) {
+            inner_scope.plain.extend(pat_binds.iter().cloned());
+        }
 
         // keyed:按 key 复用行作用域
         if let Some(key_src) = key {
@@ -1749,7 +1794,7 @@ impl Cg<'_> {
                 &mut key_expr,
                 false,
             )
-            .map_err(|msg| CompileError::at_offset(self.source, key_src.offset, msg))?;
+            .map_err(|msg| CompileError::at_offset(self.source, key_src.offset(), msg))?;
             // keyed 行拿的是 `Signal<T>`(ADR-7):内容变化原地更新而不是重建。
             // 于是绑定名在**行内**是反应式的 —— 与 {@const} 同一套改写
             // (`item.field` → `item.get().field`),故必须是单个标识符
@@ -1784,14 +1829,46 @@ impl Cg<'_> {
             })
         } else {
             let idx_binding = match index {
-                Some(name) => {
-                    let id = format_ident!("{name}");
-                    inner_scope.shadowed.insert(name.to_string());
-                    inner_scope.plain.insert(name.to_string());
+                Some(idx) => {
+                    // 文本形态可失败解析(`{#each xs as x, 0}` 这类非法名要走
+                    // CompileError 而不是 format_ident! panic——"畸形输入绝不
+                    // panic"契约);Tokens 形态直通用户 Ident,unused 警告指到
+                    // 用户源码
+                    let id: syn::Ident = match idx {
+                        ExprSrc::Text { src, .. } => syn::parse_str(src).map_err(|_| {
+                            CompileError::at_offset(
+                                self.source,
+                                idx.offset(),
+                                format!("{{#each}} 的索引名 `{src}` 不是合法标识符"),
+                            )
+                        })?,
+                        ExprSrc::Tokens(ts) => syn::parse2(ts.clone()).map_err(|e| {
+                            CompileError::at_offset(
+                                self.source,
+                                idx.offset(),
+                                format!("{{#each}} 索引名解析失败: {e}"),
+                            )
+                        })?,
+                    };
+                    let name = id.to_string();
+                    inner_scope.shadowed.insert(name.clone());
+                    // 同上:索引名的预克隆语义只属于 `.svelte` 前端
+                    if matches!(idx, ExprSrc::Text { .. }) {
+                        inner_scope.plain.insert(name);
+                    }
                     quote! { let #id = __index; }
                 }
                 None => quote! { let _ = __index; },
             };
+            // 空行体:退化为空闭包(与旧宏 codegen 同款)——否则模式绑定的
+            // unused 警告会落到宏用户的源码上(SFC 有 #[allow] 伞,宏没有)
+            if children.is_empty() && else_children.is_empty() {
+                return Ok(emit::each_block(
+                    &parent_ident(),
+                    list_expr.to_token_stream(),
+                    quote! { |_, _, _, _| {} },
+                ));
+            }
             let children_ts = self.emit_nodes(children, &inner_scope)?;
             // 行闭包被逐行反复调用:开头对外层普通变量做每次调用的预克隆
             let outer_pre = preclones(&children_ts, scope);
@@ -1837,9 +1914,8 @@ fn parent_ident() -> syn::Ident {
 /// emit_each 的参数包(字段太多,聚合传递)
 struct EachParts<'a> {
     list: &'a ExprSrc,
-    pat: &'a str,
-    pat_offset: usize,
-    index: Option<&'a str>,
+    pat: &'a ExprSrc,
+    index: Option<&'a ExprSrc>,
     key: Option<&'a ExprSrc>,
     children: &'a [Node],
     else_children: &'a [Node],

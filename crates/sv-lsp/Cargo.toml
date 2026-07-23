@@ -10,7 +10,7 @@ readme = "README.md"
 keywords.workspace = true
 categories.workspace = true
 authors.workspace = true
-description = ".sv 语言服务器(LSP):把编译器诊断实时喂给编辑器"
+description = ".svelte 语言服务器(LSP):把编译器诊断实时喂给编辑器"
 
 [[bin]]
 name = "sv-lsp"

@@ -4,15 +4,16 @@
 //! (`bind_text` / `bind_style` / `if_block` / `each_block`)的命令式调用。
 //! 零 diff——模板在编译期展开,运行时哪个值变了就精准更新哪个节点。
 //!
-//! 编译器主体是独立逻辑,本文件只是薄壳:
-//! - `parse`:手写递归下降解析(`syn::parse::ParseStream` → IR)
-//! - `ir`:模板中间表示
-//! - `codegen`:IR → `TokenStream`
+//! 本 crate 只剩 **parser 分叉**(ADR-2 内核合并):
+//! - `parse`:手写递归下降(`syn::parse::ParseStream` → 共享模板 IR),
+//!   表面语法校验全在这里,错误带真 span;
+//! - IR 与 codegen 在 `sv_compiler::template` / `sv_compiler::generate_template`
+//!   —— 与 `.svelte` 前端共享同一份内核,表达式以带 span 的 token 直通。
 
 use proc_macro::TokenStream;
+use proc_macro2::Span;
+use quote::quote;
 
-mod codegen;
-mod ir;
 mod parse;
 mod store;
 
@@ -37,8 +38,32 @@ mod store;
 ///   绑定随块销毁自动回收。
 #[proc_macro]
 pub fn view(input: TokenStream) -> TokenStream {
-    let input = syn::parse_macro_input!(input as ir::ViewInput);
-    codegen::generate(&input).into()
+    let input = syn::parse_macro_input!(input as parse::ViewInput);
+    // 共享内核发射(表面语法已在 parse 期校验完,这里失败只可能是内部缺陷,
+    // 兜底转成宏调用点上的编译错误而不是 panic)
+    let body = match sv_compiler::generate_template(&input.nodes) {
+        Ok(ts) => ts,
+        Err(e) => {
+            return syn::Error::new(Span::call_site(), format!("view! 内部错误:{e}"))
+                .to_compile_error()
+                .into();
+        }
+    };
+    let doc = &input.doc;
+    let parent = &input.parent;
+    // 空模板时抑制 unused 警告(正常模板中两者必然被使用)
+    let silence = if input.nodes.is_empty() {
+        quote! { let _ = (&__doc, __parent); }
+    } else {
+        proc_macro2::TokenStream::new()
+    };
+    quote! {{
+        let __doc: ::sv_ui::Doc = (#doc).clone();
+        let __parent: ::sv_ui::ViewId = #parent;
+        #silence
+        #body
+    }}
+    .into()
 }
 
 /// `#[derive(Store)]`:给结构体生成**字段级信号** store `XxxStore`

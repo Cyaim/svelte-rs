@@ -63,7 +63,7 @@ let double = $derived(count * 2);
 </script>
 
 <text>Count: {count} · double = {double}</text>
-<button style="bg:#ff3e00; fg:#fff" on:click={|| count += 1}>+1</button>
+<button style="bg:#ff3e00; fg:#fff" onclick={|| count += 1}>+1</button>
 ```
 
 ## Offscreen rendering: `--png`
@@ -106,8 +106,8 @@ Output is a single machine-readable line: `READY backend=… mutate=… virtual=
 |---|---|
 | `crates/sv-reactive` | Runes reactive core: push-pull three-state dirty marking, effect ownership tree |
 | `crates/sv-ui` | Retained scene tree (the "desktop DOM") + fine-grained binding primitives |
-| `crates/sv-macro` | `view!` proc-macro template front end |
-| `crates/sv-compiler` | `.svelte` single-file-component compiler (runes source transform, Svelte template syntax) |
+| `crates/sv-macro` | `view!` proc-macro template front end (parser only; template IR and codegen live in the shared sv-compiler core) |
+| `crates/sv-compiler` | `.svelte` single-file-component compiler plus the template IR/codegen core shared by both front ends (runes source transform, Svelte template syntax) |
 | `crates/sv-shell` | winit window + CPU raster shell; optional vello/wgpu backend behind `backend-vello` |
 | `examples/*` | The five examples listed above |
 

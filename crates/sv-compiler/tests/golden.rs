@@ -82,7 +82,7 @@ fn assert_golden(name: &str, actual: &str) {
 #[test]
 fn wide_fixture_codegen_is_stable() {
     let src = std::fs::read_to_string(fixtures_dir().join("wide.svelte")).expect("读 fixture 失败");
-    let code = sv_compiler::compile_sv(&src, "wide").expect("fixture 应能编译");
+    let code = sv_compiler::compile(&src, "wide").expect("fixture 应能编译");
     // 生成物必须是合法 Rust —— 金样比对之前先过这道,免得把坏产物固化成金样
     syn::parse_file(&code).expect("生成代码应是合法 Rust");
     assert_golden("wide", &code);
@@ -127,13 +127,12 @@ fn component_fixture_codegen_is_stable() {
         },
     );
 
-    let child_code =
-        sv_compiler::compile_sv_with(&child, "child", &registry).expect("child 应编译");
+    let child_code = sv_compiler::compile_with(&child, "child", &registry).expect("child 应编译");
     syn::parse_file(&child_code).expect("child 生成代码应合法");
     assert_golden("child", &child_code);
 
     let parent_code =
-        sv_compiler::compile_sv_with(&parent, "parent", &registry).expect("parent 应编译");
+        sv_compiler::compile_with(&parent, "parent", &registry).expect("parent 应编译");
     syn::parse_file(&parent_code).expect("parent 生成代码应合法");
     assert_golden("parent", &parent_code);
 }

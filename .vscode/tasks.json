@@ -4,7 +4,7 @@
   // Problems 面板条目 + 编辑器波浪线 —— **不需要写任何 VS Code 扩展**。
   //
   // 用法:Ctrl+Shift+B(默认 build task),或 Ctrl+Shift+P → Tasks: Run Task。
-  // 映射不到的诊断会原样保留生成文件的位置并附一句 `[sv-check: …]` 说明,
+  // 映射不到的诊断会原样保留生成文件的位置并附一句 `[sv check: …]` 说明,
   // 绝不会被吞掉(所以 Problems 面板里出现 target/**/out/*.rs 的条目是**预期**
   // 行为,不是 bug —— 它在告诉你"这条错误落在编译器生成的胶水上")。
   //
@@ -19,12 +19,12 @@
       "label": "sv check (workspace)",
       "type": "shell",
       "command": "cargo",
-      "args": ["run", "-q", "-p", "sv-compiler", "--bin", "sv-check"],
+      "args": ["run", "-q", "-p", "sv-compiler", "--bin", "cargo-sv", "--", "check"],
       "group": { "kind": "build", "isDefault": true },
       "presentation": { "reveal": "silent", "panel": "dedicated", "clear": true },
       "problemMatcher": {
         "owner": "sv",
-        "source": "sv-check",
+        "source": "sv check",
         "fileLocation": ["autoDetect", "${workspaceFolder}"],
         "pattern": {
           "regexp": "^(\\S.*?):(\\d+):(\\d+):\\s+(error|warning|note|help)(?:\\[([^\\]]+)\\])?:\\s+(.*)$",
@@ -48,8 +48,9 @@
         "-p",
         "sv-compiler",
         "--bin",
-        "sv-check",
+        "cargo-sv",
         "--",
+        "check",
         "-p",
         "counter-sfc"
       ],
@@ -57,7 +58,7 @@
       "presentation": { "reveal": "silent", "panel": "dedicated", "clear": true },
       "problemMatcher": {
         "owner": "sv",
-        "source": "sv-check",
+        "source": "sv check",
         "fileLocation": ["autoDetect", "${workspaceFolder}"],
         "pattern": {
           "regexp": "^(\\S.*?):(\\d+):(\\d+):\\s+(error|warning|note|help)(?:\\[([^\\]]+)\\])?:\\s+(.*)$",

@@ -28,7 +28,7 @@ let double = $derived(count * 2);
 </script>
 
 <text>Count: {count} · doubled = {double}</text>
-<button style="bg:#ff3e00; fg:#fff" on:click={|| count += 1}>+1</button>
+<button style="bg:#ff3e00; fg:#fff" onclick={|| count += 1}>+1</button>
 {#if count > 5}
   <text fg="#ff3e00">Past five!</text>
 {/if}
@@ -108,16 +108,20 @@ frame pacing) are placeholders with planned replacements. See
 
 ## Versioning & releases
 
-Nothing is published to crates.io yet — the crate names are pending a rename
-decision (`sv` is already taken; see ADR-10 in
-[docs/DESIGN.md](docs/DESIGN.md)). Once published, the workspace ships all
-crates at the same version, in dependency order.
+Nothing is published to crates.io yet. Naming is settled (ADR-10 in
+[docs/DESIGN.md](docs/DESIGN.md): umbrella crate `svelte-rs`, sub-crates keep
+the `sv-*` prefix). Once published, the workspace ships all crates at the same
+version, in dependency order.
 
 **0.x policy: a minor bump (`0.X.0`) means breaking changes, a patch bump
 (`0.0.X`) is backwards compatible.** Every breaking change documents its
-migration in [CHANGELOG.md](CHANGELOG.md). Three breaking changes are already
-scheduled before 1.0 is even discussed: merging the two template front-ends,
-converging the `on:` event syntax, and frame-pacing semantics (ADR-6).
+migration in [CHANGELOG.md](CHANGELOG.md). All three breaking changes
+scheduled before 1.0 is even discussed have landed: the two template
+front-ends share a single compilation kernel (ADR-2 M1), the `on:` event
+directive has been removed in favor of Svelte 5's `onclick={..}` attribute
+form, and frame-pacing semantics (ADR-6) batches signal writes to the frame
+boundary. What remains before 1.0 is the first crates.io release plus a
+stabilization period.
 
 MSRV is **1.88** — set by let-chains (`if let ... && ...`), not by edition 2024 — and pinned by a CI lane.
 

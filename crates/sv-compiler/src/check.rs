@@ -26,7 +26,7 @@
 //! rustc 输出里最稳的一对,而且 `.svelte` 与生成 `.rs` 两边的换算都收敛到
 //! `sourcemap::{byte_to_line_col, line_col_to_byte}` 这一对函数里。
 //!
-//! **为什么不 feature gate**(本模块只服务 `sv-check` 二进制,却进了每个 `.svelte`
+//! **为什么不 feature gate**(本模块只服务 `sv` 二进制(`sv check` 子命令),却进了每个 `.svelte`
 //! 消费者的 build-dependency):实测(2026-07-22,增量,取 5 次稳态)
 //! `cargo build -p sv-compiler --lib` 带本模块 0.76s、去掉 0.71s,**差 ~0.05s**,
 //! 而 sv-compiler 的 build-dep 树里 syn + prettyplease 是数量级更大的项。
@@ -479,7 +479,7 @@ pub fn render(msg: &json::Value, maps: &mut Maps) -> Rendered {
                     )
                 }
                 Resolved::Degraded { kind, detail } => format!(
-                    "{file}:{line}:{col}: {level}{code}: {text}  [sv-check: {}{}]",
+                    "{file}:{line}:{col}: {level}{code}: {text}  [sv check: {}{}]",
                     degrade_note(kind),
                     detail.map(|d| format!(":{d}")).unwrap_or_default()
                 ),
@@ -634,7 +634,7 @@ pub enum Line {
 
 /// 一次 `sv check` 的累加器。
 ///
-/// 存在的理由是**可测**:`bin/sv-check.rs` 里 `continue` 一下诊断就没了,
+/// 存在的理由是**可测**:`bin/sv.rs` 里 `continue` 一下诊断就没了,
 /// 而 bin 是单测照不到的地方。所以那里只留管道,判断全在这里。
 #[derive(Default)]
 pub struct Session {
@@ -687,7 +687,7 @@ impl Session {
             )
         };
         format!(
-            "sv-check: {} 条诊断({} 条 error){unparsed},{}",
+            "sv check: {} 条诊断({} 条 error){unparsed},{}",
             self.total,
             self.errors,
             if self.errors == 0 {
