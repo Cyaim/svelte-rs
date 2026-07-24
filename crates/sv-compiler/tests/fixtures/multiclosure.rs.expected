@@ -1,0 +1,250 @@
+// 由 sv-compiler 生成,请勿手改。
+#[allow(unused_variables, unused_mut, unused_braces, unused_parens, clippy::all)]
+pub fn multiclosure(doc: &::sv_ui::Doc, parent: ::sv_ui::ViewId) {
+    let __doc: ::sv_ui::Doc = doc.clone();
+    let __parent = parent;
+    let label = String::from("hi");
+    let items = ::sv_reactive::state(vec![String::from("a")]);
+    {
+        let label = ::std::clone::Clone::clone(&label);
+        let __el1 = __doc.create_view();
+        __doc.append(__parent, __el1);
+        {
+            let __parent = __el1;
+            {
+                let label = ::std::clone::Clone::clone(&label);
+                ::sv_ui::if_block(
+                    &__doc,
+                    __parent,
+                    {
+                        let label = ::std::clone::Clone::clone(&label);
+                        move || label.is_empty()
+                    },
+                    {
+                        let label = ::std::clone::Clone::clone(&label);
+                        move |__doc, __parent| {
+                            let __doc: ::sv_ui::Doc = __doc.clone();
+                            let label = ::std::clone::Clone::clone(&label);
+                            {
+                                let label = ::std::clone::Clone::clone(&label);
+                                let __el2 = __doc.create_text("");
+                                ::sv_ui::bind_text(
+                                    &__doc,
+                                    __el2,
+                                    move || {
+                                        let mut __s = ::std::string::String::new();
+                                        __s.push_str(&(label).to_string());
+                                        __s
+                                    },
+                                );
+                                __doc.append(__parent, __el2);
+                            }
+                        }
+                    },
+                    {
+                        let label = ::std::clone::Clone::clone(&label);
+                        move |__doc, __parent| {
+                            let __doc: ::sv_ui::Doc = __doc.clone();
+                            let label = ::std::clone::Clone::clone(&label);
+                            ::sv_ui::if_block(
+                                &__doc,
+                                __parent,
+                                {
+                                    let label = ::std::clone::Clone::clone(&label);
+                                    move || label.len() > 3
+                                },
+                                {
+                                    let label = ::std::clone::Clone::clone(&label);
+                                    move |__doc, __parent| {
+                                        let __doc: ::sv_ui::Doc = __doc.clone();
+                                        let label = ::std::clone::Clone::clone(&label);
+                                        {
+                                            let label = ::std::clone::Clone::clone(&label);
+                                            let __el3 = __doc.create_text("");
+                                            ::sv_ui::bind_text(
+                                                &__doc,
+                                                __el3,
+                                                move || {
+                                                    let mut __s = ::std::string::String::new();
+                                                    __s.push_str(&(label).to_string());
+                                                    __s
+                                                },
+                                            );
+                                            __doc.append(__parent, __el3);
+                                        }
+                                    }
+                                },
+                                {
+                                    let label = ::std::clone::Clone::clone(&label);
+                                    move |__doc, __parent| {
+                                        let __doc: ::sv_ui::Doc = __doc.clone();
+                                        let label = ::std::clone::Clone::clone(&label);
+                                        {
+                                            let label = ::std::clone::Clone::clone(&label);
+                                            let __el4 = __doc.create_text("");
+                                            ::sv_ui::bind_text(
+                                                &__doc,
+                                                __el4,
+                                                move || {
+                                                    let mut __s = ::std::string::String::new();
+                                                    __s.push_str(&(label).to_string());
+                                                    __s
+                                                },
+                                            );
+                                            __doc.append(__parent, __el4);
+                                        }
+                                    }
+                                },
+                            );
+                        }
+                    },
+                );
+            }
+            {
+                let label = ::std::clone::Clone::clone(&label);
+                ::sv_ui::tasks::await_block_result(
+                    &__doc,
+                    __parent,
+                    {
+                        let label = ::std::clone::Clone::clone(&label);
+                        move || load(label.clone())
+                    },
+                    {
+                        let label = ::std::clone::Clone::clone(&label);
+                        move |__doc, __parent| {
+                            let __doc: ::sv_ui::Doc = __doc.clone();
+                            let label = ::std::clone::Clone::clone(&label);
+                            {
+                                let label = ::std::clone::Clone::clone(&label);
+                                let __el5 = __doc.create_text("");
+                                ::sv_ui::bind_text(
+                                    &__doc,
+                                    __el5,
+                                    move || {
+                                        let mut __s = ::std::string::String::new();
+                                        __s.push_str(&(label).to_string());
+                                        __s
+                                    },
+                                );
+                                __doc.append(__parent, __el5);
+                            }
+                        }
+                    },
+                    {
+                        let label = ::std::clone::Clone::clone(&label);
+                        move |__doc, __parent, __value| {
+                            let __doc: ::sv_ui::Doc = __doc.clone();
+                            let label = ::std::clone::Clone::clone(&label);
+                            let _v = ::std::clone::Clone::clone(__value);
+                            {
+                                let label = ::std::clone::Clone::clone(&label);
+                                let __el6 = __doc.create_text("");
+                                ::sv_ui::bind_text(
+                                    &__doc,
+                                    __el6,
+                                    move || {
+                                        let mut __s = ::std::string::String::new();
+                                        __s.push_str(&(label).to_string());
+                                        __s
+                                    },
+                                );
+                                __doc.append(__parent, __el6);
+                            }
+                        }
+                    },
+                    {
+                        let label = ::std::clone::Clone::clone(&label);
+                        move |__doc, __parent, __value| {
+                            let __doc: ::sv_ui::Doc = __doc.clone();
+                            let label = ::std::clone::Clone::clone(&label);
+                            let _e = ::std::clone::Clone::clone(__value);
+                            {
+                                let label = ::std::clone::Clone::clone(&label);
+                                let __el7 = __doc.create_text("");
+                                ::sv_ui::bind_text(
+                                    &__doc,
+                                    __el7,
+                                    move || {
+                                        let mut __s = ::std::string::String::new();
+                                        __s.push_str(&(label).to_string());
+                                        __s
+                                    },
+                                );
+                                __doc.append(__parent, __el7);
+                            }
+                        }
+                    },
+                );
+            }
+            {
+                let label = ::std::clone::Clone::clone(&label);
+                ::sv_ui::key_block(
+                    &__doc,
+                    __parent,
+                    {
+                        let label = ::std::clone::Clone::clone(&label);
+                        move || ::std::clone::Clone::clone(&(label.len()))
+                    },
+                    {
+                        let label = ::std::clone::Clone::clone(&label);
+                        move |__doc, __parent| {
+                            let __doc: ::sv_ui::Doc = __doc.clone();
+                            let label = ::std::clone::Clone::clone(&label);
+                            {
+                                let label = ::std::clone::Clone::clone(&label);
+                                let __el8 = __doc.create_text("");
+                                ::sv_ui::bind_text(
+                                    &__doc,
+                                    __el8,
+                                    move || {
+                                        let mut __s = ::std::string::String::new();
+                                        __s.push_str(&(label).to_string());
+                                        __s
+                                    },
+                                );
+                                __doc.append(__parent, __el8);
+                            }
+                        }
+                    },
+                );
+            }
+            {
+                let label = ::std::clone::Clone::clone(&label);
+                ::sv_ui::each_block(
+                    &__doc,
+                    __parent,
+                    {
+                        let label = ::std::clone::Clone::clone(&label);
+                        move || ::std::clone::Clone::clone(&(make(label.clone())))
+                    },
+                    {
+                        let label = ::std::clone::Clone::clone(&label);
+                        move |__doc, __parent, __item, __index| {
+                            let __doc: ::sv_ui::Doc = __doc.clone();
+                            let label = ::std::clone::Clone::clone(&label);
+                            let it = ::std::clone::Clone::clone(__item);
+                            let _ = __index;
+                            {
+                                let it = ::std::clone::Clone::clone(&it);
+                                let label = ::std::clone::Clone::clone(&label);
+                                let __el9 = __doc.create_text("");
+                                ::sv_ui::bind_text(
+                                    &__doc,
+                                    __el9,
+                                    move || {
+                                        let mut __s = ::std::string::String::new();
+                                        __s.push_str(&(it).to_string());
+                                        __s.push_str(": ");
+                                        __s.push_str(&(label).to_string());
+                                        __s
+                                    },
+                                );
+                                __doc.append(__parent, __el9);
+                            }
+                        }
+                    },
+                );
+            }
+        }
+    }
+}

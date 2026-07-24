@@ -416,8 +416,11 @@ impl Cg<'_> {
                 let key_expr = self.value_closure_expr(key, scope)?;
                 let children_ts = self.emit_nodes(children, scope)?;
                 let build = self.rebuild_closure(children_ts, scope);
+                // key 驱动闭包与 build 是 key_block 的同级 move 闭包:同引一个
+                // plain 变量时也要各自捕获份(否则 key 先 move、build 借用已 move)
+                let key_cl = self.with_captured_plain(quote! { move || #key_expr }, scope);
                 Ok(quote! {
-                    ::sv_ui::key_block(&__doc, __parent, move || #key_expr, #build);
+                    ::sv_ui::key_block(&__doc, __parent, #key_cl, #build);
                 })
             }
             // {@render name(args)}:调用 snippet 闭包。
@@ -495,6 +498,9 @@ impl Cg<'_> {
                 ..
             } => {
                 let fut_expr = self.expr(fut, scope, false)?;
+                // future 驱动闭包与 pending/then/catch 是同级 move 闭包:同引一个
+                // plain 变量时也要各自捕获份
+                let fut_cl = self.with_captured_plain(quote! { move || #fut_expr }, scope);
                 let pending_ts = self.emit_nodes(pending, scope)?;
                 let pending_cl = self.rebuild_closure(pending_ts, scope);
 
@@ -514,34 +520,40 @@ impl Cg<'_> {
                 let (then_scope, then_bind) = bind_arm(then_pat, scope);
                 let then_ts = self.emit_nodes(then_children, &then_scope)?;
                 let then_pre = preclones(&then_ts, scope);
-                let then_cl = quote! {
-                    move |__doc, __parent, __value| {
-                        let __doc: ::sv_ui::Doc = __doc.clone();
-                        #then_pre
-                        #then_bind
-                        #then_ts
-                    }
-                };
+                let then_cl = self.with_captured_plain(
+                    quote! {
+                        move |__doc, __parent, __value| {
+                            let __doc: ::sv_ui::Doc = __doc.clone();
+                            #then_pre
+                            #then_bind
+                            #then_ts
+                        }
+                    },
+                    scope,
+                );
                 if catch_children.is_empty() && catch_pat.is_none() {
                     Ok(quote! {
                         ::sv_ui::tasks::await_block(&__doc, __parent,
-                            move || #fut_expr, #pending_cl, #then_cl);
+                            #fut_cl, #pending_cl, #then_cl);
                     })
                 } else {
                     let (catch_scope, catch_bind) = bind_arm(catch_pat, scope);
                     let catch_ts = self.emit_nodes(catch_children, &catch_scope)?;
                     let catch_pre = preclones(&catch_ts, scope);
-                    let catch_cl = quote! {
-                        move |__doc, __parent, __value| {
-                            let __doc: ::sv_ui::Doc = __doc.clone();
-                            #catch_pre
-                            #catch_bind
-                            #catch_ts
-                        }
-                    };
+                    let catch_cl = self.with_captured_plain(
+                        quote! {
+                            move |__doc, __parent, __value| {
+                                let __doc: ::sv_ui::Doc = __doc.clone();
+                                #catch_pre
+                                #catch_bind
+                                #catch_ts
+                            }
+                        },
+                        scope,
+                    );
                     Ok(quote! {
                         ::sv_ui::tasks::await_block_result(&__doc, __parent,
-                            move || #fut_expr, #pending_cl, #then_cl, #catch_cl);
+                            #fut_cl, #pending_cl, #then_cl, #catch_cl);
                     })
                 }
             }
@@ -1710,13 +1722,17 @@ impl Cg<'_> {
             #children_ts
         };
         let build = self.rebuild_closure(body, scope);
+        // open/anchor 驱动闭包与 build 是 overlay_block 的同级 move 闭包:
+        // open 引 plain 变量时也要捕获份(anchor 只引 __anchor_el 局部,恒空捕获)
+        let open_cl = self.with_captured_plain(quote! { move || #open }, scope);
+        let anchor_cl = self.with_captured_plain(quote! { move || #anchor_ts }, scope);
         Ok(quote! {
             {
                 let __anchor_el = __parent;
                 ::sv_ui::overlay_block(
                     &__doc,
-                    move || #open,
-                    move || #anchor_ts,
+                    #open_cl,
+                    #anchor_cl,
                     ::sv_ui::OverlayOpts {
                         layer: ::sv_ui::OverlayLayer::Popup,
                         modal: #modal,
@@ -1745,9 +1761,13 @@ impl Cg<'_> {
         };
         let then_closure = self.rebuild_closure(then_ts, scope);
         let else_closure = self.rebuild_closure(else_ts, scope);
+        // cond 驱动闭包与 then/else 是同级 move 闭包:cond 引 plain 变量时
+        // (如 `{#if error.is_empty()}…{:else}{error}{/if}`)也要各自捕获份,
+        // 否则 cond 先 move、then/else 的捕获壳借用已 move 的值 → E0382
+        let cond_cl = self.with_captured_plain(quote! { move || #cond }, scope);
         Ok(emit::if_block(
             &parent_ident(),
-            cond.to_token_stream(),
+            cond_cl,
             then_closure,
             else_closure,
         ))
@@ -1768,6 +1788,10 @@ impl Cg<'_> {
             offset,
         } = parts;
         let list_expr = self.value_closure_expr(list, scope)?;
+        // list 闭包与 row 闭包是同一 each_block 的同级 move 闭包;若 list 表达式
+        // 也引用某个非 Copy plain 变量(如 `{#each mk(x) as it}` 里的 x),它与
+        // row 体会争抢 x 的所有权。给 list 闭包补捕获份(空引用时原样,产物不变)
+        let list_cl = self.with_captured_plain(quote! { move || #list_expr }, scope);
         let pat_offset = pat_src.offset();
         let pat = match pat_src {
             ExprSrc::Text { src, offset } => {
@@ -1830,18 +1854,24 @@ impl Cg<'_> {
             row_scope.locals.insert(name);
             let children_ts = self.emit_nodes(children, &row_scope)?;
             let outer_pre = preclones(&children_ts, scope);
-            Ok(quote! {
-                ::sv_ui::each_block_keyed(
-                    &__doc, __parent,
-                    move || #list_expr,
-                    // key 闭包拿的仍是 &T(裸值),绑定名在这里不是反应式
-                    |__item| { let #pat = ::std::clone::Clone::clone(__item); #key_expr },
+            let row_cl = self.with_captured_plain(
+                quote! {
                     move |__doc, __parent, __item| {
                         let __doc: ::sv_ui::Doc = __doc.clone();
                         #outer_pre
                         let #bind_id = __item;
                         #children_ts
-                    },
+                    }
+                },
+                scope,
+            );
+            Ok(quote! {
+                ::sv_ui::each_block_keyed(
+                    &__doc, __parent,
+                    #list_cl,
+                    // key 闭包拿的仍是 &T(裸值),绑定名在这里不是反应式
+                    |__item| { let #pat = ::std::clone::Clone::clone(__item); #key_expr },
+                    #row_cl,
                 );
             })
         } else {
@@ -1887,28 +1917,32 @@ impl Cg<'_> {
                 ));
             }
             let children_ts = self.emit_nodes(children, &inner_scope)?;
-            // 行闭包被逐行反复调用:开头对外层普通变量做每次调用的预克隆
+            // 行闭包被逐行反复调用:开头对外层普通变量做每次调用的预克隆;
+            // 再补捕获份(它与 list 闭包是同一 each_block 的同级 move 闭包)
             let outer_pre = preclones(&children_ts, scope);
-            let row = quote! {
-                move |__doc, __parent, __item, __index| {
-                    let __doc: ::sv_ui::Doc = __doc.clone();
-                    #outer_pre
-                    let #pat = ::std::clone::Clone::clone(__item);
-                    #idx_binding
-                    #children_ts
-                }
-            };
+            let row = self.with_captured_plain(
+                quote! {
+                    move |__doc, __parent, __item, __index| {
+                        let __doc: ::sv_ui::Doc = __doc.clone();
+                        #outer_pre
+                        let #pat = ::std::clone::Clone::clone(__item);
+                        #idx_binding
+                        #children_ts
+                    }
+                },
+                scope,
+            );
+            // 内联 each_block(不走 emit::each_block)以便用捕获过的 list_cl 作
+            // list 闭包;list/row 均无 plain 引用时与 emit::each_block 逐字节一致
             if else_children.is_empty() {
-                Ok(emit::each_block(
-                    &parent_ident(),
-                    list_expr.to_token_stream(),
-                    row,
-                ))
+                Ok(quote! {
+                    ::sv_ui::each_block(&__doc, __parent, #list_cl, #row);
+                })
             } else {
                 let empty_ts = self.emit_nodes(else_children, scope)?;
                 let empty = self.rebuild_closure(empty_ts, scope);
                 Ok(quote! {
-                    ::sv_ui::each_block_else(&__doc, __parent, move || #list_expr, #row, #empty);
+                    ::sv_ui::each_block_else(&__doc, __parent, #list_cl, #row, #empty);
                 })
             }
         }
@@ -1919,7 +1953,32 @@ impl Cg<'_> {
     fn rebuild_closure(&self, body: TokenStream, scope: &Scope) -> TokenStream {
         // 闭包协议在共享词汇表里;`.svelte` 独有的普通变量预克隆作为 prelude 注入
         let pre = preclones(&body, scope);
-        emit::rebuild_closure(body, pre)
+        let closure = emit::rebuild_closure(body, pre);
+        self.with_captured_plain(closure, scope)
+    }
+
+    /// 给一个 move 闭包补一份**捕获份**预克隆,放在闭包**外**:
+    /// `{ let x = Clone::clone(&x); <move 闭包> }`。
+    ///
+    /// 为什么必须在闭包外:`move` 闭包对它体内用到的 plain 变量是**按值捕获**,
+    /// 于是同一 `if_block`/`await_block`/`each_block` 的多个同级 move 闭包
+    /// (then + else、pending + then + catch、list + row)会争夺同一个非 Copy
+    /// plain 变量的所有权 —— 第二个闭包拿到已 move 的值,编译 E0382。给每个
+    /// 闭包一份**外层捕获份**(只借用一次原变量),各自 move 走自己那份即可。
+    /// 闭包**体内**原有的每次调用预克隆(prelude)不动,仍负责 Fn 反复调用时
+    /// 的按值供给。这正是 `@render`/`{#snippet}` 已在用的形状(pre_capture +
+    /// pre_call),这里把 if/each/await/key/overlay 统一过来。
+    ///
+    /// `preclones` 从**已生成的闭包 token**里找 plain 变量(与闭包体一致);
+    /// 无引用时原样返回,保 `.svelte` 产物逐字节不变、view! 宏路径(plain 恒空)
+    /// 纯 no-op。
+    fn with_captured_plain(&self, closure: TokenStream, scope: &Scope) -> TokenStream {
+        let capture = preclones(&closure, scope);
+        if capture.is_empty() {
+            closure
+        } else {
+            quote! { { #capture #closure } }
+        }
     }
 }
 

@@ -110,15 +110,19 @@ pub fn rebuild_closure(body: TokenStream, prelude: TokenStream) -> TokenStream {
     }
 }
 
-/// `::sv_ui::if_block(&__doc, #parent, move || #cond, #then_c, #else_c);`
+/// `::sv_ui::if_block(&__doc, #parent, #cond_closure, #then_c, #else_c);`
+///
+/// `cond_closure` 是**已建好**的 `move || 条件` 闭包(由前端负责,因为它可能
+/// 需要外层捕获份 —— cond 与 then/else 是同级 move 闭包,同引一个非 Copy
+/// plain 变量时各需一份所有权,见 codegen 的 `with_captured_plain`)。
 pub fn if_block(
     parent: &Ident,
-    cond: TokenStream,
+    cond_closure: TokenStream,
     then_closure: TokenStream,
     else_closure: TokenStream,
 ) -> TokenStream {
     quote! {
-        ::sv_ui::if_block(&__doc, #parent, move || #cond, #then_closure, #else_closure);
+        ::sv_ui::if_block(&__doc, #parent, #cond_closure, #then_closure, #else_closure);
     }
 }
 

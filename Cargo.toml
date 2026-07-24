@@ -23,6 +23,7 @@ members = [
     "examples/overlay-demo",
     "examples/vap-gift",
     "examples/arco-gallery",
+    "examples/multiclosure-check",
 ]
 
 [workspace.package]

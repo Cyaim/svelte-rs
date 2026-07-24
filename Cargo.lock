@@ -1651,6 +1651,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "multiclosure-check"
+version = "0.0.1"
+dependencies = [
+ "sv-compiler",
+ "sv-reactive",
+ "sv-ui",
+]
+
+[[package]]
 name = "naga"
 version = "29.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
