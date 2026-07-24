@@ -1,7 +1,29 @@
 # 多窗体(multi-window)落地规划
 
-**状态**:核心卖点已证明并有回归护栏;窗口管理重构已完整规格化,待专项实现。
+**状态**:P1(结构拆分)+ P2(frame_scheduler 广播)+ `run_multi`(启动即开 N 窗)
+**已实现**(编译通过 + 110 项 sv-shell 测试全绿 + 离屏渲染通过);运行期动态开窗
+(WindowHandle)与真窗口行为的现场手验待有显示器的环境。
 **目标**:首发能开 N 个真窗口、各自一棵 UI 树,共享同一响应式运行时;跨窗联动零样板。
+
+## 实现进度(2026-07-24)
+
+- ✅ **P1 结构拆分**:`App` 拆成「事件循环级 `App`(backend/epoch/show_fps/proxy/
+  windows/pending)+ 每窗 `Pane`(window/presenter/access/doc/layout/交互态/ime/
+  damage/a11y/fps)」。7 个每窗辅助方法(paint/update_hover/sync_ime/click/
+  push_access_tree/route_line_move/click_streak)迁入 `impl Pane`,4 个
+  `ApplicationHandler` 方法(resumed/user_event/about_to_wait/window_event)成为
+  `windows: HashMap<WindowId, Pane>` 的路由。**行为保持**:110 项 sv-shell 测试全绿。
+- ✅ **P2 frame_scheduler 广播**:`set_frame_scheduler` 从「绑单窗 `request_redraw`」
+  改为「`proxy.send_event(RedrawAll)` → 请求所有窗重绘」;各窗 `last_frame_key` 静止帧
+  短路吸收开销。`Doc::set_on_mutate` 仍 per-Doc 精确重绘本窗(P4 精度优化已天然具备)。
+- ✅ **`run_multi(Vec<(String, BuildFn)>)`**:启动即开 N 窗;`examples/multi-window`
+  演示两窗共享一个计数器(`--png` 离屏渲一帧,窗口化需显示器)。关最后一个窗才退出。
+- ⏳ **运行期动态开窗**(`WindowHandle::open`):`BuildFn` 是 `!Send`,不能走
+  `EventLoopProxy`;需 thread_local BuildFn 队列 + 无载荷 `OpenWindow` 唤醒。首发不必需
+  (`run_multi` 已够),留作后续。
+- ⚠️ **现场手验待显示器**:P1/P2 是**按构造保持行为**的重构(逻辑逐段搬迁,非改写),
+  编译 + 全测 + 离屏渲染证明了核心逻辑;但「真开两个窗、点一窗按钮看另一窗跟随」这类
+  **窗口化行为**在 headless 环境验不了(`--png` 不走事件循环),须有显示器时手验。
 
 ## 0. 一句话结论
 

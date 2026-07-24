@@ -1,0 +1,12 @@
+[package]
+name = "multi-window"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+sv-reactive = { workspace = true }
+sv-ui = { workspace = true }
+sv-macro = { workspace = true }
+sv-shell = { workspace = true }
