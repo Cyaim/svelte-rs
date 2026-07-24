@@ -816,9 +816,12 @@ impl Cg<'_> {
                 ts.extend(quote! { __doc.update_style(#el, |s| { #style_setters }); });
             }
             for setter in &style_directives {
-                ts.extend(quote! {
+                // move |s| 按值捕获 setter 里的 plain 变量;同级多个 style:(或与
+                // value/aria/checked 争同一 plain)会 E0382,补外层捕获份化解
+                let call = quote! {
                     ::sv_ui::bind_style_patch(&__doc, #el, move |s| { #setter });
-                });
+                };
+                ts.extend(self.with_captured_plain(call, scope));
             }
         } else {
             // 条件类 / :hover:该元素样式整体交给一个响应式重算闭包
@@ -977,7 +980,10 @@ impl Cg<'_> {
                 "onclick" => match &attr.value {
                     AttrValue::Expr(e) => {
                         let handler = self.expr(e, scope, true)?;
-                        ts.extend(emit::on_click(&el, handler.to_token_stream()));
+                        // 存储型 move 处理器按值捕获 plain;与同级 value/aria 等
+                        // 争同一 plain 会 E0382(且顺序相关),补捕获份消除
+                        let call = emit::on_click(&el, handler.to_token_stream());
+                        ts.extend(self.with_captured_plain(call, scope));
                     }
                     AttrValue::Str { .. } => {
                         return Err(CompileError::at_offset(
@@ -1013,7 +1019,8 @@ impl Cg<'_> {
                         } else {
                             quote! { set_on_pointer_leave }
                         };
-                        ts.extend(quote! { __doc.#setter(#el, #handler); });
+                        let call = quote! { __doc.#setter(#el, #handler); };
+                        ts.extend(self.with_captured_plain(call, scope));
                     }
                     AttrValue::Str { .. } => {
                         return Err(CompileError::at_offset(
@@ -1029,13 +1036,21 @@ impl Cg<'_> {
                         unreachable!()
                     };
                     let expr = self.expr(e, scope, true)?;
-                    ts.extend(quote! {
+                    // attach 闭包被 self.expr(.., true) 加了 `move`,会在 FnMut
+                    // effect 体内按值吞 plain(每次调用 move-out → E0507)。
+                    // 故 effect 体内先做**每次调用**预克隆(pre_call),再让
+                    // move attach 闭包吞那份克隆;外层 with_captured_plain 再补
+                    // **捕获份**(pre_capture),化解同级多闭包争用(E0382)。
+                    let call = quote! { (#expr)(&__a_doc, __a_el); };
+                    let pre = preclones(&call, scope);
+                    let block = quote! {
                         {
                             let __a_doc = __doc.clone();
                             let __a_el = #el;
-                            ::sv_reactive::effect(move || { (#expr)(&__a_doc, __a_el); });
+                            ::sv_reactive::effect(move || { #pre #call });
                         }
-                    });
+                    };
+                    ts.extend(self.with_captured_plain(block, scope));
                 }
                 // aria-label:无障碍名称覆盖(调研 24 §4.1;任意元素可用)
                 "aria-label" => match &attr.value {
@@ -1044,7 +1059,10 @@ impl Cg<'_> {
                     }
                     AttrValue::Expr(e) => {
                         let expr = self.expr(e, scope, false)?;
-                        ts.extend(emit::aria_label(&el, expr.to_token_stream(), true));
+                        // 反应式 aria effect 按值捕获 plain;与同级 value/其它
+                        // aria 争同一 plain 会 E0382,补外层捕获份
+                        let block = emit::aria_label(&el, expr.to_token_stream(), true);
+                        ts.extend(self.with_captured_plain(block, scope));
                     }
                 },
                 // <textarea> 专属:可见行数(布局高 = rows × 行高)
@@ -1108,13 +1126,16 @@ impl Cg<'_> {
                         ));
                     };
                     let expr = self.expr(e, scope, false)?;
-                    ts.extend(quote! {
+                    // value effect 按值捕获 plain;与同级 aria/style: 争同一 plain
+                    // 会 E0382,补外层捕获份
+                    let block = quote! {
                         {
                             let __v_doc = __doc.clone();
                             let __v_el = #el;
                             ::sv_reactive::effect(move || { __v_doc.set_input_value(__v_el, &(#expr)); });
                         }
-                    });
+                    };
+                    ts.extend(self.with_captured_plain(block, scope));
                 }
                 "bind:value" => {
                     if !tag.is_text_input() {
@@ -1150,11 +1171,13 @@ impl Cg<'_> {
                         ));
                     };
                     let handler = self.expr(e, scope, true)?.to_token_stream();
-                    ts.extend(if attr.name == "oninput" {
+                    let call = if attr.name == "oninput" {
                         emit::on_input(&el, handler)
                     } else {
                         emit::on_submit(&el, handler)
-                    });
+                    };
+                    // value={label} oninput={…label…} 同元素共享 plain → 补捕获份
+                    ts.extend(self.with_captured_plain(call, scope));
                 }
                 // onscroll:滚动偏移变化回调(签名 Fn(f32, f32),新 (x, y))
                 "onscroll" => {
@@ -1166,7 +1189,8 @@ impl Cg<'_> {
                         ));
                     };
                     let handler = self.expr(e, scope, true)?;
-                    ts.extend(emit::on_scroll(&el, handler.to_token_stream()));
+                    let call = emit::on_scroll(&el, handler.to_token_stream());
+                    ts.extend(self.with_captured_plain(call, scope));
                 }
                 // bind:scrolly:Signal<f32> ↔ 纵向滚动偏移双向桥(调研 22)。
                 // 延后到事件循环末尾发射:桥会链式保留既有 on_scroll,
@@ -1219,13 +1243,16 @@ impl Cg<'_> {
                         ));
                     };
                     let expr = self.expr(e, scope, false)?;
-                    ts.extend(quote! {
+                    // checked effect 按值捕获 plain;与同级 aria 争同一 plain
+                    // 会 E0382,补外层捕获份
+                    let block = quote! {
                         {
                             let __c_doc = __doc.clone();
                             let __c_el = #el;
                             ::sv_reactive::effect(move || { __c_doc.set_checked(__c_el, #expr); });
                         }
-                    });
+                    };
+                    ts.extend(self.with_captured_plain(block, scope));
                 }
                 name if name.starts_with("bind:") => {
                     return Err(CompileError::at_offset(

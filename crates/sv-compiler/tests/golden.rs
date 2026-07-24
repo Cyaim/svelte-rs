@@ -89,12 +89,15 @@ fn wide_fixture_codegen_is_stable() {
 }
 
 /// 多闭包捕获面:同一非 Copy plain 变量既进**引导闭包**(if 条件 / await future /
-/// key)又进**分支/body/each-list** —— 每个同级 move 闭包各得一份**外层**捕获份
-/// (`with_captured_plain`),避免争夺所有权(E0382)。修复前这份 fixture 生成的代码
-/// 编不过。**注意 golden 只 syn::parse_file(语法),不做借用检查**——**块级** E0382
-/// 的真实编译级守卫是 `examples/multiclosure-check`(build.rs 真编生成代码,回退即翻红)。
-/// (元素属性层的同类 E0382 —— 同元素多个属性 move 闭包共享 plain —— 是独立存量项,
-/// 见 docs/plans/open-issues.md,本 fixture 与 multiclosure-check 均不覆盖。)
+/// key)又进**分支/body/each-list**,还进**元素属性层**(value / aria-label /
+/// checked / style: / @attach 的 effect,以及 onclick / oninput / onscroll /
+/// onpointer 等存储型 move 处理器)—— 每个同级 move 闭包各得一份**外层**捕获份
+/// (`with_captured_plain`),避免争夺所有权(E0382,处理器还消除顺序依赖);
+/// @attach 的 move 闭包在 FnMut effect 里按值吞 plain,额外补一份**每次调用**
+/// 预克隆(pre_call,防 E0507)。
+/// 修复前这份 fixture 生成的代码编不过。**注意 golden 只 syn::parse_file(语法),
+/// 不做借用检查**——真实编译级守卫是 `examples/multiclosure-check`(build.rs 真编
+/// 生成代码,块级或元素级回退即翻红)。
 #[test]
 fn multiclosure_captures_are_per_branch() {
     let src = std::fs::read_to_string(fixtures_dir().join("multiclosure.svelte"))
@@ -102,15 +105,16 @@ fn multiclosure_captures_are_per_branch() {
     let code = sv_compiler::compile(&src, "multiclosure").expect("fixture 应能编译");
     syn::parse_file(&code).expect("生成代码应是合法 Rust");
     // 结构不变量(与逐字节金样互补,钉死"每个同级 move 闭包各有捕获份"):
-    // if 条件 + 三臂、await future + pending/then/catch、key 驱动 + body、
-    // each list + row —— 共十余个引 label 的 move 闭包,修复后每个外层都有一份
-    // `let label = Clone::clone(&label)` 捕获份(修复前只有节点级 1 份共享)。
+    // 块级 —— if 条件 + 三臂、await future + pending/then/catch、key 驱动 + body、
+    // each list + row;元素级 —— input 的 value/aria/style:/oninput、checkbox 的
+    // checked/aria、view 的 aria/onclick/@attach。修复后每个引 label 的外层都有一份
+    // `let label = Clone::clone(&label)` 捕获份(修复前块级共享、元素级根本编不过)。
     let captures = code
         .matches("let label = ::std::clone::Clone::clone(&label)")
         .count();
     assert!(
-        captures >= 12,
-        "每个引 label 的同级闭包(含 cond/fut/key 驱动)都应各有捕获份(≥12),实得 {captures};\n{code}"
+        captures >= 20,
+        "每个引 label 的同级闭包(含块级 cond/fut/key 驱动 + 元素级 value/aria/checked/style:/@attach)都应各有捕获份(≥20),实得 {captures};\n{code}"
     );
     assert_golden("multiclosure", &code);
 }
