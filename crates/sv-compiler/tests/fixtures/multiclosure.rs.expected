@@ -4,7 +4,6 @@ pub fn multiclosure(doc: &::sv_ui::Doc, parent: ::sv_ui::ViewId) {
     let __doc: ::sv_ui::Doc = doc.clone();
     let __parent = parent;
     let label = String::from("hi");
-    let count = ::sv_reactive::state(0i32);
     let items = ::sv_reactive::state(vec![String::from("a")]);
     {
         let label = ::std::clone::Clone::clone(&label);
@@ -17,7 +16,10 @@ pub fn multiclosure(doc: &::sv_ui::Doc, parent: ::sv_ui::ViewId) {
                 ::sv_ui::if_block(
                     &__doc,
                     __parent,
-                    move || count.get() > 2,
+                    {
+                        let label = ::std::clone::Clone::clone(&label);
+                        move || label.is_empty()
+                    },
                     {
                         let label = ::std::clone::Clone::clone(&label);
                         move |__doc, __parent| {
@@ -47,7 +49,10 @@ pub fn multiclosure(doc: &::sv_ui::Doc, parent: ::sv_ui::ViewId) {
                             ::sv_ui::if_block(
                                 &__doc,
                                 __parent,
-                                move || count.get() > 0,
+                                {
+                                    let label = ::std::clone::Clone::clone(&label);
+                                    move || label.len() > 3
+                                },
                                 {
                                     let label = ::std::clone::Clone::clone(&label);
                                     move |__doc, __parent| {
@@ -100,7 +105,10 @@ pub fn multiclosure(doc: &::sv_ui::Doc, parent: ::sv_ui::ViewId) {
                 ::sv_ui::tasks::await_block_result(
                     &__doc,
                     __parent,
-                    move || ready(),
+                    {
+                        let label = ::std::clone::Clone::clone(&label);
+                        move || load(label.clone())
+                    },
                     {
                         let label = ::std::clone::Clone::clone(&label);
                         move |__doc, __parent| {
@@ -170,10 +178,45 @@ pub fn multiclosure(doc: &::sv_ui::Doc, parent: ::sv_ui::ViewId) {
             }
             {
                 let label = ::std::clone::Clone::clone(&label);
+                ::sv_ui::key_block(
+                    &__doc,
+                    __parent,
+                    {
+                        let label = ::std::clone::Clone::clone(&label);
+                        move || ::std::clone::Clone::clone(&(label.len()))
+                    },
+                    {
+                        let label = ::std::clone::Clone::clone(&label);
+                        move |__doc, __parent| {
+                            let __doc: ::sv_ui::Doc = __doc.clone();
+                            let label = ::std::clone::Clone::clone(&label);
+                            {
+                                let label = ::std::clone::Clone::clone(&label);
+                                let __el8 = __doc.create_text("");
+                                ::sv_ui::bind_text(
+                                    &__doc,
+                                    __el8,
+                                    move || {
+                                        let mut __s = ::std::string::String::new();
+                                        __s.push_str(&(label).to_string());
+                                        __s
+                                    },
+                                );
+                                __doc.append(__parent, __el8);
+                            }
+                        }
+                    },
+                );
+            }
+            {
+                let label = ::std::clone::Clone::clone(&label);
                 ::sv_ui::each_block(
                     &__doc,
                     __parent,
-                    move || items.get(),
+                    {
+                        let label = ::std::clone::Clone::clone(&label);
+                        move || ::std::clone::Clone::clone(&(make(label.clone())))
+                    },
                     {
                         let label = ::std::clone::Clone::clone(&label);
                         move |__doc, __parent, __item, __index| {
@@ -184,10 +227,10 @@ pub fn multiclosure(doc: &::sv_ui::Doc, parent: ::sv_ui::ViewId) {
                             {
                                 let it = ::std::clone::Clone::clone(&it);
                                 let label = ::std::clone::Clone::clone(&label);
-                                let __el8 = __doc.create_text("");
+                                let __el9 = __doc.create_text("");
                                 ::sv_ui::bind_text(
                                     &__doc,
-                                    __el8,
+                                    __el9,
                                     move || {
                                         let mut __s = ::std::string::String::new();
                                         __s.push_str(&(it).to_string());
@@ -196,7 +239,7 @@ pub fn multiclosure(doc: &::sv_ui::Doc, parent: ::sv_ui::ViewId) {
                                         __s
                                     },
                                 );
-                                __doc.append(__parent, __el8);
+                                __doc.append(__parent, __el9);
                             }
                         }
                     },

@@ -416,8 +416,11 @@ impl Cg<'_> {
                 let key_expr = self.value_closure_expr(key, scope)?;
                 let children_ts = self.emit_nodes(children, scope)?;
                 let build = self.rebuild_closure(children_ts, scope);
+                // key 驱动闭包与 build 是 key_block 的同级 move 闭包:同引一个
+                // plain 变量时也要各自捕获份(否则 key 先 move、build 借用已 move)
+                let key_cl = self.with_captured_plain(quote! { move || #key_expr }, scope);
                 Ok(quote! {
-                    ::sv_ui::key_block(&__doc, __parent, move || #key_expr, #build);
+                    ::sv_ui::key_block(&__doc, __parent, #key_cl, #build);
                 })
             }
             // {@render name(args)}:调用 snippet 闭包。
@@ -495,6 +498,9 @@ impl Cg<'_> {
                 ..
             } => {
                 let fut_expr = self.expr(fut, scope, false)?;
+                // future 驱动闭包与 pending/then/catch 是同级 move 闭包:同引一个
+                // plain 变量时也要各自捕获份
+                let fut_cl = self.with_captured_plain(quote! { move || #fut_expr }, scope);
                 let pending_ts = self.emit_nodes(pending, scope)?;
                 let pending_cl = self.rebuild_closure(pending_ts, scope);
 
@@ -528,7 +534,7 @@ impl Cg<'_> {
                 if catch_children.is_empty() && catch_pat.is_none() {
                     Ok(quote! {
                         ::sv_ui::tasks::await_block(&__doc, __parent,
-                            move || #fut_expr, #pending_cl, #then_cl);
+                            #fut_cl, #pending_cl, #then_cl);
                     })
                 } else {
                     let (catch_scope, catch_bind) = bind_arm(catch_pat, scope);
@@ -547,7 +553,7 @@ impl Cg<'_> {
                     );
                     Ok(quote! {
                         ::sv_ui::tasks::await_block_result(&__doc, __parent,
-                            move || #fut_expr, #pending_cl, #then_cl, #catch_cl);
+                            #fut_cl, #pending_cl, #then_cl, #catch_cl);
                     })
                 }
             }
@@ -1716,13 +1722,17 @@ impl Cg<'_> {
             #children_ts
         };
         let build = self.rebuild_closure(body, scope);
+        // open/anchor 驱动闭包与 build 是 overlay_block 的同级 move 闭包:
+        // open 引 plain 变量时也要捕获份(anchor 只引 __anchor_el 局部,恒空捕获)
+        let open_cl = self.with_captured_plain(quote! { move || #open }, scope);
+        let anchor_cl = self.with_captured_plain(quote! { move || #anchor_ts }, scope);
         Ok(quote! {
             {
                 let __anchor_el = __parent;
                 ::sv_ui::overlay_block(
                     &__doc,
-                    move || #open,
-                    move || #anchor_ts,
+                    #open_cl,
+                    #anchor_cl,
                     ::sv_ui::OverlayOpts {
                         layer: ::sv_ui::OverlayLayer::Popup,
                         modal: #modal,
@@ -1751,9 +1761,13 @@ impl Cg<'_> {
         };
         let then_closure = self.rebuild_closure(then_ts, scope);
         let else_closure = self.rebuild_closure(else_ts, scope);
+        // cond 驱动闭包与 then/else 是同级 move 闭包:cond 引 plain 变量时
+        // (如 `{#if error.is_empty()}…{:else}{error}{/if}`)也要各自捕获份,
+        // 否则 cond 先 move、then/else 的捕获壳借用已 move 的值 → E0382
+        let cond_cl = self.with_captured_plain(quote! { move || #cond }, scope);
         Ok(emit::if_block(
             &parent_ident(),
-            cond.to_token_stream(),
+            cond_cl,
             then_closure,
             else_closure,
         ))

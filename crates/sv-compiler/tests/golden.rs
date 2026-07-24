@@ -88,25 +88,27 @@ fn wide_fixture_codegen_is_stable() {
     assert_golden("wide", &code);
 }
 
-/// 多闭包捕获面:同一非 Copy plain 变量进 if/else-if/else 三臂、await 三臂、
-/// each 行体 —— 每个同级 move 闭包各得一份**外层**捕获份(`with_captured_plain`),
-/// 避免争夺所有权(E0382)。修复前这份 fixture 生成的代码编不过。
-/// 编译+运行的端到端证明见 PR 描述(scratchpad genprobe:修复前 E0382 ×2、修复后通过)。
+/// 多闭包捕获面:同一非 Copy plain 变量既进**引导闭包**(if 条件 / await future /
+/// key)又进**分支/body/each-list** —— 每个同级 move 闭包各得一份**外层**捕获份
+/// (`with_captured_plain`),避免争夺所有权(E0382)。修复前这份 fixture 生成的代码
+/// 编不过。**注意 golden 只 syn::parse_file(语法),不做借用检查**——E0382 的真实
+/// 编译级守卫是 `examples/multiclosure-check`(build.rs 真编生成代码,回退即翻红)。
 #[test]
 fn multiclosure_captures_are_per_branch() {
     let src = std::fs::read_to_string(fixtures_dir().join("multiclosure.svelte"))
         .expect("读 fixture 失败");
     let code = sv_compiler::compile(&src, "multiclosure").expect("fixture 应能编译");
     syn::parse_file(&code).expect("生成代码应是合法 Rust");
-    // 结构不变量(与逐字节金样互补,直接钉死"每个同级 move 闭包各有捕获份"):
-    // if 三臂 + await 三臂 + each 行体,共 7 个引 label 的 move 闭包,修复后每个
-    // 外层都有一份 `let label = Clone::clone(&label)` 捕获份(修复前只有节点级 1 份共享)。
+    // 结构不变量(与逐字节金样互补,钉死"每个同级 move 闭包各有捕获份"):
+    // if 条件 + 三臂、await future + pending/then/catch、key 驱动 + body、
+    // each list + row —— 共十余个引 label 的 move 闭包,修复后每个外层都有一份
+    // `let label = Clone::clone(&label)` 捕获份(修复前只有节点级 1 份共享)。
     let captures = code
         .matches("let label = ::std::clone::Clone::clone(&label)")
         .count();
     assert!(
-        captures >= 7,
-        "每个引 label 的同级闭包都应各有捕获份(≥7),实得 {captures};\n{code}"
+        captures >= 12,
+        "每个引 label 的同级闭包(含 cond/fut/key 驱动)都应各有捕获份(≥12),实得 {captures};\n{code}"
     );
     assert_golden("multiclosure", &code);
 }
