@@ -654,6 +654,27 @@ let busy = $state(false);
     }
 
     #[test]
+    fn oncontextmenu_compiles() {
+        // 右键回调签名 |x: f32, y: f32|(逻辑坐标)→ set_on_context_menu
+        let src = r#"<script>
+let last = $state((0.0f32, 0.0f32));
+</script>
+<view>
+  <button oncontextmenu={|x: f32, y: f32| last = (x, y)}>右键我</button>
+</view>
+"#;
+        let code = compile(src, "c").expect("应编译成功");
+        assert!(
+            code.contains("set_on_context_menu"),
+            "oncontextmenu 应落地为 set_on_context_menu:\n{code}"
+        );
+        syn::parse_file(&code).unwrap();
+        // 未知 on* 事件仍报错,且提示里含 oncontextmenu
+        let err = compile("<view><button onbogus={|| ()}>x</button></view>", "c").unwrap_err();
+        assert!(err.message.contains("oncontextmenu"), "{}", err.message);
+    }
+
+    #[test]
     fn sfc_overflow_and_scroll_bindings_compile() {
         let src = r#"<script>
 let y = $state(0.0f32);

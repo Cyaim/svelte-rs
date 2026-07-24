@@ -1192,6 +1192,20 @@ impl Cg<'_> {
                     let call = emit::on_scroll(&el, handler.to_token_stream());
                     ts.extend(self.with_captured_plain(call, scope));
                 }
+                // oncontextmenu:右键(上下文)菜单回调,签名 |x: f32, y: f32|
+                // (逻辑坐标,用户据此开 overlay)。任意元素可用
+                "oncontextmenu" => {
+                    let AttrValue::Expr(e) = &attr.value else {
+                        return Err(CompileError::at_offset(
+                            self.source,
+                            attr.offset,
+                            "事件处理器应为 {闭包表达式}(签名 |x: f32, y: f32|)",
+                        ));
+                    };
+                    let handler = self.expr(e, scope, true)?;
+                    let call = quote! { __doc.set_on_context_menu(#el, #handler); };
+                    ts.extend(self.with_captured_plain(call, scope));
+                }
                 // bind:scrolly:Signal<f32> ↔ 纵向滚动偏移双向桥(调研 22)。
                 // 延后到事件循环末尾发射:桥会链式保留既有 on_scroll,
                 // 与 onscroll 共存时二者都生效
@@ -1336,13 +1350,14 @@ impl Cg<'_> {
                             | "oninput"
                             | "onsubmit"
                             | "onscroll"
+                            | "oncontextmenu"
                     ) =>
                 {
                     return Err(CompileError::at_offset(
                         self.source,
                         attr.offset,
                         format!(
-                            "v0 事件支持 onclick/onpointerenter/onpointerleave/onkeydown/onfocus/onblur/oninput/onsubmit,收到 `{name}`"
+                            "v0 事件支持 onclick/onpointerenter/onpointerleave/onkeydown/onfocus/onblur/oninput/onsubmit/onscroll/oncontextmenu,收到 `{name}`"
                         ),
                     ));
                 }

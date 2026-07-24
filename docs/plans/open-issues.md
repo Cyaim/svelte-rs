@@ -63,8 +63,14 @@
     重算(disabled 由 `disabled={expr}` 的 effect 改,非指针驱动的 `__hv` 类状态,
     重算闭包需跟随该 expr 的响应式)。当前 `<style>` 里写 `:disabled` 仍硬报错。
     禁用态**功能**已全,只差**视觉**(变灰);A2 表单件可先用条件类/内联样式绕行。
-- **仍缺(调研 28,sv-arco 补不了、须框架本体)**:`oncontextmenu` 右键(shell
-  MouseButton::Right + overlay Anchor::Point)、壳层 pointer-move/拖放/触屏/键盘滚动环、
+- **~~`oncontextmenu` 右键菜单~~** ✅ 2026-07-24:`ViewNode.on_context_menu:
+  Fn(f32, f32)`(逻辑坐标)+ `set_on_context_menu`/`context_menu_handler`(禁用节点
+  取不到,同点击门);shell `Pane::handle_window_event` 加 `MouseButton::Right` 命中
+  派发;codegen `oncontextmenu={|x, y| …}`。用户在回调里按坐标开 overlay(Anchor::Point)。
+  守卫:`context_menu_handler_carries_pos_and_disabled_gates`(sv-ui)+
+  `oncontextmenu_compiles`(sv-compiler)。
+- **仍缺(调研 28,sv-arco 补不了、须框架本体)**:`:disabled` 伪类样式(见上,Phase 2)、
+  壳层 pointer-move(hover 跟随已有,move 事件回调未透出)/拖放/触屏/键盘滚动环、
   视觉字重/字体族/图标/grid/阴影、a11y 角色层、i18n locale。
 
 ## 🔴 会咬人的(动手前必须先处理)
