@@ -118,7 +118,7 @@
 |---|---|---|---|---|
 | 事件属性 `onclick={h}` | Svelte 5 事件即普通属性(非指令) | 高 | ✅ 唯一事件形态(`onclick_svelte5_attr` 等;09 §3 裁定跟随 Svelte 5) | ✅ 完成;on: 指令已移除(2026-07-23) |
 | 遗留 `on:click` 指令 | Svelte 4 事件指令(5 中弃用) | —(过渡形态) | ❌ **已移除(2026-07-23)**:任何 `on:*` 都是硬错误并指路属性形态(`on_click_legacy_form_rejected_with_hint`) | 已按裁决移除,不进正式格式(09"无历史包袱") |
-| 其它事件(oninput/onkeydown/hover/focus 等) | 全量 DOM 事件面 | 高 | 🚧 键盘/焦点已落地(R1 调研 20):`onkeydown={\|e\| ...}`(自动 set_focusable;`e.stop_propagation()/prevent_default()` DOM 心智)、`onfocus`/`onblur`(合成进单一 `set_on_focus_change`)、`autofocus`;四段路由 冒泡→Tab 导航→Enter/Space 激活→快捷键;hover 早前已落地。oninput 待 TextInput(R1 第 2 步) | 剩余面(oninput/滚动/keyup)随输入控件与滚动体系扩 |
+| 其它事件(oninput/onkeydown/右键/滚动/指针移动等) | 全量 DOM 事件面 | 高 | 🚧 已落地一大片:`onkeydown`(自动 set_focusable;`e.stop_propagation()/prevent_default()` DOM 心智)、`onfocus`/`onblur`(合成进 `set_on_focus_change`)、`autofocus`、四段路由(冒泡→Tab→Enter/Space→快捷键)、`hover`、`oninput`/`onsubmit`(`<input>`,R1)、`onscroll`/`bind:scrolly`(R2)、`oncontextmenu`(右键,回调带逻辑坐标供开弹层)、`onpointermove`(指针移动,自定义拖拽/滑块)——均有测试与守卫。`disabled` 属性(禁用交互+a11y)与多窗体 `run_multi` 另见 docs/plans/open-issues.md「手写组件能力面」 | 剩余(keyup、拖放高层协议、触屏、`:disabled` 视觉样式)随需扩 |
 | 事件修饰符 `\|once` `\|preventDefault` 等 | Svelte 4 遗留,**5 已删**(改用包装函数) | 无 | ❌ 与 Svelte 5 同步不做(09 §3) | 不做 |
 | `bind:value/checked` 等表单绑定 | 表单元素双向绑定(value/checked/group/files/indeterminate/select) | 高(表单是桌面刚需) | ✅ `bind:checked`(checkbox)与 `bind:value`(`<input>` 单行文本,R1 调研 21)均落地:effect 写 + `set_on_input`/`set_on_click` 读,相等剪枝防回声;`<input>` 带 placeholder/光标/选区/IME 预编辑/剪贴板 | group/files/select 随对应控件 |
 | `bind:group` | radio 互斥 / checkbox 数组聚合 | 中 | ⏳ 无代码无设计(09 白名单未含) | 随表单控件集再定 |
