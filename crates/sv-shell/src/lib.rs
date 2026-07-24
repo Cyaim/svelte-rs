@@ -1140,6 +1140,55 @@ mod tests {
         );
     }
 
+    /// **多窗体地基:一个共享 signal 同时精准驱动多个 Doc 的树。**
+    ///
+    /// 多窗体(见 docs/plans/multi-window.md)的窗口管理还没落地,但它的**核心
+    /// 卖点**——跨窗响应式"免费"——此刻就成立且可离线验证:响应式运行时是线程内
+    /// 单例(句柄 `Copy + !Send`),同一个 `state` 可被**多个独立 `create_root`
+    /// 里的 effect** 订阅;写一次,所有窗口的树在同一次冲刷里各自精准更新——不需要
+    /// 消息总线、不需要序列化、不需要窗口间同步代码。这条测试把"两个窗口共享一个
+    /// 计数器,一处 +1 两处同步"钉成回归护栏:窗口管理重构只要保持"每个 Doc 一个
+    /// root、共用运行时"这一形态,这个语义就自动成立。
+    ///
+    /// (无 `set_frame_scheduler` 时写入同步传播——与 `offscreen_click_roundtrip`
+    /// 同理;真实多窗壳把冲刷排到帧前,再对所有窗请求重绘,语义不变。)
+    #[test]
+    fn shared_signal_drives_multiple_docs() {
+        let shared = state(0);
+        let doc_a = Doc::new();
+        let doc_b = Doc::new();
+
+        let bind = |doc: &Doc, tag: &'static str| {
+            let t = doc.create_text("");
+            doc.append(doc.root(), t);
+            bind_text(doc, t, move || format!("{tag}:{}", shared.get()));
+        };
+        // 两个"窗口"各自建树、各订阅同一个 shared —— 模拟两个 Doc/两个窗
+        let (_, _sa) = create_root(|| bind(&doc_a, "A"));
+        let (_, _sb) = create_root(|| bind(&doc_b, "B"));
+
+        assert!(doc_a.dump().contains("A:0"), "A 初值:\n{}", doc_a.dump());
+        assert!(doc_b.dump().contains("B:0"), "B 初值:\n{}", doc_b.dump());
+
+        // 一次共享写 → 两个 Doc 的树同时更新(跨窗响应式免费)
+        shared.set(7);
+        assert!(
+            doc_a.dump().contains("A:7"),
+            "A 未跨窗更新:\n{}",
+            doc_a.dump()
+        );
+        assert!(
+            doc_b.dump().contains("B:7"),
+            "B 未跨窗更新:\n{}",
+            doc_b.dump()
+        );
+
+        // 反向也成立:从任一窗改,另一窗跟随(没有"主窗"特权)
+        shared.update(|v| *v += 1);
+        assert!(doc_a.dump().contains("A:8"), "{}", doc_a.dump());
+        assert!(doc_b.dump().contains("B:8"), "{}", doc_b.dump());
+    }
+
     /// 可切换后端的支点验证:同一 paint_tree 对记录型后端产出稳定命令流
     /// (金样测试:零像素、零 GPU;未来新后端先对拍这条命令流)
     #[test]
