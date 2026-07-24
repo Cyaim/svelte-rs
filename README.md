@@ -82,7 +82,7 @@ The documentation center lives in [`docs/`](docs/README.md) — guides in
 Reference material (Chinese): [design & ADRs](docs/DESIGN.md) ·
 [Svelte support matrix, 77 items](docs/SVELTE-SUPPORT.md) ·
 [modern-CSS gap matrix, 91 items](docs/CSS-SUPPORT.md) ·
-[research reports ×27](docs/README.md#research)
+[research reports ×29](docs/README.md#research)
 
 ## Repository layout
 

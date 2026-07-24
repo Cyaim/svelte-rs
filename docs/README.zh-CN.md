@@ -25,7 +25,7 @@
 
 ## 调研报告
 
-28 份调研报告(2026-07),ADR 的依据——1–27 联网核实,28 为仓库自身实证:
+29 份调研报告(2026-07),ADR 的依据——1–27 联网核实,28–29 为仓库自身实证(29 另联网核对 Electron/DOM 参照):
 
 | # | 报告 |
 |---|---|
@@ -57,6 +57,7 @@
 | 26 | [arco.design 视觉标准组件库(sv-arco)可行性](research/26-arco-design-ui-kit.md) |
 | 27 | [距离商业化交付还有多远(接调研 19 的复盘)](research/27-commercialization-gap-update.md) |
 | 28 | [不用组件库,今天能开发什么(可用性实证)](research/28-no-arco-usability.md) |
+| 29 | [距离 Electron 还差哪些 + JS/DOM 事件覆盖核对](research/29-electron-gap-and-event-coverage.md) |
 
 ## 约定
 
