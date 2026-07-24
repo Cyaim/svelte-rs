@@ -2,7 +2,7 @@
 
 # Getting Started
 
-svelte-rs (working name `sv`) is an **exploratory prototype** of a Svelte-style desktop UI library for Rust. The core idea is Svelte 5's compilation philosophy applied to native desktop: templates are compiled at build time into code that performs pinpoint updates on a retained scene tree — no virtual DOM, no runtime diffing. Windows, Linux and macOS run today through a winit-based shell; HarmonyOS NEXT is a roadmap target (see [DESIGN.md](../DESIGN.md) (Chinese)). APIs churn freely at this stage — nothing here is stable.
+svelte-rs is an **exploratory prototype** of a Svelte-style desktop UI library for Rust. The core idea is Svelte 5's compilation philosophy applied to native desktop: templates are compiled at build time into code that performs pinpoint updates on a retained scene tree — no virtual DOM, no runtime diffing. Windows, Linux and macOS run today through a winit-based shell; HarmonyOS NEXT is a roadmap target (see [DESIGN.md](../DESIGN.md) (Chinese)). APIs churn freely at this stage — nothing here is stable.
 
 The whole reactive model in four lines:
 
