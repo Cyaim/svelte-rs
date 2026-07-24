@@ -26,8 +26,9 @@ research reports — is currently Chinese-only and linked as-is.
 
 ## Research
 
-Twenty-eight research reports (Chinese) that back the ADRs, 2026-07 — #1-27
-internet-verified, #28 verified against this repository itself:
+Twenty-nine research reports (Chinese) that back the ADRs, 2026-07 — #1-27
+internet-verified, #28-29 verified against this repository itself (#29 also
+cross-checks Electron/DOM references online):
 
 | # | Report |
 |---|---|
@@ -59,6 +60,7 @@ internet-verified, #28 verified against this repository itself:
 | 26 | [arco.design-style component-kit feasibility (sv-arco)](research/26-arco-design-ui-kit.md) |
 | 27 | [Commercialization-gap update (follow-up to #19)](research/27-commercialization-gap-update.md) |
 | 28 | [What can you build today without a component kit (usability audit)](research/28-no-arco-usability.md) |
+| 29 | [Gap to Electron + JS/DOM event coverage audit](research/29-electron-gap-and-event-coverage.md) |
 
 ## Conventions
 
