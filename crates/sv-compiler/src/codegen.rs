@@ -589,7 +589,9 @@ impl Cg<'_> {
         let mut hover_static: Vec<TokenStream> = Vec::new();
         let mut hover_conds: Vec<(TokenStream, TokenStream)> = Vec::new();
         let mut active_static: Vec<TokenStream> = Vec::new();
+        let mut active_conds: Vec<(TokenStream, TokenStream)> = Vec::new();
         let mut focus_static: Vec<TokenStream> = Vec::new();
+        let mut focus_conds: Vec<(TokenStream, TokenStream)> = Vec::new();
         // 元素类型规则打底(specificity 直觉:元素 < 类)
         let tag_name = match tag {
             Tag::View => "view",
@@ -736,8 +738,17 @@ impl Cg<'_> {
                         ));
                     }
                 };
+                // 条件类的伪类变体与 :hover 对称收集 —— 少了 active/focus
+                // 这两行,条件类上的 &:active / &:focus 会被静默丢弃(生成
+                // 代码里根本不出现),按压/聚焦态永不生效
                 if let Some(h) = &entry.hover {
                     hover_conds.push((cond.clone(), h.clone()));
+                }
+                if let Some(a) = &entry.active {
+                    active_conds.push((cond.clone(), a.clone()));
+                }
+                if let Some(f) = &entry.focus {
+                    focus_conds.push((cond.clone(), f.clone()));
                 }
                 class_conds.push((cond, setters));
             } else if let Some(key) = attr.name.strip_prefix("style:") {
@@ -761,8 +772,8 @@ impl Cg<'_> {
         }
 
         let has_hover = !hover_static.is_empty() || !hover_conds.is_empty();
-        let has_active = !active_static.is_empty();
-        let has_focus = !focus_static.is_empty();
+        let has_active = !active_static.is_empty() || !active_conds.is_empty();
+        let has_focus = !focus_static.is_empty() || !focus_conds.is_empty();
         let has_state = has_hover || has_active || has_focus;
         // 用户自己的指针回调(有 :hover 时与内部状态接线合成,避免互相覆盖)
         let user_enter = attrs.iter().find(|a| a.name == "onpointerenter");
@@ -810,14 +821,20 @@ impl Cg<'_> {
                 TokenStream::new()
             };
             // 声明序按 CSS 惯例 L-V-F-H-A::focus 垫底,悬停/按压可以盖它
+            let focus_arms = focus_conds
+                .iter()
+                .map(|(c, f)| quote! { if #c && __fc.get() { #f } });
             let focus_block = if has_focus {
-                quote! { if __fc.get() { #(#focus_static)* } }
+                quote! { if __fc.get() { #(#focus_static)* } #(#focus_arms)* }
             } else {
                 TokenStream::new()
             };
             // :active 排在 :hover 后(CSS 惯例:LVHA 声明序,按压态最终生效)
+            let active_arms = active_conds
+                .iter()
+                .map(|(c, a)| quote! { if #c && __ac.get() { #a } });
             let active_block = if has_active {
-                quote! { if __ac.get() { #(#active_static)* } }
+                quote! { if __ac.get() { #(#active_static)* } #(#active_arms)* }
             } else {
                 TokenStream::new()
             };

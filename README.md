@@ -96,7 +96,7 @@ Reference material (Chinese): [design & ADRs](docs/DESIGN.md) ·
 | `crates/sv-vap` · `sv-pag` · `sv-lottie` | Animation-format parsers (VAP / PAG / Lottie) |
 | `crates/sv-lsp` | `.svelte` language server (LSP): live compiler diagnostics |
 | `crates/sv-arco-tokens` | Arco Design tokens: palette algorithm port + `global.less` transliteration (Rust consts + `:root` CSS) |
-| `crates/sv-arco` | Arco-style component library (`.svelte` components; Button landed, more en route) |
+| `crates/sv-arco` | Arco-style component library (`.svelte` components; A1 static set landed: Button/Tag/Badge/Divider/Alert/Typography/Link) |
 | `examples/` | showcase · counter(-sfc) · todo-sfc · settings-sfc · input-demo · overlay-demo · membench · vap-gift · arco-gallery |
 
 ## Status

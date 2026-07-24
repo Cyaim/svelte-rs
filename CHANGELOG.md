@@ -28,14 +28,22 @@ sv-macro → sv-shell → 伞 crate svelte-rs;sv-lsp / sv-pag / sv-lottie / sv-v
   (13 色板 × 亮暗 × 10 档逐字符一致);`global.less`(web-react 2.66.16,
   commit 已 pin)经入库生成器转译为 Rust 常量 + `:root` CSS 亮暗双出口,
   `tests/sync.rs` 防漂移。合规:LICENSE-ARCO + 非官方声明。
-- **sv-arco:Arco 风格组件库起步(调研 26 A1 波次)+ examples/arco-gallery**:
-  首件 **Button** 全矩阵(primary/secondary/outline/text × default/warning/
-  danger/success × mini/small/default/large × disabled),取值就近抄自
-  vendored `button-token.less`;`.svelte` 编写,build.rs 把令牌 `:root` 块
-  注入各组件 `<style>` 后走 sv-compiler(`:root` 作用域是每文件独立的)。
-  A1 降级口径(无图标/无阴影/单字重/无过渡,disabled 走条件类)见 crate
-  README。**对外是 Rust 函数 API**(组件注册表单构建目录,跨 crate 无
-  `<Button>` 标签)。两 crate 均 `publish = false`,不入首发清单。
+- **sv-arco:Arco 风格组件库 A1 静态件七件(调研 26 A1 波次)+
+  examples/arco-gallery**:**Button** 全矩阵(4 变体 × 4 状态 × 4 尺寸 ×
+  disabled)、**Tag**(14 色板 × 4 档,arco 预设缺的 yellow 按通式补齐)、
+  **Badge**(standalone:count 胶囊/99+/dot,红绿蓝灰接线含 gray-4 怪癖)、
+  **Divider**(纯线/线-字-线/纵向)、**Alert**(info/success/warning/error ×
+  有/无标题,1px 透明边框并入 padding 保几何)、**Typography** 子集(字号
+  阶梯 + 色档;secondary 按 token 原文取 text-2)、**Link**(四状态 + 禁用,
+  warning 禁用色照抄 arco 的 light-2 怪癖)。取值全部就近抄 vendored
+  `*-token.less`(7 份入库),行为测试 36 项(含 Button/Link 的 hover/active
+  离屏状态迁移);build.rs 把令牌 `:root` 块注入各组件 `<style>` 后走
+  sv-compiler(`:root` 作用域是每文件独立的)。A1 降级口径(无图标/无阴影/
+  单字重/无过渡,disabled 走条件类)见 crate README。**对外是 Rust 函数
+  API**(组件注册表单构建目录,跨 crate 无 `<Button>` 标签)。两 crate 均
+  `publish = false`,不入首发清单。经 4 视角对抗评审(18 确认/1 驳回),
+  顺带登记编译器层缺口(open-issues):if 块包装节点挡拉伸、plain 变量多
+  同级闭包 move 冲突、arco 1px 透明边框未补偿几何(亚感知级)。
 - **scroll-blit + 脏矩形(CPU 呈现路径)**:滚动帧把上一帧像素按位移复制、
   只重画新露出的条与滚动条列;打字/勾选/换色/焦点/光标闪烁只重画对应矩形
   (`DirtyItem::Paint` 带上了 `id`)。损伤重画走同尺寸 scratch(白底完整
@@ -133,6 +141,15 @@ sv-macro → sv-shell → 伞 crate svelte-rs;sv-lsp / sv-pag / sv-lottie / sv-v
 
 ### 修复
 
+- **条件类上的 `:active`/`:focus` 被 codegen 静默丢弃**(sv-arco A1 对抗评审
+  查获):`class:x={cond}` 形态的伪类变体里,此前只有 `:hover` 被收集,
+  `:active`/`:focus` 整块无声丢——用条件类承载全部变体态的组件(如 arco
+  Button/Link)按压/聚焦态从不生效,且无编译错误无警告。修法:codegen 加
+  `active_conds`/`focus_conds` 与 `hover_conds` 对称收集,在 active/focus
+  block 里加条件门控臂。静态类路径本就正确不受影响;`.svelte` golden 逐字节
+  不变(无 fixture 组合条件类与这两个伪类)。契约测试
+  `conditional_class_active_and_focus_variants_emit`(产物字符串 + 变异探针)
+  守着。
 - **弹层不进语义树**:弹层是游离子树(不挂任何父),此前对屏幕阅读器**整个
   不存在** —— 对话框/菜单读不出来。现在接到 root 的 children 名下。
 

@@ -134,3 +134,111 @@ fn disabled_recolors_via_conditional_class() {
         "禁用应显示 not-allowed 指针"
     );
 }
+
+#[test]
+fn text_variant_wires_colors() {
+    // text 变体上一批零覆盖(对抗评审查获):透明底、文字 primary-6,
+    // hover/active 换 fill 底
+    let (doc, _) = make("text", "default", "default", false);
+    let id = the_button(&doc);
+    let (bg, fg) = doc.read(|i| (i.nodes[id].style.bg, i.nodes[id].style.fg));
+    assert_eq!(bg, None, "text 变体常态无底色");
+    assert_eq!(fg, Some(Color::rgb(22, 93, 255)), "text 文字应是 primary-6");
+}
+
+#[test]
+fn secondary_status_uses_light_1_bg() {
+    // secondary×status 是另一套接线(bg=状态-1、文字=状态-6),与 primary
+    // 的 bg=状态-6 不同——上一批只测了 primary×danger
+    let (doc, _) = make("secondary", "danger", "default", false);
+    let id = the_button(&doc);
+    let (bg, fg) = doc.read(|i| (i.nodes[id].style.bg, i.nodes[id].style.fg));
+    assert_eq!(
+        bg,
+        Some(Color::rgb(255, 236, 232)),
+        "secondary danger 底 = danger-1"
+    );
+    assert_eq!(
+        fg,
+        Some(Color::rgb(245, 63, 63)),
+        "secondary danger 文字 = danger-6"
+    );
+}
+
+#[test]
+fn secondary_disabled_and_remaining_sizes() {
+    let (doc, _) = make("secondary", "default", "default", true);
+    let id = the_button(&doc);
+    let (bg, fg) = doc.read(|i| (i.nodes[id].style.bg, i.nodes[id].style.fg));
+    assert_eq!(
+        bg,
+        Some(Color::rgb(247, 248, 250)),
+        "secondary 禁用底 = fill-1/gray-1"
+    );
+    assert_eq!(
+        fg,
+        Some(Color::rgb(201, 205, 212)),
+        "secondary 禁用文字 = text-4/gray-4"
+    );
+
+    for (size, h) in [("small", 28.0), ("large", 36.0)] {
+        let (doc, _) = make("primary", "default", size, false);
+        let got = doc.read(|i| i.nodes[the_button(&doc)].style.height);
+        assert_eq!(got, Some(h), "{size} 高度");
+    }
+}
+
+/// hover/active 三态色梯之前**编译期被丢弃**(条件类上的 :active),本批修了
+/// codegen 才真正生效——这里离屏直调指针 handler 验证按压/悬停真的换色。
+#[test]
+fn hover_and_active_state_transitions() {
+    let (doc, _) = make("primary", "default", "default", false);
+    let id = the_button(&doc);
+    let bg = |d: &Doc| d.read(|i| i.nodes[id].style.bg);
+
+    assert_eq!(bg(&doc), Some(Color::rgb(22, 93, 255)), "初始 = arcoblue-6");
+
+    doc.pointer_enter_handler(id).expect("应接悬停")();
+    assert_eq!(
+        bg(&doc),
+        Some(Color::rgb(64, 128, 255)),
+        "hover = arcoblue-5"
+    );
+
+    doc.pointer_down_handler(id).expect("应接按压")();
+    assert_eq!(
+        bg(&doc),
+        Some(Color::rgb(14, 66, 210)),
+        "active 压过 hover = arcoblue-7"
+    );
+
+    doc.pointer_up_handler(id).expect("应接抬起")();
+    assert_eq!(
+        bg(&doc),
+        Some(Color::rgb(64, 128, 255)),
+        "抬起后仍悬停 = arcoblue-5"
+    );
+
+    doc.pointer_leave_handler(id).expect("应接移出")();
+    assert_eq!(
+        bg(&doc),
+        Some(Color::rgb(22, 93, 255)),
+        "移出复位 = arcoblue-6"
+    );
+}
+
+#[test]
+fn disabled_button_ignores_hover() {
+    // 禁用臂的 hover/active 被 !disabled 门控:禁用按钮悬停不应换色
+    let (doc, _) = make("primary", "default", "default", true);
+    let id = the_button(&doc);
+    let disabled_bg = Some(Color::rgb(148, 191, 255)); // arcoblue-3
+    if let Some(enter) = doc.pointer_enter_handler(id) {
+        enter();
+    }
+    assert_eq!(
+        doc.read(|i| i.nodes[id].style.bg),
+        disabled_bg,
+        "禁用态悬停不应换色"
+    );
+}

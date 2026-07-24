@@ -140,24 +140,57 @@
 ### sv-arco 组件库(2026-07-24 起步,调研 26)
 
 - **A0/A1 已落地**:sv-arco-tokens(色板 + global.less 转译,金样/同步/抽查
-  三层测试)+ Button 全矩阵(behavior 测试 6 项 + arco-gallery 离屏 PNG)。
-- **hover/active 的视觉没有自动化断言**:行为测试只断初始样式与点击;悬停
-  换色走的是 sv-compiler 既有 `bind_style` 通路(showcase 同款写法),但
-  "条件类 + 伪类变体"组合的运行期正确性目前只有目测。想补要给 sv-ui 造
-  pointer enter/leave 的公开派发口(今天是 shell 内部接线)。
+  三层测试)+ **A1 静态件七件**(Button/Tag/Badge/Divider/Alert/Typography/
+  Link,行为测试 36 项 + arco-gallery 离屏 PNG 视觉验收)。
+- **🔴 `if_block` 的包装节点参与布局**(A1 批新发现,内核级):`sv_ui::if_block`
+  给每个 `{#if}` 建一个真实 View 容器(lib.rs `if_block`,默认 column/start)
+  ——交叉轴拉伸与 flex 组合**穿不过它**:块内的"吃满宽"内容(如分割线)
+  会塌成零宽,块内 flex-grow 的参考系也变成包装节点自己。Divider 被迫
+  改成"恒渲染扁平结构 + 条件类清零"绕行(见组件注释)。根治方向:包装
+  节点透传布局(display:contents 语义)或给 if/each 容器一套可配样式;
+  动手前先评估对增量布局(布局树复用)的影响。
+- **plain 变量进多个同级块闭包会 move 冲突**(A1 批新发现,codegen 层):
+  预克隆机制按闭包逐个 `Clone::clone(&x)`,但同级多闭包顺序捕获时第一个
+  拿走所有权,第二个编译错(E0382)。`{#if}{:else if}` 各分支引用同一
+  String prop 必踩。组件侧绕行:每分支一个克隆副本 / 条件预折成 Copy 的
+  bool(Badge/Divider/Alert 均如此)。根治在 codegen 的 plain 捕获策略
+  (借 Rc?统一预克隆到分支数?),与内核合并批的 `idents_within` 小瑕疵
+  同域,可同批修。
+- **~~条件类上的 `:active`/`:focus` 被 codegen 静默丢弃~~ ✅ 2026-07-24 已修**
+  (A1 批对抗评审查获,内核级):`sv-compiler/src/codegen.rs` 的条件类分支
+  此前只把 `entry.hover` 收进 `hover_conds`,`active`/`focus` 变体没有对应
+  向量,整块无声丢——Button/Link 用 `class:x={cond}` 承载全部变体,按压态
+  因此从不生效(生成产物里 `__ac`/`set_on_pointer_down` 出现 0 次)。修法:
+  加 `active_conds`/`focus_conds` 与 `hover_conds` 对称收集 + 在 active/focus
+  block 里加条件臂。契约测试 `conditional_class_active_and_focus_variants_emit`
+  (产物字符串断言 + 变异探针)守着;sv-arco Button/Link 补了 hover/active
+  离屏行为测试。静态类路径本就正确,不受影响。
+- **~~hover/active 视觉无自动化断言~~ ✅ 已补**:Button/Link 用
+  `pointer_{enter,down,up,leave}_handler` 离屏直调,断言按压压过悬停、
+  禁用态门控(hover 臂 `!disabled`)。
 - **暗色模式未接**:tokens 的 `CSS_ROOT_DARK` 已生成,但 build.rs 只注入
   亮色块;换主题要等 `@media (prefers-color-scheme)`(C2)或组件加 mode
   prop 再议。**别拿"CSS_ROOT_DARK 存在"当暗色已支持的证据。**
 - **focus-visible 缺**:arco 的键盘焦点环是 box-shadow(0 0 0 2px 色板-3),
-  渲染动词 ⏳;Tab 落焦目前无视觉反馈,键盘可达性数据面(focusable/激活)
+  渲染动词 ⏳;`:focus` 伪类接线本身已通(上一条修的一部分),但没有可画
+  焦点环的属性,Tab 落焦目前无视觉反馈,键盘可达性数据面(focusable/激活)
   是好的。
+- **arco 的 1px 透明边框未补偿几何**(A1 批,minor):arco 各变体带 1px
+  透明边框(border-box),Button 非 outline 变体与 Tag 未把这 1px 折进
+  padding(Alert 折了),故同 label 的 outline 比 primary 宽 2px、Tag
+  横向内缩少 1px/侧。亚感知级,视觉可忽略,未修:统一折算会被 CSS 子集的
+  "padding 同时依赖变体与尺寸"卡住(padding 在尺寸类、边框在变体类,单类
+  改不干净);彻底修等 box-sizing 可配或透明边框色支持。
 - **组件跨 crate 无标签语法**:PropsRegistry 单构建目录扫描,`<Button>` 只
   在 sv-arco 自己的 components/ 内可用;对外交付 = Rust 函数 API。要给
   消费者 `.svelte` 标签体验,需要编译器支持外部组件注册表(未排期,与
   ADR-2 相关,动它之前先别承诺)。
-- **variant/status/size 是字符串 prop**:拼错静默落到 secondary/default
-  形态(36 个条件类全 false 时只剩基类)。换枚举要么让 $props 支持非
-  String 复杂类型的字面量传参体验变好,要么生成侧校验——都没做。
+- **variant/status/size 是字符串 prop,拼错静默失效**:落点分两种——默认
+  形态由静态类承载的(Tag/Alert/Badge/Typography、Button 的 size)落默认;
+  Button 的 variant/status 与 Link 的 status 默认外观由条件类携带,拼错落到
+  **无变体裸基类**(透明底无字色),不是默认形态。Button 共 35 个条件类
+  (32 变体×状态×disabled + 3 尺寸;sz-default 是静态类)。换枚举要么让
+  `$props` 支持非 String 类型的字面量传参体验变好,要么生成侧校验——都没做。
 
 ### 内核合并(2026-07-23 对抗评审)遗留的存量小项
 
