@@ -455,6 +455,21 @@ impl AnimData {
     }
 }
 
+/// 稀有事件处理器打包(冷字段 Box 化,调研 23 §2.2 预留的收缩手段)。
+///
+/// 绝大多数节点不设这些回调,所以 [`ViewNode`] 只留一个 `Option<Box<RareHandlers>>`
+/// (8B),而不是为**每个**节点都留 5 个 16B 的冷指针。热处理器(on_click 与背
+/// `:hover`/`:active`/`:focus` 的 pointer_enter/leave/down/up、focus_change)仍直挂
+/// ViewNode——它们常用、且直挂免一次 Box 解引用。首个设入时才分配这个 Box。
+#[derive(Default)]
+pub struct RareHandlers {
+    pub on_scroll: Option<Rc<dyn Fn(f32, f32)>>,
+    pub on_context_menu: Option<Rc<dyn Fn(f32, f32)>>,
+    pub on_pointer_move: Option<Rc<dyn Fn(f32, f32)>>,
+    pub on_key: Option<KeyHandler>,
+    pub on_key_capture: Option<KeyHandler>,
+}
+
 pub struct ViewNode {
     pub kind: ElementKind,
     /// Text / Button / Checkbox 的文本内容
@@ -479,9 +494,6 @@ pub struct ViewNode {
     pub on_pointer_down: Option<Rc<dyn Fn()>>,
     pub on_pointer_up: Option<Rc<dyn Fn()>>,
     pub on_pointer_leave: Option<Rc<dyn Fn()>>,
-    pub on_key: Option<KeyHandler>,
-    /// 捕获段回调(root → 焦点,先于冒泡;祖先拦截后代用)
-    pub on_key_capture: Option<KeyHandler>,
     /// 焦点变化回调(true=获焦,false=失焦;`:focus` 伪类接线用)
     pub on_focus_change: Option<Rc<dyn Fn(bool)>>,
     /// TextInput 的编辑态(其它元素恒 None;Box 控制节点大小预算)
@@ -492,15 +504,10 @@ pub struct ViewNode {
     /// 滚动偏移(overflow: Scroll 的 View;真源在树上,与 checked 同款)
     pub scroll_x: f32,
     pub scroll_y: f32,
-    /// 滚动偏移变化回调(新 (x, y);virtual_scroll 桥与 onscroll 的载体)
-    pub on_scroll: Option<Rc<dyn Fn(f32, f32)>>,
-    /// 右键(上下文)菜单回调,参数是点击处的**逻辑坐标** (x, y)——用户在回调里
-    /// 按坐标开一个弹层(overlay Anchor::Point)。禁用节点不触发(与点击同门)。
-    pub on_context_menu: Option<Rc<dyn Fn(f32, f32)>>,
-    /// 指针移动回调,参数是指针**逻辑坐标** (x, y)。高频事件(每次移动都派发),
-    /// 用于自定义拖拽/滑块/画布跟随。**被动位置事件,禁用节点仍触发**(与浏览器
-    /// 一致;disabled 只挡"动作"类回调 click/contextmenu,不挡位置跟踪)。
-    pub on_pointer_move: Option<Rc<dyn Fn(f32, f32)>>,
+    /// 稀有事件处理器打包(见 [`RareHandlers`]):onscroll / oncontextmenu /
+    /// onpointermove / onkeydown / onkeydown-capture。绝大多数节点为 None,
+    /// 只付 8B;首个设入时才分配 Box。经 `Doc` 的各 handler getter/setter 收口。
+    pub rare: Option<Box<RareHandlers>>,
     /// 虚拟内容尺寸覆盖(virtual_scroll 用:滚动范围/滚动条比例按它算,
     /// 不按实际子树尺寸)
     pub content_override: Option<(f32, f32)>,
@@ -557,15 +564,11 @@ impl Doc {
             on_pointer_down: None,
             on_pointer_up: None,
             on_pointer_leave: None,
-            on_key: None,
-            on_key_capture: None,
             on_focus_change: None,
             input: None,
             scroll_x: 0.0,
             scroll_y: 0.0,
-            on_scroll: None,
-            on_context_menu: None,
-            on_pointer_move: None,
+            rare: None,
             content_override: None,
             accessible_label: None,
             accessible_description: None,
@@ -706,17 +709,13 @@ impl Doc {
             on_pointer_down: None,
             on_pointer_up: None,
             on_pointer_leave: None,
-            on_key: None,
-            on_key_capture: None,
             on_focus_change: None,
             input: (kind == ElementKind::TextInput).then(Default::default),
             // 与 input 同款:只有对应 kind 才分配
             anim: (kind == ElementKind::Animation).then(|| Box::new(AnimData::placeholder())),
             scroll_x: 0.0,
             scroll_y: 0.0,
-            on_scroll: None,
-            on_context_menu: None,
-            on_pointer_move: None,
+            rare: None,
             content_override: None,
             accessible_label: None,
             accessible_description: None,
@@ -1178,7 +1177,7 @@ impl Doc {
             let Some(n) = inner.nodes.get_mut(id) else {
                 return;
             };
-            n.on_key = Some(Rc::new(f));
+            n.rare.get_or_insert_with(Default::default).on_key = Some(Rc::new(f));
         }
         // 同上
         self.bump(dirty::DirtyItem::Paint { id });
@@ -1186,7 +1185,11 @@ impl Doc {
 
     /// 取出键盘回调(同 [`Doc::click_handler`]:clone 出来调用,不持树借用)
     pub fn key_handler(&self, id: ViewId) -> Option<KeyHandler> {
-        self.0.borrow().nodes.get(id).and_then(|n| n.on_key.clone())
+        self.0
+            .borrow()
+            .nodes
+            .get(id)
+            .and_then(|n| n.rare.as_ref().and_then(|r| r.on_key.clone()))
     }
 
     /// 捕获段回调:**先于**冒泡、从 root 往焦点走(DOM capture 语义)。
@@ -1197,7 +1200,7 @@ impl Doc {
             let Some(n) = inner.nodes.get_mut(id) else {
                 return;
             };
-            n.on_key_capture = Some(Rc::new(f));
+            n.rare.get_or_insert_with(Default::default).on_key_capture = Some(Rc::new(f));
         }
         // 同上
         self.bump(dirty::DirtyItem::Paint { id });
@@ -1208,7 +1211,7 @@ impl Doc {
             .borrow()
             .nodes
             .get(id)
-            .and_then(|n| n.on_key_capture.clone())
+            .and_then(|n| n.rare.as_ref().and_then(|r| r.on_key_capture.clone()))
     }
 
     pub fn set_on_focus_change(&self, id: ViewId, f: impl Fn(bool) + 'static) {
@@ -1513,7 +1516,7 @@ impl Doc {
             }
             n.scroll_x = x;
             n.scroll_y = y;
-            n.on_scroll.clone()
+            n.rare.as_ref().and_then(|r| r.on_scroll.clone())
         };
         if let Some(cb) = cb {
             cb(x, y);
@@ -1537,7 +1540,7 @@ impl Doc {
             let Some(n) = inner.nodes.get_mut(id) else {
                 return;
             };
-            n.on_scroll = Some(Rc::new(f));
+            n.rare.get_or_insert_with(Default::default).on_scroll = Some(Rc::new(f));
         }
         // 同上
         self.bump(dirty::DirtyItem::Paint { id });
@@ -1548,7 +1551,7 @@ impl Doc {
             .borrow()
             .nodes
             .get(id)
-            .and_then(|n| n.on_scroll.clone())
+            .and_then(|n| n.rare.as_ref().and_then(|r| r.on_scroll.clone()))
     }
 
     /// 右键(上下文)菜单回调:参数是点击处逻辑坐标 (x, y)
@@ -1558,7 +1561,7 @@ impl Doc {
             let Some(n) = inner.nodes.get_mut(id) else {
                 return;
             };
-            n.on_context_menu = Some(Rc::new(f));
+            n.rare.get_or_insert_with(Default::default).on_context_menu = Some(Rc::new(f));
         }
         self.bump(dirty::DirtyItem::Paint { id });
     }
@@ -1570,7 +1573,7 @@ impl Doc {
             .nodes
             .get(id)
             .filter(|n| !n.disabled)
-            .and_then(|n| n.on_context_menu.clone())
+            .and_then(|n| n.rare.as_ref().and_then(|r| r.on_context_menu.clone()))
     }
 
     /// 指针移动回调:参数是指针逻辑坐标 (x, y)
@@ -1580,7 +1583,7 @@ impl Doc {
             let Some(n) = inner.nodes.get_mut(id) else {
                 return;
             };
-            n.on_pointer_move = Some(Rc::new(f));
+            n.rare.get_or_insert_with(Default::default).on_pointer_move = Some(Rc::new(f));
         }
         self.bump(dirty::DirtyItem::Paint { id });
     }
@@ -1591,7 +1594,7 @@ impl Doc {
             .borrow()
             .nodes
             .get(id)
-            .and_then(|n| n.on_pointer_move.clone())
+            .and_then(|n| n.rare.as_ref().and_then(|r| r.on_pointer_move.clone()))
     }
 
     /// 虚拟内容尺寸覆盖(virtual_scroll 桥用;None = 按实际子树尺寸)
@@ -2559,19 +2562,17 @@ mod memory_probe {
             "[probe] ViewNode={vn}B Style={st}B Edges={}B",
             std::mem::size_of::<Edges>()
         );
-        // 2026-07-18 预算两次上调:R1 焦点/输入(focusable/accepts_text/
-        // on_key/on_focus_change/input/scroll/on_scroll/content_override
-        // ≈ +100B)与 R2 flex 第一批(justify/align/grow/shrink/min-max
-        // ≈ +48B,调研 23 §2.2 冷字段 Box 化留作超线时的收缩手段)。
-        // 2026-07-24 再上调 448→464:手写组件事件面新增两个 `Option<Rc<dyn Fn(f32,f32)>>`
-        // (on_context_menu、on_pointer_move,各 16B),都是**冷字段**(绝大多数节点为 None)。
-        // ⚠ 已达"该 Box 化冷 on_* 处理器"的临界:再加处理器**先做**把所有稀有
-        //   on_*(enter/down/up/leave/scroll/context_menu/pointer_move/key/focus_change)
-        //   打包进一个 `Option<Box<Handlers>>`(每节点省一大截),而不是继续加字段抬预算。
+        // 2026-07-18 预算两次上调:R1 焦点/输入(≈ +100B)+ R2 flex 第一批(≈ +48B,
+        // 调研 23 §2.2 冷字段 Box 化留作超线时的收缩手段)。2026-07-24 事件面扩张一度
+        // 到 464B,随即**兑现了那个收缩手段**:5 个稀有处理器(on_scroll/on_context_menu/
+        // on_pointer_move/on_key/on_key_capture)打包进 `Option<Box<RareHandlers>>`
+        // (每节点 5×16B → 8B,省 72B → 392B)。热处理器(on_click 与背 :hover/:active/
+        // :focus 的 pointer_enter/leave/down/up、focus_change)仍直挂,免 Box 解引用。
+        // 预算收回 464→400:**新增稀有处理器进 RareHandlers 即可,ViewNode 不再涨**。
         assert!(st <= 192, "Style 超预算: {st}B");
         assert!(
-            vn <= 464,
-            "ViewNode 超预算: {vn}B(该 Box 化冷 on_* 处理器了,见上注释)"
+            vn <= 400,
+            "ViewNode 超预算: {vn}B(新稀有处理器请进 RareHandlers,别加 ViewNode 字段)"
         );
     }
 }
