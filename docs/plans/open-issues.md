@@ -149,17 +149,35 @@
   改成"恒渲染扁平结构 + 条件类清零"绕行(见组件注释)。根治方向:包装
   节点透传布局(display:contents 语义)或给 if/each 容器一套可配样式;
   动手前先评估对增量布局(布局树复用)的影响。
-- **~~plain 变量进多个同级块闭包会 move 冲突(E0382)~~ ✅ 2026-07-24 已修**:
-  根因 = 预克隆 prelude 放在 `move` 闭包**体内**、`move` 按值捕获,`if_block`/
-  `await_block`/`each_block`/`key_block`/`overlay_block` 的多个同级 move 闭包
-  (分支 **与** cond/future/key/open 引导闭包、each list/row)争夺同一非 Copy
-  plain 变量的所有权。修法 = 新增 `Cg::with_captured_plain`,给每个 move 闭包
-  在**闭包外**补捕获份 `{ let x=Clone::clone(&x); <move 闭包> }`(照搬 @render/
-  snippet 已有形状),铺到全部引导+分支闭包。守卫:golden fixture `multiclosure`
-  (结构 shape)+ **`examples/multiclosure-check`(编译级借用检查,golden 只
-  parse 不 borrow-check,靠它兜 E0382 回退)**。Badge/Alert 的手工绕行现变冗余、
-  可清。**注:emit::if_block 签名从 `cond: expr` 改为 `cond_closure`**(前端负责
-  建带捕获的驱动闭包)。
+- **~~plain 变量进多个同级**块构造器**闭包会 move 冲突(E0382)~~ ✅ 2026-07-24
+  已修(限块级)**:根因 = 预克隆 prelude 放在 `move` 闭包**体内**、`move` 按值
+  捕获,`if_block`/`await_block`/`each_block`/`key_block`/`overlay_block` 的多个
+  同级 move 闭包(分支 **与** cond/future/key/open 引导闭包、each list/row)争夺同
+  一非 Copy plain 变量的所有权。修法 = 新增 `Cg::with_captured_plain`,给每个 move
+  闭包在**闭包外**补捕获份 `{ let x=Clone::clone(&x); <move 闭包> }`(照搬 @render/
+  snippet 已有形状),铺到全部**块级**引导+分支闭包。守卫:golden fixture
+  `multiclosure`(结构 shape)+ **`examples/multiclosure-check`(**块级**借用检查,
+  golden 只 parse 不 borrow-check,靠它兜块级 E0382 回退)**。Badge/Alert 的手工
+  绕行(块内多分支引 String prop)现变冗余、可清。**注:emit::if_block 签名从
+  `cond: expr` 改为 `cond_closure`**(前端负责建带捕获的驱动闭包)。
+- **🔴 同一元素上 ≥2 个属性 move 闭包共享同一非 Copy plain 变量 → E0382**
+  (2026-07-24 再复核查获,与上条**同根不同层、存量未修**):`emit_nodes` 对整个
+  元素节点只补**一份**节点级捕获,但一个元素可发射多个 move 闭包(`value={expr}`/
+  动态 `aria-label={expr}` 的 effect、`style:x={expr}`、`oninput`/`onsubmit` 处理器、
+  `@attach`……),它们争抢那唯一一份克隆 → 第二个用到已 move 的值。rustc 已坐实:
+  `<input value={label} aria-label={label} />`、`value={label} oninput={…label…}`、
+  `<text aria-label={label}>{label}</text>` 均 E0382(反应式 `$state` 对照组编过,
+  证明只对非 Copy plain 成立)。**A2 表单件高发**(value+aria、value+oninput 同元素)。
+  上面的块级修复与 `multiclosure-check` 守卫**都不覆盖元素属性层**。修法 = 给
+  emit_element 的各属性 move 闭包也走 `with_captured_plain`(散在多分支,无单一
+  chokepoint,是独立一批);守卫同样要扩到元素级(把 multiclosure-check 补一个
+  同元素多属性的 .svelte)。
+- **keyed `{#each}` 的 key 表达式引用非 Copy plain 变量 → E0373**(2026-07-24
+  对抗评审查获,与上条同域但**机制不同**、暂未修):`{#each rows as it (key_using_plain)}`
+  的 key 闭包是**非 move**(`|__item| {…}`),按引用借用 plain 变量,而
+  `each_block_keyed` 要求 `key_of: Fn(&T)->K + 'static` → 借用函数局部无法 'static。
+  修法:把 key 闭包改 `move` + 外层捕获份(但会给所有 keyed each 的 key 闭包加
+  `move`、churn wide golden)。narrow(keyed each + key 引 plain,罕见),留后续。
 - **keyed `{#each}` 的 key 表达式引用非 Copy plain 变量 → E0373**(2026-07-24
   对抗评审查获,与上条同域但**机制不同**、暂未修):`{#each rows as it (key_using_plain)}`
   的 key 闭包是**非 move**(`|__item| {…}`),按引用借用 plain 变量,而

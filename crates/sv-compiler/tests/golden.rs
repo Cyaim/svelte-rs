@@ -91,8 +91,10 @@ fn wide_fixture_codegen_is_stable() {
 /// 多闭包捕获面:同一非 Copy plain 变量既进**引导闭包**(if 条件 / await future /
 /// key)又进**分支/body/each-list** —— 每个同级 move 闭包各得一份**外层**捕获份
 /// (`with_captured_plain`),避免争夺所有权(E0382)。修复前这份 fixture 生成的代码
-/// 编不过。**注意 golden 只 syn::parse_file(语法),不做借用检查**——E0382 的真实
-/// 编译级守卫是 `examples/multiclosure-check`(build.rs 真编生成代码,回退即翻红)。
+/// 编不过。**注意 golden 只 syn::parse_file(语法),不做借用检查**——**块级** E0382
+/// 的真实编译级守卫是 `examples/multiclosure-check`(build.rs 真编生成代码,回退即翻红)。
+/// (元素属性层的同类 E0382 —— 同元素多个属性 move 闭包共享 plain —— 是独立存量项,
+/// 见 docs/plans/open-issues.md,本 fixture 与 multiclosure-check 均不覆盖。)
 #[test]
 fn multiclosure_captures_are_per_branch() {
     let src = std::fs::read_to_string(fixtures_dir().join("multiclosure.svelte"))

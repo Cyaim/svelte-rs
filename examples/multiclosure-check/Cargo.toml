@@ -1,8 +1,10 @@
-# 编译级守卫:golden 测试只 syn::parse_file(语法),不做借用检查,E0382/E0373
-# 这类借用错误会漏网。这个 lib 把一份"非 Copy plain 变量同时进 if 条件 /
-# await future / key / each list 与各分支/body"的 .svelte 真编进来 ——
-# `cargo build --workspace` 会对生成代码做完整 rustc(含借用检查),
-# 修复回退即在此翻红(生成的 fn 不必被调用,Rust 照样借用检查)。
+# 编译级守卫:golden 测试只 syn::parse_file(语法),不做借用检查,E0382 这类
+# 借用错误会漏网。这个 lib 把一份"非 Copy plain 变量同时进**块构造器**的
+# if 条件 / await future / key / each list 与各分支/body"的 .svelte 真编进来 ——
+# `cargo build --workspace` 会对生成代码做真实 rustc(含借用检查),
+# 块级修复回退即在此翻红(生成的 fn 不必被调用,Rust 照样借用检查)。
+# 注:元素属性层的同类 E0382(同元素多属性 move 闭包共享 plain)是独立存量项,
+# 见 docs/plans/open-issues.md,本守卫不覆盖。
 [package]
 name = "multiclosure-check"
 version.workspace = true
