@@ -11,5 +11,8 @@ categories.workspace = true
 authors.workspace = true
 description = "VAP(Tencent Video Animation Player)素材解析与 RGB+alpha 合成 —— 纯 Rust,零依赖"
 readme = "README.md"
+# 暂不随首发(H.264 解码需应用侧自带,示例 vap-gift 走 ffmpeg);不在任何首发
+# crate 的依赖闭包里。机器可查的护栏,防误发。
+publish = false
 
 [dependencies]

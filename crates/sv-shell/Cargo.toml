@@ -19,12 +19,16 @@ sv-ui = { workspace = true }
 # 后端由**应用**自选(env_logger / tracing-subscriber+tracing-log / …)——
 # 这就是"轻松更换日志库":库不绑后端,换后端不用碰库。不装后端时零成本。
 log = "0.4"
-# 矢量动画:velato 求值 → PathSink 路径动词,壳侧桥到 Painter(AnimSource::Vector)
-sv-lottie = { workspace = true }
-# PAG 位图序列:容器解析 + 差分帧重放(解码器由调用方注入,壳侧不绑图片解码器)
-sv-pag = { workspace = true }
-# WebP 解码(纯 Rust,image-rs 维护):PAG 位图序列帧块用它解码,配 register_pag
-image-webp = "0.2"
+# 矢量动画:velato 求值 → PathSink 路径动词,壳侧桥到 Painter(AnimSource::Vector)。
+# **可选**(feature `lottie`):velato/wgpu 系依赖重且有导入期 panic 面,默认不进
+# 消费者依赖树;发布时仍作为 optional dep 需在 crates.io 就位(见 CHANGELOG 首发清单)。
+sv-lottie = { workspace = true, optional = true }
+# PAG 位图序列:容器解析 + 差分帧重放(解码器由调用方注入,壳侧不绑图片解码器)。
+# **可选**(feature `pag`)。
+sv-pag = { workspace = true, optional = true }
+# WebP 解码(纯 Rust,image-rs 维护):PAG 位图序列帧块用它解码,配 register_pag。
+# 随 feature `pag` 一起启用。
+image-webp = { version = "0.2", optional = true }
 winit = "0.30"
 softbuffer = "0.4"
 tiny-skia = "0.11"
@@ -43,4 +47,9 @@ accesskit_winit = "0.33"
 
 [features]
 default = []
+# 矢量动画(Lottie)。register_vector/unregister_vector 与 AnimSource::Vector 的
+# 渲染路径随它进出。默认关:velato 依赖重、有导入期 panic 面,大多数应用不播矢量动画。
+lottie = ["dep:sv-lottie"]
+# PAG 位图序列动画(register_pag/register_pag_webp)。默认关。
+pag = ["dep:sv-pag", "dep:image-webp"]
 backend-vello = ["dep:vello", "dep:pollster"]

@@ -80,7 +80,9 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        features: [backend-vello]
+        # backend-vello:GPU 后端;lottie,pag:动画 feature(默认关,须专门测一遍
+        # 否则默认 test 道照不到 sv-shell 的矢量/PAG 路径与那 5 个门控测试)
+        features: [backend-vello, "lottie,pag"]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -242,6 +244,10 @@ jobs:
       # 一辈子照不到。只跑 sv-shell:特性只影响它
       - name: clippy(backend-vello)
         run: cargo clippy -p sv-shell --all-targets --features backend-vello -- -D warnings
+
+      # 同理:lottie/pag 默认关,矢量/PAG 桥接与那 5 个门控测试的 lint 默认道照不到
+      - name: clippy(lottie,pag)
+        run: cargo clippy -p sv-shell --all-targets --features lottie,pag -- -D warnings
 
   # **这里不写 `name:`,是被 GitHub 拒过一次换来的。**
   # 原来写的是 `name: MSRV (${{ env.MSRV }})` —— 而 job 级的 `name` **不能用

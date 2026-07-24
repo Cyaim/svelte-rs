@@ -15,8 +15,11 @@
   [未发布] 的变更/移除段);谈 1.0 还差 crates.io 首发与稳定期。
 
 首发 crate(同版本号、依赖序推送):sv-reactive → sv-ui → sv-compiler →
-sv-macro → sv-shell → 伞 crate svelte-rs;sv-lsp / sv-pag / sv-lottie / sv-vap
-暂不随首发,`examples/` 不发布。
+sv-macro → **sv-lottie / sv-pag**(sv-shell 的可选依赖,即便默认关也须在
+registry 就位——crates.io 要求 optional 依赖同样已发布)→ sv-shell →
+伞 crate svelte-rs,共 **8 crate**。**sv-lsp / sv-vap 暂不随首发**(已在各自
+Cargo.toml 标 `publish = false`,不在任何首发 crate 的依赖闭包里);
+`examples/` 不发布。
 
 ## [未发布]
 
@@ -187,6 +190,18 @@ sv-macro → sv-shell → 伞 crate svelte-rs;sv-lsp / sv-pag / sv-lottie / sv-v
 - `sv_shell::run_app` 的错误路径改为返回 [`ShellError`],窗口/呈现层不再 panic;
   帧内 present/resize 失败降级为丢帧。
 - 长文本溢出时输入框的点击定位改为与绘制同源(此前忽略横向滚移,点击会偏)。
+
+- **动画依赖 feature 化(sv-shell,API breaking + 首发前置,2026-07-24)**:
+  `sv-lottie`(Lottie 矢量)与 `sv-pag`+`image-webp`(PAG 位图序列)从硬依赖
+  改为**可选**,分别置于 feature `lottie`、`pag` 之后,**默认关**。动机:velato
+  系依赖重且有导入期 panic 面,多数应用不播矢量/PAG 动画,不该被强塞进默认
+  依赖树;顺带解开"六 crate 首发清单与 sv-shell 硬依赖矛盾"的死结
+  (optional 依赖仍须发布,故首发清单据实改为 8 crate,但默认构建不拉它们)。
+  受影响的 API:`register_vector`/`unregister_vector`/`Lottie`/`LottieError`
+  归 `lottie`;`register_pag`/`register_pag_webp`/`BitmapSequence`/`DecodedImage`/
+  `PagFile` 归 `pag`。迁移:用到矢量/PAG 动画的应用在依赖里加
+  `features = ["lottie"]` / `["pag"]`。位图帧路径(`register_frames`/`frame` /
+  `AnimSource::Frames`)与 VAP 不受影响(vap-gift 示例走 `register_frames`,无需 feature)。
 
 ### 移除
 
