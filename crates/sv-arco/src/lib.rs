@@ -22,8 +22,14 @@
 //! 视觉规范派生自 ByteDance Arco Design(MIT,见 `LICENSE-ARCO`);
 //! 本 crate 为非官方实现,与 ByteDance 无关联、未获其背书。
 
-// 生成产物:components/Button.svelte → pub fn button + pub struct ButtonProps
+// 生成产物:components/*.svelte → pub fn <snake> + pub struct <Pascal>Props
 include!(concat!(env!("OUT_DIR"), "/button.rs"));
+include!(concat!(env!("OUT_DIR"), "/tag.rs"));
+include!(concat!(env!("OUT_DIR"), "/badge.rs"));
+include!(concat!(env!("OUT_DIR"), "/divider.rs"));
+include!(concat!(env!("OUT_DIR"), "/alert.rs"));
+include!(concat!(env!("OUT_DIR"), "/typography.rs"));
+include!(concat!(env!("OUT_DIR"), "/link.rs"));
 
 /// 设计令牌层的再导出(色板算法 + 全局令牌),免得消费方多记一个 crate 名。
 pub use sv_arco_tokens as tokens;

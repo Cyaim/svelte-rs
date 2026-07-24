@@ -92,7 +92,7 @@ cargo run -p showcase -- --png out.png  # 离屏渲染一帧(无需窗口)
 | `crates/sv-vap` · `sv-pag` · `sv-lottie` | 动画格式解析器(VAP / PAG / Lottie) |
 | `crates/sv-lsp` | `.svelte` 语言服务器(LSP):实时编译诊断 |
 | `crates/sv-arco-tokens` | Arco Design 设计令牌:色板算法移植 + `global.less` 转译(Rust 常量 + `:root` CSS) |
-| `crates/sv-arco` | Arco 风格组件库(`.svelte` 组件;Button 已落地,其余排队) |
+| `crates/sv-arco` | Arco 风格组件库(`.svelte` 组件;A1 静态件已落地:Button/Tag/Badge/Divider/Alert/Typography/Link) |
 | `examples/` | showcase · counter(-sfc) · todo-sfc · settings-sfc · input-demo · overlay-demo · membench · vap-gift · arco-gallery |
 
 ## 现状

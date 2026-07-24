@@ -1770,6 +1770,66 @@ text { font-size: 1.25rem; color: #334; }
         );
     }
 
+    /// 条件类(`class:x={cond}`)上的 `&:active` / `&:focus` 变体必须与 `&:hover`
+    /// 对称发射 —— 此前 codegen 只为条件类收集 hover,active/focus 被静默丢弃
+    /// (sv-arco Button/Link 的按压态因此永不生效,对抗评审 2026-07-24 查获)。
+    ///
+    /// 断言按压/聚焦档色值出现在**受条件门控的臂**里(`if <cond> && __ac.get()`),
+    /// 而非无条件档;并做变异探针:把 &:active 改成 &:hover,active 色应从
+    /// 产物消失 —— 证明这条测试真的盯着条件类的 active 路径,不是被静态类蒙混。
+    #[test]
+    fn conditional_class_active_and_focus_variants_emit() {
+        let src = r##"<script>
+let on = $state(true);
+</script>
+<view>
+  <button class="b" class:hot={on}>x</button>
+</view>
+<style>
+.b { background-color: #ffffff; }
+.hot {
+  color: #010203;
+  &:hover  { background-color: rgb(10, 20, 30); }
+  &:active { background-color: rgb(40, 50, 60); }
+  &:focus  { background-color: rgb(70, 80, 90); }
+}
+</style>
+"##;
+        let code = compile(src, "c").expect("应编译成功");
+        syn::parse_file(&code).unwrap();
+
+        // 三个状态槽 + 三套接线都应存在
+        assert!(
+            code.contains("__hv") && code.contains("__ac") && code.contains("__fc"),
+            "三状态:\n{code}"
+        );
+        assert!(
+            code.contains("set_on_pointer_down") && code.contains("set_on_pointer_up"),
+            "条件类 :active 应接按压事件:\n{code}"
+        );
+        assert!(
+            code.contains("set_focusable"),
+            "条件类 :focus 应设可获焦:\n{code}"
+        );
+        // active/focus 档色值必须落在受条件门控的臂里(&& __ac / && __fc)
+        assert!(
+            code.contains("__ac.get()") && code.contains("Color::rgba(40u8, 50u8, 60u8, 255u8)"),
+            "按压色应经条件臂发射:\n{code}"
+        );
+        assert!(
+            code.contains("__fc.get()") && code.contains("Color::rgba(70u8, 80u8, 90u8, 255u8)"),
+            "聚焦色应经条件臂发射:\n{code}"
+        );
+
+        // 变异探针:把条件类的 &:active 换成 &:hover(color 保持),active 色应消失
+        let mutated = src.replace("&:active { background-color: rgb(40, 50, 60); }", "");
+        let mcode = compile(&mutated, "c").expect("应编译成功");
+        assert!(
+            !mcode.contains("Color::rgba(40u8, 50u8, 60u8, 255u8)"),
+            "删掉 &:active 后按压色应不再出现(否则测试是恒真的):\n{mcode}"
+        );
+    }
+
     // ---- 对抗审查回归测试(2026-07-17,docs 见审查 workflow)----
 
     #[test]
