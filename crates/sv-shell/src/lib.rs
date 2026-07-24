@@ -1128,6 +1128,36 @@ impl Pane {
                     h();
                 }
             }
+            // 右键:命中最上层带 oncontextmenu 的节点,以**逻辑坐标**调用回调
+            // (用户据此开一个 overlay 上下文菜单)。禁用节点不触发(handler getter 收口)
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Right,
+                ..
+            } => {
+                let scale = self.window.scale_factor();
+                let (lx, ly) = (
+                    (self.cursor.0 / scale) as f32,
+                    (self.cursor.1 / scale) as f32,
+                );
+                let target = self
+                    .layout
+                    .placed
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .find(|(i, p)| {
+                        self.layout.hit_allowed(*i)
+                            && p.hit(lx, ly)
+                            && self.doc.context_menu_handler(p.id).is_some()
+                    })
+                    .map(|(_, p)| p.id);
+                if let Some(id) = target
+                    && let Some(h) = self.doc.context_menu_handler(id)
+                {
+                    h(lx, ly);
+                }
+            }
             _ => {}
         }
     }

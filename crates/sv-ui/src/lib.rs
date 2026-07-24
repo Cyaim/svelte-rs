@@ -494,6 +494,9 @@ pub struct ViewNode {
     pub scroll_y: f32,
     /// 滚动偏移变化回调(新 (x, y);virtual_scroll 桥与 onscroll 的载体)
     pub on_scroll: Option<Rc<dyn Fn(f32, f32)>>,
+    /// 右键(上下文)菜单回调,参数是点击处的**逻辑坐标** (x, y)——用户在回调里
+    /// 按坐标开一个弹层(overlay Anchor::Point)。禁用节点不触发(与点击同门)。
+    pub on_context_menu: Option<Rc<dyn Fn(f32, f32)>>,
     /// 虚拟内容尺寸覆盖(virtual_scroll 用:滚动范围/滚动条比例按它算,
     /// 不按实际子树尺寸)
     pub content_override: Option<(f32, f32)>,
@@ -557,6 +560,7 @@ impl Doc {
             scroll_x: 0.0,
             scroll_y: 0.0,
             on_scroll: None,
+            on_context_menu: None,
             content_override: None,
             accessible_label: None,
             accessible_description: None,
@@ -706,6 +710,7 @@ impl Doc {
             scroll_x: 0.0,
             scroll_y: 0.0,
             on_scroll: None,
+            on_context_menu: None,
             content_override: None,
             accessible_label: None,
             accessible_description: None,
@@ -1540,6 +1545,28 @@ impl Doc {
             .and_then(|n| n.on_scroll.clone())
     }
 
+    /// 右键(上下文)菜单回调:参数是点击处逻辑坐标 (x, y)
+    pub fn set_on_context_menu(&self, id: ViewId, f: impl Fn(f32, f32) + 'static) {
+        {
+            let mut inner = self.0.borrow_mut();
+            let Some(n) = inner.nodes.get_mut(id) else {
+                return;
+            };
+            n.on_context_menu = Some(Rc::new(f));
+        }
+        self.bump(dirty::DirtyItem::Paint { id });
+    }
+
+    /// 取出右键菜单回调(**禁用节点拿不到**,与 [`Doc::click_handler`] 同门)
+    pub fn context_menu_handler(&self, id: ViewId) -> Option<Rc<dyn Fn(f32, f32)>> {
+        self.0
+            .borrow()
+            .nodes
+            .get(id)
+            .filter(|n| !n.disabled)
+            .and_then(|n| n.on_context_menu.clone())
+    }
+
     /// 虚拟内容尺寸覆盖(virtual_scroll 桥用;None = 按实际子树尺寸)
     pub fn set_content_override(&self, id: ViewId, size: Option<(f32, f32)>) {
         {
@@ -2041,6 +2068,29 @@ mod tests {
         // 回调仍连着原 signal
         doc.click_handler(btn).unwrap()();
         assert_eq!(count.get(), 1, "放开后点击应真正生效");
+    }
+
+    /// `oncontextmenu`(右键):回调收到点击处逻辑坐标;禁用节点取不到(同点击门)。
+    #[test]
+    fn context_menu_handler_carries_pos_and_disabled_gates() {
+        use std::cell::Cell;
+        let doc = Doc::new();
+        let btn = doc.create_button("菜单");
+        doc.append(doc.root(), btn);
+        let seen = Rc::new(Cell::new((0.0f32, 0.0f32)));
+        {
+            let seen = seen.clone();
+            doc.set_on_context_menu(btn, move |x, y| seen.set((x, y)));
+        }
+        // 取出并以坐标调用 → 用户回调收到点击处坐标(据此开弹层)
+        doc.context_menu_handler(btn).expect("应有右键回调")(12.0, 34.0);
+        assert_eq!(seen.get(), (12.0, 34.0));
+        // 禁用后取不到(与 click_handler 同门)
+        doc.set_disabled(btn, true);
+        assert!(
+            doc.context_menu_handler(btn).is_none(),
+            "禁用后右键回调应取不到"
+        );
     }
 
     #[test]
