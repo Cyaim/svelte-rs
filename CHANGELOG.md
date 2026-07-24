@@ -17,9 +17,10 @@
 首发 crate(同版本号、依赖序推送):sv-reactive → sv-ui → sv-compiler →
 sv-macro → **sv-lottie / sv-pag**(sv-shell 的可选依赖,即便默认关也须在
 registry 就位——crates.io 要求 optional 依赖同样已发布)→ sv-shell →
-伞 crate svelte-rs,共 **8 crate**。**sv-lsp / sv-vap 暂不随首发**(已在各自
-Cargo.toml 标 `publish = false`,不在任何首发 crate 的依赖闭包里);
-`examples/` 不发布。
+伞 crate svelte-rs,共 **8 crate**。**不随首发的 crate 均已标 `publish = false`
+作为误发护栏**(都不在这 8 个的依赖闭包里):`sv-lsp`(LSP MVP)、`sv-vap`
+(VAP,需应用侧 H.264 解码)、以及组件库轨道的 `sv-arco` / `sv-arco-tokens`
+(随 D 单独排期)。`examples/` 不发布。
 
 ## [未发布]
 
