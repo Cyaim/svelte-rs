@@ -1,0 +1,24 @@
+[package]
+name = "sv-arco"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+authors.workspace = true
+description = "Arco Design 风格组件库(.svelte 单文件组件,视觉对齐 arco.design)"
+readme = "README.md"
+# 首发清单(CHANGELOG 六 crate 口径)未含本 crate;进清单前防误发。
+publish = false
+
+[dependencies]
+sv-reactive = { workspace = true }
+sv-ui = { workspace = true }
+sv-arco-tokens = { workspace = true }
+
+[build-dependencies]
+sv-compiler = { workspace = true }
+sv-arco-tokens = { workspace = true }

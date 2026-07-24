@@ -1,0 +1,18 @@
+[package]
+name = "sv-arco-tokens"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+authors.workspace = true
+description = "Arco Design 设计令牌:色板算法移植 + global.less 转译(Rust 常量 + :root CSS 双出口)—— 纯 Rust,零依赖"
+readme = "README.md"
+# 首发清单(CHANGELOG 六 crate 口径)未含本 crate;进清单前防误发。
+# publish-readiness CI 按 `select(.publish != [])` 过滤,置 false 会跳过其元数据检查。
+publish = false
+
+[dependencies]

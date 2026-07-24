@@ -22,6 +22,20 @@ sv-macro → sv-shell → 伞 crate svelte-rs;sv-lsp / sv-pag / sv-lottie / sv-v
 
 ### 新增
 
+- **sv-arco-tokens:Arco Design 令牌层(调研 26 A0 波次)**:色板算法自
+  `@arco-design/color` 0.4.0 逐式移植(HSL 色相路由/构造钳制/JS 舍入/暗色板
+  hex 量化四个数值细节全对齐),金样 = 上游仓库自带 jest 断言原文机械提取
+  (13 色板 × 亮暗 × 10 档逐字符一致);`global.less`(web-react 2.66.16,
+  commit 已 pin)经入库生成器转译为 Rust 常量 + `:root` CSS 亮暗双出口,
+  `tests/sync.rs` 防漂移。合规:LICENSE-ARCO + 非官方声明。
+- **sv-arco:Arco 风格组件库起步(调研 26 A1 波次)+ examples/arco-gallery**:
+  首件 **Button** 全矩阵(primary/secondary/outline/text × default/warning/
+  danger/success × mini/small/default/large × disabled),取值就近抄自
+  vendored `button-token.less`;`.svelte` 编写,build.rs 把令牌 `:root` 块
+  注入各组件 `<style>` 后走 sv-compiler(`:root` 作用域是每文件独立的)。
+  A1 降级口径(无图标/无阴影/单字重/无过渡,disabled 走条件类)见 crate
+  README。**对外是 Rust 函数 API**(组件注册表单构建目录,跨 crate 无
+  `<Button>` 标签)。两 crate 均 `publish = false`,不入首发清单。
 - **scroll-blit + 脏矩形(CPU 呈现路径)**:滚动帧把上一帧像素按位移复制、
   只重画新露出的条与滚动条列;打字/勾选/换色/焦点/光标闪烁只重画对应矩形
   (`DirtyItem::Paint` 带上了 `id`)。损伤重画走同尺寸 scratch(白底完整

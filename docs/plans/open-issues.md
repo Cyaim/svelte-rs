@@ -1,4 +1,4 @@
-# 未了结问题登记(截至 2026-07-23)
+# 未了结问题登记(截至 2026-07-24)
 
 > 这一批工作横跨增量布局、ADR-2 ③、`sv check`、以及三种动画格式。
 > 每条线各自的 README / 计划文档里都写了缺口,但**散着放就等于没写** ——
@@ -136,6 +136,28 @@
 - **只见过一种布局**(alpha 在右、半分辨率)。代码按配置矩形走、不假设方位,等分辨率那条路有测试,但**没有真实的"alpha 在下方"素材可验**。
 - 音频没管(这些 mp4 带 AAC 礼物音效)。
 - 手写 JSON 取值器假设值里**不含转义引号**。
+
+### sv-arco 组件库(2026-07-24 起步,调研 26)
+
+- **A0/A1 已落地**:sv-arco-tokens(色板 + global.less 转译,金样/同步/抽查
+  三层测试)+ Button 全矩阵(behavior 测试 6 项 + arco-gallery 离屏 PNG)。
+- **hover/active 的视觉没有自动化断言**:行为测试只断初始样式与点击;悬停
+  换色走的是 sv-compiler 既有 `bind_style` 通路(showcase 同款写法),但
+  "条件类 + 伪类变体"组合的运行期正确性目前只有目测。想补要给 sv-ui 造
+  pointer enter/leave 的公开派发口(今天是 shell 内部接线)。
+- **暗色模式未接**:tokens 的 `CSS_ROOT_DARK` 已生成,但 build.rs 只注入
+  亮色块;换主题要等 `@media (prefers-color-scheme)`(C2)或组件加 mode
+  prop 再议。**别拿"CSS_ROOT_DARK 存在"当暗色已支持的证据。**
+- **focus-visible 缺**:arco 的键盘焦点环是 box-shadow(0 0 0 2px 色板-3),
+  渲染动词 ⏳;Tab 落焦目前无视觉反馈,键盘可达性数据面(focusable/激活)
+  是好的。
+- **组件跨 crate 无标签语法**:PropsRegistry 单构建目录扫描,`<Button>` 只
+  在 sv-arco 自己的 components/ 内可用;对外交付 = Rust 函数 API。要给
+  消费者 `.svelte` 标签体验,需要编译器支持外部组件注册表(未排期,与
+  ADR-2 相关,动它之前先别承诺)。
+- **variant/status/size 是字符串 prop**:拼错静默落到 secondary/default
+  形态(36 个条件类全 false 时只剩基类)。换枚举要么让 $props 支持非
+  String 复杂类型的字面量传参体验变好,要么生成侧校验——都没做。
 
 ### 内核合并(2026-07-23 对抗评审)遗留的存量小项
 

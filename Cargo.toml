@@ -10,6 +10,8 @@ members = [
     "crates/sv-pag",
     "crates/sv-vap",
     "crates/sv-lsp",
+    "crates/sv-arco-tokens",
+    "crates/sv-arco",
     "crates/svelte-rs",
     "examples/counter",
     "examples/counter-sfc",
@@ -20,6 +22,7 @@ members = [
     "examples/settings-sfc",
     "examples/overlay-demo",
     "examples/vap-gift",
+    "examples/arco-gallery",
 ]
 
 [workspace.package]
@@ -48,6 +51,8 @@ sv-lottie = { path = "crates/sv-lottie", version = "0.0.1" }
 sv-pag = { path = "crates/sv-pag", version = "0.0.1" }
 sv-vap = { path = "crates/sv-vap", version = "0.0.1" }
 sv-lsp = { path = "crates/sv-lsp", version = "0.0.1" }
+sv-arco-tokens = { path = "crates/sv-arco-tokens", version = "0.0.1" }
+sv-arco = { path = "crates/sv-arco", version = "0.0.1" }
 
 [profile.dev]
 # UI 原型迭代期:略微提高优化等级让 demo 不至于太卡,同时保持编译速度
