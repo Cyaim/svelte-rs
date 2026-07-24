@@ -2,7 +2,7 @@
 
 # 快速上手
 
-svelte-rs(工作代号 `sv`)是一个 Svelte 风格 Rust 桌面 UI 库的**探索原型**。核心思路是把 Svelte 5 的编译哲学搬到原生桌面:模板在编译期变成对 retained 场景树的定点更新代码——运行时没有虚拟 DOM,没有 diff。Windows / Linux / macOS 现在就能跑(基于 winit 的窗口壳),鸿蒙(HarmonyOS NEXT)在路线图上(见 [DESIGN.md](../DESIGN.md))。现阶段 API 随时会变,没有任何稳定性承诺。
+svelte-rs 是一个 Svelte 风格 Rust 桌面 UI 库的**探索原型**。核心思路是把 Svelte 5 的编译哲学搬到原生桌面:模板在编译期变成对 retained 场景树的定点更新代码——运行时没有虚拟 DOM,没有 diff。Windows / Linux / macOS 现在就能跑(基于 winit 的窗口壳),鸿蒙(HarmonyOS NEXT)在路线图上(见 [DESIGN.md](../DESIGN.md))。现阶段 API 随时会变,没有任何稳定性承诺。
 
 四行代码看完整个响应式模型:
 

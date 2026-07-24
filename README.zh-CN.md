@@ -1,6 +1,6 @@
 **中文** | [English](./README.md)
 
-# svelte-rs(工作代号 `sv`)
+# svelte-rs
 
 [![CI](https://github.com/Cyaim/svelte-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/Cyaim/svelte-rs/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#许可)

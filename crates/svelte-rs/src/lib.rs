@@ -3,19 +3,31 @@
 //! Svelte 风格的 Rust 跨平台桌面 UI 库(Win/Linux/macOS/鸿蒙)——**伞 crate**。
 //!
 //! 生态按职责拆成若干 `sv-*` 子 crate(响应式内核 / 场景树 / 宏前端 / 渲染壳 /
-//! `.svelte` 编译器)。本 crate 是**单一入口**:`cargo add svelte-rs` 一条依赖就
-//! 拿到全套,子模块名与子 crate 一一对应(tokio / tokio-* 同款分层)。
+//! `.svelte` 编译器)。本 crate 把它们按名 re-export,作为**统一命名入口**
+//! (子模块名与子 crate 一一对应,tokio / tokio-* 同款分层)。
 //!
-//! ```ignore
-//! use svelte_rs::prelude::*;
+//! ## 依赖声明(重要:不是"一条依赖拿全套")
 //!
-//! let count = state(0i32);
-//! let double = derived(move || count.get() * 2);
-//! effect(move || println!("{}", double.get()));
-//! count.set(1); // 精准触发,无 diff
+//! `view!` 宏与 `.svelte` 编译器生成的代码用**绝对路径** `::sv_ui::` / `::sv_reactive::`
+//! 发射对场景树/响应式的调用 —— 这按 extern prelude 解析,伞 crate 的 re-export
+//! **救不了**它(只依赖 `svelte-rs` 写 `view!`/`.svelte` 会 `E0433: could not find
+//! sv_ui`)。所以用 UI 前端时,**必须把 `sv-ui` 与 `sv-reactive` 也列为直接依赖**;
+//! `.svelte` 单文件组件另需 `sv-compiler` 作 **build-dependency**(build.rs 里
+//! `sv_compiler::build("src")`)。典型 `Cargo.toml`:
+//!
+//! ```toml
+//! [dependencies]
+//! sv-reactive = "0.1"
+//! sv-ui = "0.1"
+//! sv-shell = "0.1"      # 开窗渲染;瘦身/纯响应式可不要
+//! # sv-macro = "0.1"    # 用 view! 宏时
+//!
+//! [build-dependencies]
+//! sv-compiler = "0.1"   # 用 .svelte 单文件组件时
 //! ```
 //!
-//! 想瘦依赖(比如只用响应式内核)可以直接依赖对应子 crate,不必经本 crate。
+//! 伞 crate `svelte-rs` 便于一处拿到统一路径(`svelte_rs::ui`、`svelte_rs::reactive`
+//! …)与 prelude,但**不替代**上面的直接依赖。示例见 `examples/`(均直依子 crate)。
 
 // 子 crate 按名 re-export —— 与子 crate 一一对应,永不漂移。
 pub use sv_compiler as compiler;
