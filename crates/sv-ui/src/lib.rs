@@ -497,6 +497,10 @@ pub struct ViewNode {
     /// 右键(上下文)菜单回调,参数是点击处的**逻辑坐标** (x, y)——用户在回调里
     /// 按坐标开一个弹层(overlay Anchor::Point)。禁用节点不触发(与点击同门)。
     pub on_context_menu: Option<Rc<dyn Fn(f32, f32)>>,
+    /// 指针移动回调,参数是指针**逻辑坐标** (x, y)。高频事件(每次移动都派发),
+    /// 用于自定义拖拽/滑块/画布跟随。**被动位置事件,禁用节点仍触发**(与浏览器
+    /// 一致;disabled 只挡"动作"类回调 click/contextmenu,不挡位置跟踪)。
+    pub on_pointer_move: Option<Rc<dyn Fn(f32, f32)>>,
     /// 虚拟内容尺寸覆盖(virtual_scroll 用:滚动范围/滚动条比例按它算,
     /// 不按实际子树尺寸)
     pub content_override: Option<(f32, f32)>,
@@ -561,6 +565,7 @@ impl Doc {
             scroll_y: 0.0,
             on_scroll: None,
             on_context_menu: None,
+            on_pointer_move: None,
             content_override: None,
             accessible_label: None,
             accessible_description: None,
@@ -711,6 +716,7 @@ impl Doc {
             scroll_y: 0.0,
             on_scroll: None,
             on_context_menu: None,
+            on_pointer_move: None,
             content_override: None,
             accessible_label: None,
             accessible_description: None,
@@ -1567,6 +1573,27 @@ impl Doc {
             .and_then(|n| n.on_context_menu.clone())
     }
 
+    /// 指针移动回调:参数是指针逻辑坐标 (x, y)
+    pub fn set_on_pointer_move(&self, id: ViewId, f: impl Fn(f32, f32) + 'static) {
+        {
+            let mut inner = self.0.borrow_mut();
+            let Some(n) = inner.nodes.get_mut(id) else {
+                return;
+            };
+            n.on_pointer_move = Some(Rc::new(f));
+        }
+        self.bump(dirty::DirtyItem::Paint { id });
+    }
+
+    /// 取出指针移动回调(**被动位置事件,禁用节点仍返回** —— 与 click/contextmenu 门不同)
+    pub fn pointer_move_handler(&self, id: ViewId) -> Option<Rc<dyn Fn(f32, f32)>> {
+        self.0
+            .borrow()
+            .nodes
+            .get(id)
+            .and_then(|n| n.on_pointer_move.clone())
+    }
+
     /// 虚拟内容尺寸覆盖(virtual_scroll 桥用;None = 按实际子树尺寸)
     pub fn set_content_override(&self, id: ViewId, size: Option<(f32, f32)>) {
         {
@@ -2093,6 +2120,29 @@ mod tests {
         );
     }
 
+    /// `onpointermove`:回调收到指针逻辑坐标;**禁用节点仍返回**(被动位置事件,
+    /// 与 click/contextmenu 门相反)。
+    #[test]
+    fn pointer_move_handler_carries_pos_and_survives_disabled() {
+        use std::cell::Cell;
+        let doc = Doc::new();
+        let v = doc.create_view();
+        doc.append(doc.root(), v);
+        let seen = Rc::new(Cell::new((0.0f32, 0.0f32)));
+        {
+            let seen = seen.clone();
+            doc.set_on_pointer_move(v, move |x, y| seen.set((x, y)));
+        }
+        doc.pointer_move_handler(v).expect("应有移动回调")(5.5, 7.5);
+        assert_eq!(seen.get(), (5.5, 7.5));
+        // 位置事件不受禁用门影响(disabled 只挡动作类)
+        doc.set_disabled(v, true);
+        assert!(
+            doc.pointer_move_handler(v).is_some(),
+            "禁用节点仍应派发指针移动(被动位置事件)"
+        );
+    }
+
     #[test]
     fn text_update_is_fine_grained() {
         let doc = Doc::new();
@@ -2512,8 +2562,16 @@ mod memory_probe {
         // 2026-07-18 预算两次上调:R1 焦点/输入(focusable/accepts_text/
         // on_key/on_focus_change/input/scroll/on_scroll/content_override
         // ≈ +100B)与 R2 flex 第一批(justify/align/grow/shrink/min-max
-        // ≈ +48B,调研 23 §2.2 冷字段 Box 化留作超线时的收缩手段)
+        // ≈ +48B,调研 23 §2.2 冷字段 Box 化留作超线时的收缩手段)。
+        // 2026-07-24 再上调 448→464:手写组件事件面新增两个 `Option<Rc<dyn Fn(f32,f32)>>`
+        // (on_context_menu、on_pointer_move,各 16B),都是**冷字段**(绝大多数节点为 None)。
+        // ⚠ 已达"该 Box 化冷 on_* 处理器"的临界:再加处理器**先做**把所有稀有
+        //   on_*(enter/down/up/leave/scroll/context_menu/pointer_move/key/focus_change)
+        //   打包进一个 `Option<Box<Handlers>>`(每节点省一大截),而不是继续加字段抬预算。
         assert!(st <= 192, "Style 超预算: {st}B");
-        assert!(vn <= 448, "ViewNode 超预算: {vn}B");
+        assert!(
+            vn <= 464,
+            "ViewNode 超预算: {vn}B(该 Box 化冷 on_* 处理器了,见上注释)"
+        );
     }
 }

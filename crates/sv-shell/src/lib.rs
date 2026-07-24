@@ -918,6 +918,29 @@ impl Pane {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = (position.x, position.y);
+                // onpointermove:命中最上层带回调的节点,以逻辑坐标派发(自定义拖拽/
+                // 滑块/画布跟随)。放在拖动分支之前 → 拖动期间也照常派发(与浏览器一致)
+                {
+                    let scale = self.window.scale_factor();
+                    let (lx, ly) = ((position.x / scale) as f32, (position.y / scale) as f32);
+                    let target = self
+                        .layout
+                        .placed
+                        .iter()
+                        .enumerate()
+                        .rev()
+                        .find(|(i, p)| {
+                            self.layout.hit_allowed(*i)
+                                && p.hit(lx, ly)
+                                && self.doc.pointer_move_handler(p.id).is_some()
+                        })
+                        .map(|(_, p)| p.id);
+                    if let Some(id) = target
+                        && let Some(h) = self.doc.pointer_move_handler(id)
+                    {
+                        h(lx, ly);
+                    }
+                }
                 // 滚动条拖动优先于文本拖选(两者不会同时进入)
                 if let Some((id, grab)) = self.drag_scroll {
                     let ly = (position.y / self.window.scale_factor()) as f32;

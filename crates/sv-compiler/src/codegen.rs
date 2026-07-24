@@ -1206,6 +1206,20 @@ impl Cg<'_> {
                     let call = quote! { __doc.set_on_context_menu(#el, #handler); };
                     ts.extend(self.with_captured_plain(call, scope));
                 }
+                // onpointermove:指针移动回调,签名 |x: f32, y: f32|(逻辑坐标)。
+                // 高频事件,用于自定义拖拽/滑块。任意元素可用
+                "onpointermove" => {
+                    let AttrValue::Expr(e) = &attr.value else {
+                        return Err(CompileError::at_offset(
+                            self.source,
+                            attr.offset,
+                            "事件处理器应为 {闭包表达式}(签名 |x: f32, y: f32|)",
+                        ));
+                    };
+                    let handler = self.expr(e, scope, true)?;
+                    let call = quote! { __doc.set_on_pointer_move(#el, #handler); };
+                    ts.extend(self.with_captured_plain(call, scope));
+                }
                 // bind:scrolly:Signal<f32> ↔ 纵向滚动偏移双向桥(调研 22)。
                 // 延后到事件循环末尾发射:桥会链式保留既有 on_scroll,
                 // 与 onscroll 共存时二者都生效
@@ -1351,13 +1365,14 @@ impl Cg<'_> {
                             | "onsubmit"
                             | "onscroll"
                             | "oncontextmenu"
+                            | "onpointermove"
                     ) =>
                 {
                     return Err(CompileError::at_offset(
                         self.source,
                         attr.offset,
                         format!(
-                            "v0 事件支持 onclick/onpointerenter/onpointerleave/onkeydown/onfocus/onblur/oninput/onsubmit/onscroll/oncontextmenu,收到 `{name}`"
+                            "v0 事件支持 onclick/onpointerenter/onpointerleave/onpointermove/onkeydown/onfocus/onblur/oninput/onsubmit/onscroll/oncontextmenu,收到 `{name}`"
                         ),
                     ));
                 }

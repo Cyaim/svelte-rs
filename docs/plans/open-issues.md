@@ -69,9 +69,19 @@
   派发;codegen `oncontextmenu={|x, y| …}`。用户在回调里按坐标开 overlay(Anchor::Point)。
   守卫:`context_menu_handler_carries_pos_and_disabled_gates`(sv-ui)+
   `oncontextmenu_compiles`(sv-compiler)。
+- **~~壳层 pointer-move 事件回调~~** ✅ 2026-07-24:`ViewNode.on_pointer_move:
+  Fn(f32, f32)` + `set_on_pointer_move`/`pointer_move_handler`(**被动位置事件,禁用
+  节点仍派发** —— 与 click/contextmenu 门相反);shell CursorMoved 顶部命中派发
+  (拖动期间也照常发);codegen `onpointermove={|x, y| …}`。守卫:
+  `pointer_move_handler_carries_pos_and_survives_disabled`(sv-ui)+
+  `onpointermove_compiles`(sv-compiler)。启用自定义拖拽/滑块/画布跟随。
+- **⚠ ViewNode 冷处理器该 Box 化了**(2026-07-24 达临界):事件面扩张让 ViewNode 到
+  464B(预算从 448 上调)。稀有 `on_*`(enter/down/up/leave/scroll/context_menu/
+  pointer_move/key/focus_change)都是每节点 16B 却绝大多数为 None——**再加处理器前**
+  应把它们打包进一个 `Option<Box<Handlers>>`(百万控件下每节点省一大截),而非继续抬预算。
 - **仍缺(调研 28,sv-arco 补不了、须框架本体)**:`:disabled` 伪类样式(见上,Phase 2)、
-  壳层 pointer-move(hover 跟随已有,move 事件回调未透出)/拖放/触屏/键盘滚动环、
-  视觉字重/字体族/图标/grid/阴影、a11y 角色层、i18n locale。
+  拖放(drag-and-drop 高层协议)/触屏/键盘滚动环、视觉字重/字体族/图标/grid/阴影、
+  a11y 角色层、i18n locale。
 
 ## 🔴 会咬人的(动手前必须先处理)
 
