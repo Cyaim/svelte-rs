@@ -34,4 +34,18 @@ let items = $state(vec![String::from("a")]);
   {#each make(label.clone()) as it}
     <text>{it}: {label}</text>
   {/each}
+
+  <!-- 元素属性层:同一 plain `label` 喂同级多个 move 闭包
+       (value/aria-label/style: effect + bind_style_patch)。修复前第二个起
+       E0382;@attach 的 move 闭包在 FnMut effect 里按值吞 label,还要 pre_call。 -->
+  <input value={label} aria-label={label}
+         style:width={(label.len() * 8) as f32}
+         oninput={|_v: &str| { let _ = label.len(); }} />
+  <checkbox checked={!label.is_empty()} aria-label={label} />
+  <view aria-label={label}
+        onclick={|| { let _ = label.len(); }}
+        {@attach |doc: &sv_ui::Doc, id: sv_ui::ViewId| {
+            let _keep = label.len();
+            let _ = (doc, id);
+        }}></view>
 </view>

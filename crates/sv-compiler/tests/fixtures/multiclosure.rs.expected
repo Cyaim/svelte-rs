@@ -245,6 +245,115 @@ pub fn multiclosure(doc: &::sv_ui::Doc, parent: ::sv_ui::ViewId) {
                     },
                 );
             }
+            {
+                let label = ::std::clone::Clone::clone(&label);
+                let __el10 = __doc.create_text_input();
+                __doc.append(__parent, __el10);
+                {
+                    let label = ::std::clone::Clone::clone(&label);
+                    ::sv_ui::bind_style_patch(
+                        &__doc,
+                        __el10,
+                        move |s| {
+                            s.width = Some((label.len() * 8) as f32);
+                        },
+                    );
+                }
+                {
+                    let label = ::std::clone::Clone::clone(&label);
+                    {
+                        let __v_doc = __doc.clone();
+                        let __v_el = __el10;
+                        ::sv_reactive::effect(move || {
+                            __v_doc.set_input_value(__v_el, &(label));
+                        });
+                    }
+                }
+                {
+                    let label = ::std::clone::Clone::clone(&label);
+                    {
+                        let __a_doc = __doc.clone();
+                        let __a_el = __el10;
+                        ::sv_reactive::effect(move || {
+                            __a_doc.set_accessible_label(__a_el, &(label));
+                        });
+                    }
+                }
+                {
+                    let label = ::std::clone::Clone::clone(&label);
+                    __doc
+                        .set_on_input(
+                            __el10,
+                            move |_v: &str| {
+                                let _ = label.len();
+                            },
+                        );
+                }
+            }
+            {
+                let label = ::std::clone::Clone::clone(&label);
+                let __el11 = __doc.create_checkbox();
+                __doc.append(__parent, __el11);
+                {
+                    let label = ::std::clone::Clone::clone(&label);
+                    {
+                        let __c_doc = __doc.clone();
+                        let __c_el = __el11;
+                        ::sv_reactive::effect(move || {
+                            __c_doc.set_checked(__c_el, !label.is_empty());
+                        });
+                    }
+                }
+                {
+                    let label = ::std::clone::Clone::clone(&label);
+                    {
+                        let __a_doc = __doc.clone();
+                        let __a_el = __el11;
+                        ::sv_reactive::effect(move || {
+                            __a_doc.set_accessible_label(__a_el, &(label));
+                        });
+                    }
+                }
+            }
+            {
+                let label = ::std::clone::Clone::clone(&label);
+                let __el12 = __doc.create_view();
+                __doc.append(__parent, __el12);
+                {
+                    let label = ::std::clone::Clone::clone(&label);
+                    {
+                        let __a_doc = __doc.clone();
+                        let __a_el = __el12;
+                        ::sv_reactive::effect(move || {
+                            __a_doc.set_accessible_label(__a_el, &(label));
+                        });
+                    }
+                }
+                {
+                    let label = ::std::clone::Clone::clone(&label);
+                    __doc
+                        .set_on_click(
+                            __el12,
+                            move || {
+                                let _ = label.len();
+                            },
+                        );
+                }
+                {
+                    let label = ::std::clone::Clone::clone(&label);
+                    {
+                        let __a_doc = __doc.clone();
+                        let __a_el = __el12;
+                        ::sv_reactive::effect(move || {
+                            let label = ::std::clone::Clone::clone(&label);
+                            (move |doc: &sv_ui::Doc, id: sv_ui::ViewId| {
+                                let _keep = label.len();
+                                let _ = (doc, id);
+                            })(&__a_doc, __a_el);
+                        });
+                    }
+                }
+            }
         }
     }
 }

@@ -77,14 +77,17 @@ pub fn child(doc: &::sv_ui::Doc, parent: ::sv_ui::ViewId, props: ChildProps) {
                             );
                         },
                     );
-                __doc
-                    .set_on_click(
-                        __el3,
-                        move || {
-                            let __sv_rhs = step;
-                            value.update(|__v| *__v += __sv_rhs)
-                        },
-                    );
+                {
+                    let step = ::std::clone::Clone::clone(&step);
+                    __doc
+                        .set_on_click(
+                            __el3,
+                            move || {
+                                let __sv_rhs = step;
+                                value.update(|__v| *__v += __sv_rhs)
+                            },
+                        );
+                }
             }
             {
                 let children = ::std::clone::Clone::clone(&children);

@@ -160,18 +160,26 @@
   golden 只 parse 不 borrow-check,靠它兜块级 E0382 回退)**。Badge/Alert 的手工
   绕行(块内多分支引 String prop)现变冗余、可清。**注:emit::if_block 签名从
   `cond: expr` 改为 `cond_closure`**(前端负责建带捕获的驱动闭包)。
-- **🔴 同一元素上 ≥2 个属性 move 闭包共享同一非 Copy plain 变量 → E0382**
-  (2026-07-24 再复核查获,与上条**同根不同层、存量未修**):`emit_nodes` 对整个
-  元素节点只补**一份**节点级捕获,但一个元素可发射多个 move 闭包(`value={expr}`/
-  动态 `aria-label={expr}` 的 effect、`style:x={expr}`、`oninput`/`onsubmit` 处理器、
-  `@attach`……),它们争抢那唯一一份克隆 → 第二个用到已 move 的值。rustc 已坐实:
-  `<input value={label} aria-label={label} />`、`value={label} oninput={…label…}`、
-  `<text aria-label={label}>{label}</text>` 均 E0382(反应式 `$state` 对照组编过,
-  证明只对非 Copy plain 成立)。**A2 表单件高发**(value+aria、value+oninput 同元素)。
-  上面的块级修复与 `multiclosure-check` 守卫**都不覆盖元素属性层**。修法 = 给
-  emit_element 的各属性 move 闭包也走 `with_captured_plain`(散在多分支,无单一
-  chokepoint,是独立一批);守卫同样要扩到元素级(把 multiclosure-check 补一个
-  同元素多属性的 .svelte)。
+- **~~同一元素上 ≥2 个属性 move 闭包共享同一非 Copy plain 变量 → E0382~~** ✅ 2026-07-24
+  已修:根因同块级(`emit_nodes` 只补**一份**节点级捕获,一个元素却发射多个 move
+  闭包争抢它)。修法 = 给 emit_element 的各属性 move 闭包也走 `with_captured_plain`
+  (散在多分支,逐个补捕获份):**effect 类**——`value` / 动态 `aria-label` /
+  `checked` / `style:x` / `@attach`;**存储型处理器**——`onclick` / `oninput` /
+  `onsubmit` / `onscroll` / `onpointerenter`/`onpointerleave`(非 hover 态)。处理器
+  补捕获份还顺带消除了**发射顺序依赖**(`oninput` 写在 `value` 前也不再 E0382)。
+  `@attach` 另有一坑:`self.expr(.., true)` 给它加了 `move`,该闭包在 FnMut effect
+  体内**按值**吞 plain,每次调用都 move-out → E0507;故其 effect 体内再补一份
+  **每次调用**预克隆(pre_call)。守卫:`examples/multiclosure-check` 与 golden
+  fixture `multiclosure` 均已扩到元素级(input 的 value+aria+style:+oninput、
+  checkbox 的 checked+aria、view 的 aria+onclick+@attach 同元素共享 String prop,
+  build.rs 真编回退即翻红)。反应式 `$state`(Copy 信号)本就不受影响。
+  - **窄残留(低发)**:`:hover`/`:active`/`:focus` 的样式**重算闭包**
+    (`bind_style(move |s| …)`)与 `onfocus`/`onblur`/`onkeydown` 的**合成态**
+    处理器(`__ue`/`__uf`/`key_handlers`)未走 `with_captured_plain`。触发条件苛刻
+    (同一元素既有伪类样式态**又**在其重算/合成处理器里引同一非 Copy plain,
+    且与另一 mover 同元素)。当前 `bind_style` 是每元素唯一且最后的 label 消费者,
+    单闭包不自争;真正暴露需"伪类态 + 引 plain 的 onfocus/onkeydown + 另一 mover"
+    三件套,A2 静态件未见。修法同款(合成态的 `let __ue = …` 前补捕获份),留待触发时补。
 - **keyed `{#each}` 的 key 表达式引用非 Copy plain 变量 → E0373**(2026-07-24
   对抗评审查获,与上条同域但**机制不同**、暂未修):`{#each rows as it (key_using_plain)}`
   的 key 闭包是**非 move**(`|__item| {…}`),按引用借用 plain 变量,而

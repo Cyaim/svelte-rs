@@ -31,4 +31,18 @@ let items = $state(vec![String::from("a")]);
   {#each make(label.clone()) as it}
     <text>{it}: {label}</text>
   {/each}
+
+  <!-- 元素级:同一非 Copy 的 `label` 喂同级多个 move 闭包(每个 effect/
+       bind_style_patch 都按值捕获)。修复前第二个起 E0382,故本段专测元素层。
+       站点齐活:value / aria-label / style: / checked / @attach。 -->
+  <input value={label} aria-label={label}
+         style:width={(label.len() * 8) as f32}
+         oninput={|_v: &str| { let _ = label.len(); }} />
+  <checkbox checked={!label.is_empty()} aria-label={label} />
+  <view aria-label={label}
+        onclick={|| { let _ = label.len(); }}
+        {@attach |doc: &sv_ui::Doc, id: sv_ui::ViewId| {
+            let _keep = label.len();
+            let _ = (doc, id);
+        }}></view>
 </view>
