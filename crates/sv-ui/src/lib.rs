@@ -464,6 +464,10 @@ pub struct ViewNode {
     /// 可获焦位(Tab 遍历只走 focusable 节点;Button/Checkbox 默认 true)。
     /// opt-in 布尔位、无数值 tabindex——egui/floem/Masonry/Slint 四家交集
     pub focusable: bool,
+    /// 禁用位(`disabled` 属性):置位后**不响应点击/按压、不可获焦**,语义树
+    /// 标记为 disabled(读屏播报"不可用")。交互门在 handler getter 与 `focusable`
+    /// 里统一收口——命中测试仍能命中(为了 `:disabled` 样式与 tooltip),但拿不到回调。
+    pub disabled: bool,
     /// 获焦即开 IME 会话(Masonry `accepts_text_input` 同款)。
     /// 本切片恒 false,R1 第 2 步 TextInput 用它触发 `set_ime_allowed`
     pub accepts_text: bool,
@@ -536,6 +540,7 @@ impl Doc {
             text: String::new(),
             checked: false,
             focusable: false,
+            disabled: false,
             accepts_text: false,
             style: Style::default(),
             parent: None,
@@ -681,6 +686,7 @@ impl Doc {
                 kind,
                 ElementKind::Button | ElementKind::Checkbox | ElementKind::TextInput
             ),
+            disabled: false,
             // 获焦即开 IME 会话的位(Masonry accepts_text_input 同款)
             accepts_text: kind == ElementKind::TextInput,
             style: Style::default(),
@@ -989,12 +995,14 @@ impl Doc {
         self.bump(dirty::DirtyItem::Paint { id });
     }
 
-    /// 取出点击回调(clone 出来调用,避免调用期间持有树的借用)
+    /// 取出点击回调(clone 出来调用,避免调用期间持有树的借用)。
+    /// **禁用节点拿不到回调**(`disabled` 交互门,与按压回调统一收口)。
     pub fn click_handler(&self, id: ViewId) -> Option<Rc<dyn Fn()>> {
         self.0
             .borrow()
             .nodes
             .get(id)
+            .filter(|n| !n.disabled)
             .and_then(|n| n.on_click.clone())
     }
 
@@ -1069,6 +1077,7 @@ impl Doc {
             .borrow()
             .nodes
             .get(id)
+            .filter(|n| !n.disabled)
             .and_then(|n| n.on_pointer_down.clone())
     }
 
@@ -1077,6 +1086,7 @@ impl Doc {
             .borrow()
             .nodes
             .get(id)
+            .filter(|n| !n.disabled)
             .and_then(|n| n.on_pointer_up.clone())
     }
 
@@ -1106,7 +1116,33 @@ impl Doc {
     }
 
     pub fn focusable(&self, id: ViewId) -> bool {
-        self.0.borrow().nodes.get(id).is_some_and(|n| n.focusable)
+        // 禁用节点不可获焦(Tab 跳过、点击不设焦)——`disabled` 交互门的一环
+        self.0
+            .borrow()
+            .nodes
+            .get(id)
+            .is_some_and(|n| n.focusable && !n.disabled)
+    }
+
+    /// 禁用/启用一个节点(`disabled` 属性)。置位后不响应点击/按压、不可获焦、
+    /// 语义树标记 disabled。命中测试仍命中(留给 `:disabled` 样式与 tooltip)。
+    pub fn set_disabled(&self, id: ViewId, disabled: bool) {
+        {
+            let mut inner = self.0.borrow_mut();
+            let Some(n) = inner.nodes.get_mut(id) else {
+                return;
+            };
+            if n.disabled == disabled {
+                return;
+            }
+            n.disabled = disabled;
+        }
+        // 影响外观(:disabled 样式)与语义树,但不改几何 → Paint 脏
+        self.bump(dirty::DirtyItem::Paint { id });
+    }
+
+    pub fn is_disabled(&self, id: ViewId) -> bool {
+        self.0.borrow().nodes.get(id).is_some_and(|n| n.disabled)
     }
 
     /// 获焦即开 IME 会话的位(R1 第 2 步 TextInput 用;本切片只预留)
@@ -1968,6 +2004,43 @@ mod tests {
             "点击后文本应精准更新:\n{}",
             doc.dump()
         );
+    }
+
+    /// `disabled` 交互门:禁用节点拿不到点击/按压回调、不可获焦;放开后恢复。
+    /// 这是手写表单件"禁用按钮"的功能内核(命中测试仍命中,留给 :disabled 样式)。
+    #[test]
+    fn disabled_gates_handlers_and_focus() {
+        let doc = Doc::new();
+        let count = state(0);
+        let btn = doc.create_button("+1");
+        doc.append(doc.root(), btn);
+        doc.set_on_click(btn, move || count.update(|c| *c += 1));
+
+        // 常态:可点、可获焦
+        assert!(doc.click_handler(btn).is_some(), "常态应有点击回调");
+        assert!(doc.focusable(btn), "按钮默认可获焦");
+
+        // 禁用:回调取不到、不可获焦
+        doc.set_disabled(btn, true);
+        assert!(doc.is_disabled(btn));
+        assert!(doc.click_handler(btn).is_none(), "禁用后点击回调应取不到");
+        assert!(doc.pointer_down_handler(btn).is_none());
+        assert!(doc.pointer_up_handler(btn).is_none());
+        assert!(!doc.focusable(btn), "禁用后不可获焦");
+
+        // 即便强行拿到并调用(拿不到,故计数不变)——从命中路径看等于点击被吞
+        assert!(
+            doc.click_handler(btn).is_none() && doc.dump().contains("+1"),
+            "禁用按钮仍在树上(留给 :disabled 样式),但不响应点击"
+        );
+
+        // 放开:恢复
+        doc.set_disabled(btn, false);
+        assert!(doc.click_handler(btn).is_some(), "放开后点击回调应恢复");
+        assert!(doc.focusable(btn), "放开后可获焦");
+        // 回调仍连着原 signal
+        doc.click_handler(btn).unwrap()();
+        assert_eq!(count.get(), 1, "放开后点击应真正生效");
     }
 
     #[test]

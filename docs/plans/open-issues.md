@@ -48,6 +48,25 @@
   DESIGN.md 的整帧基准数改以 membench README 为准(并订正 `bump` 点计数 34→42);
   docs/README 与根 README 的 ADR-1..10 / 调研 ×26 / 新 crate 与示例清单 / plans 入口。
 
+## 手写组件能力面(不用 sv-arco 完成功能;调研 28 硬缺口的填补进度)
+
+- **~~表单元素属性层 E0382/E0507~~** ✅ 2026-07-24(PR#62):`<input value={x} aria-label={x}>`、
+  `value={x} oninput={…x…}` 等手写表单写法现可编译(八个元素级 move 闭包站点走
+  `with_captured_plain`,@attach 另补 pre_call)。
+- **~~`disabled` 属性(交互禁用)~~** ✅ 2026-07-24:`ViewNode.disabled` 位 +
+  `set_disabled`/`is_disabled`;交互门在 `click_handler`/`pointer_down/up_handler`/
+  `focusable` 统一收口(禁用节点拿不到回调、不可获焦,命中测试仍命中留给样式/tooltip);
+  a11y `node.set_disabled()` + 不广告 Click/Focus 动作。codegen `disabled={表达式}`
+  反应式 effect / 裸 `disabled` 恒 true。守卫:`disabled_gates_handlers_and_focus`
+  (sv-ui)+ `disabled_attr_compiles`(sv-compiler)。
+  - **⏳ Phase 2:`:disabled` 伪类样式**(未做):要把 disabled 态接进 `bind_style`
+    重算(disabled 由 `disabled={expr}` 的 effect 改,非指针驱动的 `__hv` 类状态,
+    重算闭包需跟随该 expr 的响应式)。当前 `<style>` 里写 `:disabled` 仍硬报错。
+    禁用态**功能**已全,只差**视觉**(变灰);A2 表单件可先用条件类/内联样式绕行。
+- **仍缺(调研 28,sv-arco 补不了、须框架本体)**:`oncontextmenu` 右键(shell
+  MouseButton::Right + overlay Anchor::Point)、壳层 pointer-move/拖放/触屏/键盘滚动环、
+  视觉字重/字体族/图标/grid/阴影、a11y 角色层、i18n locale。
+
 ## 🔴 会咬人的(动手前必须先处理)
 
 | # | 问题 | 位置 | 为什么危险 |

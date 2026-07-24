@@ -630,6 +630,30 @@ let last = $state(String::new());
     }
 
     #[test]
+    fn disabled_attr_compiles() {
+        // 反应式 `disabled={表达式}` → effect 里 set_disabled;裸 `disabled` → 恒 true
+        let src = r#"<script>
+let busy = $state(false);
+</script>
+<view>
+  <button disabled={busy.get()}>提交</button>
+  <button disabled>永远禁用</button>
+</view>
+"#;
+        let code = compile(src, "c").expect("应编译成功");
+        let n = code.matches("set_disabled").count();
+        assert!(
+            n >= 2,
+            "两个 disabled 都应落地(反应式 + 裸),实得 {n}:\n{code}"
+        );
+        assert!(
+            code.contains("effect"),
+            "反应式 disabled={{表达式}} 应展开为 effect:\n{code}"
+        );
+        syn::parse_file(&code).unwrap();
+    }
+
+    #[test]
     fn sfc_overflow_and_scroll_bindings_compile() {
         let src = r#"<script>
 let y = $state(0.0f32);
@@ -1181,12 +1205,13 @@ let count = $state(0i32);
         .expect("嵌套 &:focus 应编译成功");
         assert!(nested.contains("__fc"));
 
-        // 未知伪类仍然硬报错(错误信息要提到现在支持哪些)
+        // `:disabled` **伪类样式**仍未接线(disabled 属性本身已支持,见
+        // disabled_attr_compiles),硬报错并指路支持哪些
         let err = compile(
             "<script></script><view class=\"b\" /><style>.b:disabled { gap: 1; }</style>",
             "c",
         )
-        .expect_err(":disabled 尚未支持");
+        .expect_err(":disabled 伪类样式尚未接线");
         assert!(err.message.contains(":focus"), "{}", err.message);
     }
 

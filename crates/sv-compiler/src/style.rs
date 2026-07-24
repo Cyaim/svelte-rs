@@ -234,7 +234,11 @@ pub fn parse_style_block(
                 other => {
                     return Err(p.err(
                         rel,
-                        format!("暂支持 :hover/:active/:focus(:disabled 待禁用态),收到 `:{other}`"),
+                        // `disabled` **属性**已支持(交互门 + a11y);此处是 `:disabled`
+                        // **伪类样式**——需把 disabled 态接进样式重算,是独立后续项
+                        format!(
+                            "暂支持 :hover/:active/:focus(:disabled 伪类样式待接线,disabled 属性本身已可用),收到 `:{other}`"
+                        ),
                     ));
                 }
             });
