@@ -663,7 +663,7 @@ impl Cg<'_> {
         for attr in attrs {
             match attr.name.as_str() {
                 "class" | "checked" | "@attach" | "autofocus" | "placeholder" | "aria-label"
-                | "rows" => {}
+                | "rows" | "disabled" => {}
                 // <animation> 专属:src(源素材路径,构建期 importer 用)/ loop / autoplay
                 // / label(a11y)。模板层记录并建节点,素材注册是壳侧(register_*)的事。
                 "src" | "loop" | "autoplay" | "label" if *tag == Tag::Animation => {}
@@ -1254,6 +1254,28 @@ impl Cg<'_> {
                     };
                     ts.extend(self.with_captured_plain(block, scope));
                 }
+                // disabled:禁用交互 + a11y 标记(+ 后续 `:disabled` 样式)。
+                // `disabled={表达式}` 反应式跟随;裸 `disabled` = 恒 true
+                // (HTML 布尔属性语义:出现即禁用)。任意元素可用
+                "disabled" => match &attr.value {
+                    AttrValue::Expr(e) => {
+                        let expr = self.expr(e, scope, false)?;
+                        // disabled effect 按值捕获 plain;与同级属性争同一 plain
+                        // 会 E0382,补外层捕获份(与 value/checked 同款)
+                        let block = quote! {
+                            {
+                                let __d_doc = __doc.clone();
+                                let __d_el = #el;
+                                ::sv_reactive::effect(move || { __d_doc.set_disabled(__d_el, #expr); });
+                            }
+                        };
+                        ts.extend(self.with_captured_plain(block, scope));
+                    }
+                    // 裸 `disabled`(或 disabled="...")→ 恒禁用,建树时设一次
+                    AttrValue::Str { .. } => {
+                        ts.extend(quote! { __doc.set_disabled(#el, true); });
+                    }
+                },
                 name if name.starts_with("bind:") => {
                     return Err(CompileError::at_offset(
                         self.source,

@@ -156,11 +156,18 @@ fn collect(doc: &Doc, placed: &[Placed], scale: f32) -> (Vec<(NodeId, Node)>, No
                     Toggled::False
                 });
             }
-            if n.on_click.is_some() || matches!(n.kind, ElementKind::Button | ElementKind::Checkbox)
+            // 禁用态:读屏播报"不可用",并**不**广告 Click/Focus 动作
+            // (与交互门一致:disabled 节点拿不到点击/焦点)
+            if n.disabled {
+                node.set_disabled();
+            }
+            if !n.disabled
+                && (n.on_click.is_some()
+                    || matches!(n.kind, ElementKind::Button | ElementKind::Checkbox))
             {
                 node.add_action(Action::Click);
             }
-            if n.focusable {
+            if n.focusable && !n.disabled {
                 node.add_action(Action::Focus);
             }
             // 可滚容器:报当前偏移与范围,并接受屏幕阅读器的滚动请求
