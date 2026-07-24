@@ -25,7 +25,7 @@
 
 ## 调研报告
 
-27 份联网核实的调研报告(2026-07),ADR 的依据:
+28 份调研报告(2026-07),ADR 的依据——1–27 联网核实,28 为仓库自身实证:
 
 | # | 报告 |
 |---|---|
@@ -56,6 +56,7 @@
 | 25 | [弹层体系+发布工程](research/25-overlay-release-engineering.md) |
 | 26 | [arco.design 视觉标准组件库(sv-arco)可行性](research/26-arco-design-ui-kit.md) |
 | 27 | [距离商业化交付还有多远(接调研 19 的复盘)](research/27-commercialization-gap-update.md) |
+| 28 | [不用组件库,今天能开发什么(可用性实证)](research/28-no-arco-usability.md) |
 
 ## 约定
 
