@@ -675,6 +675,24 @@ let last = $state((0.0f32, 0.0f32));
     }
 
     #[test]
+    fn onpointermove_compiles() {
+        // 指针移动回调 |x: f32, y: f32| → set_on_pointer_move
+        let src = r#"<script>
+let at = $state((0.0f32, 0.0f32));
+</script>
+<view>
+  <view onpointermove={|x: f32, y: f32| at = (x, y)}></view>
+</view>
+"#;
+        let code = compile(src, "c").expect("应编译成功");
+        assert!(
+            code.contains("set_on_pointer_move"),
+            "onpointermove 应落地为 set_on_pointer_move:\n{code}"
+        );
+        syn::parse_file(&code).unwrap();
+    }
+
+    #[test]
     fn sfc_overflow_and_scroll_bindings_compile() {
         let src = r#"<script>
 let y = $state(0.0f32);
