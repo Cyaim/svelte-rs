@@ -19,7 +19,10 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use crate::paint::{LineCap, LineJoin, Painter, PathCmd, PathFill, PixelImage, StrokeStyle};
+use crate::paint::PixelImage;
+// 路径动词与 Painter 只被矢量(Lottie)桥用到,随 feature `lottie` 进出
+#[cfg(feature = "lottie")]
+use crate::paint::{LineCap, LineJoin, Painter, PathCmd, PathFill, StrokeStyle};
 
 /// 一份已解码的帧序列。
 ///
@@ -36,6 +39,7 @@ struct Frames {
 /// 持有 `sv_lottie::Lottie`(内含 velato `Renderer` 的跨帧几何批缓冲),
 /// 所以求值一帧要 `&mut`,与位图档"取一张现成的图"不同 —— 矢量档是**每帧现算**。
 /// `start_frame` 缓存自时间轴,用来把场景树的帧号(0 基索引)映射到 lottie 帧号。
+#[cfg(feature = "lottie")]
 struct VectorAsset {
     lottie: sv_lottie::Lottie,
     start_frame: f64,
@@ -48,6 +52,7 @@ thread_local! {
     static STORE: RefCell<HashMap<u64, Frames>> = RefCell::new(HashMap::new());
     /// 矢量档(Lottie)注册表,与位图 `STORE` 分开存但**共用 `NEXT` 号段**,
     /// 于是句柄全局唯一;`AnimSource` 的变体本身已能区分该查哪张表
+    #[cfg(feature = "lottie")]
     static VSTORE: RefCell<HashMap<u64, VectorAsset>> = RefCell::new(HashMap::new());
     /// 句柄分配器。**从 1 起** —— 0 留给 `AnimData::placeholder()`,
     /// 于是"忘了接素材"与"接了但注册表里没有"是两种可区分的状态
@@ -76,6 +81,7 @@ pub fn register_frames(frames: Vec<PixelImage>) -> u64 {
 ///
 /// 与位图档不同,矢量档不预解码成帧序列 —— 每帧由 velato 现算路径,
 /// 经 `render_vector` 直接发到宿主 `Painter`,不落位图(省内存、缩放无损)。
+#[cfg(feature = "lottie")]
 pub fn register_vector(lottie: sv_lottie::Lottie) -> u64 {
     let handle = next_handle();
     let tl = lottie.timeline();
@@ -93,6 +99,7 @@ pub fn register_vector(lottie: sv_lottie::Lottie) -> u64 {
 }
 
 /// 注销一份矢量资产。语义同 [`unregister`]:所有权由调用方显式管理。
+#[cfg(feature = "lottie")]
 pub fn unregister_vector(handle: u64) -> bool {
     VSTORE.with(|s| s.borrow_mut().remove(&handle).is_some())
 }
@@ -103,6 +110,7 @@ pub fn unregister_vector(handle: u64) -> bool {
 /// `decode` 把每个块的编码字节(WebP)解成 [`sv_pag::DecodedImage`] —— **壳侧不绑
 /// 图片解码器**(与 sv-pag 零依赖同因),解码器由调用方注入(平台强相关的一次
 /// 独立裁决)。任一帧重放 / 解码 / 构图失败,整段拒绝返回 `None`(不给半张动画)。
+#[cfg(feature = "pag")]
 pub fn register_pag<F>(seq: &sv_pag::BitmapSequence, decode: F) -> Option<u64>
 where
     F: Fn(&[u8]) -> Option<sv_pag::DecodedImage>,
@@ -123,6 +131,7 @@ where
 /// 这是 [`register_pag`] 的便利封装:PAG 位图序列帧块导出即 WebP
 /// (`sv-pag` README 的核实表),这里把解码器定死为 `image-webp`,调用方不必自带。
 /// 需要别的编码(PNG/JPEG)或别的解码器时,直接用 [`register_pag`] 注入自己的。
+#[cfg(feature = "pag")]
 pub fn register_pag_webp(seq: &sv_pag::BitmapSequence) -> Option<u64> {
     register_pag(seq, decode_webp)
 }
@@ -131,9 +140,11 @@ pub fn register_pag_webp(seq: &sv_pag::BitmapSequence) -> Option<u64> {
 /// 文件头,一个畸形块声称 65535×65535 会让下面 `output_buffer_size` 算出约 16GB,
 /// `vec![0u8; …]` 直接把进程 OOM 掉——那是拒绝服务,不是"解不了"。8192 与 vello
 /// 图集上限同量级,UI 动画帧远用不到;超了当畸形拒绝(返回 None)。
+#[cfg(feature = "pag")]
 const MAX_WEBP_DIM: u32 = 8192;
 
 /// WebP 字节 → [`sv_pag::DecodedImage`](直通 RGBA8)。解不了 / 超尺寸返回 `None`。
+#[cfg(feature = "pag")]
 fn decode_webp(bytes: &[u8]) -> Option<sv_pag::DecodedImage> {
     let mut dec = image_webp::WebPDecoder::new(std::io::Cursor::new(bytes)).ok()?;
     let (width, height) = dec.dimensions();
@@ -159,6 +170,7 @@ fn decode_webp(bytes: &[u8]) -> Option<sv_pag::DecodedImage> {
 }
 
 /// 直通 RGBA8 → 预乘 RGBA8(`c' = c*a/255`,四舍五入)。
+#[cfg(feature = "pag")]
 fn premultiply(rgba: &[u8]) -> Vec<u8> {
     rgba.chunks_exact(4)
         .flat_map(|p| {
@@ -218,10 +230,12 @@ pub(crate) fn image_for(anim: &sv_ui::AnimData) -> Option<PixelImage> {
 /// `paint` re-export 出来,所以这里就是那句预言里的"纯搬运 `for` 循环":
 /// 把 lottie 的动词逐个转成 `Painter` 的同形动词。裁剪成对转发,保证宿主
 /// 裁剪栈平衡(velato 每帧开头压一次覆盖画布的裁剪,遮罩也走这里)。
+#[cfg(feature = "lottie")]
 struct PainterSink<'a, P: Painter + ?Sized> {
     painter: &'a mut P,
 }
 
+#[cfg(feature = "lottie")]
 fn conv_cmd(c: &sv_lottie::PathCmd) -> PathCmd {
     match *c {
         sv_lottie::PathCmd::MoveTo(x, y) => PathCmd::MoveTo(x, y),
@@ -232,6 +246,7 @@ fn conv_cmd(c: &sv_lottie::PathCmd) -> PathCmd {
     }
 }
 
+#[cfg(feature = "lottie")]
 fn conv_fill(f: sv_lottie::PathFill) -> PathFill {
     match f {
         sv_lottie::PathFill::NonZero => PathFill::NonZero,
@@ -239,6 +254,7 @@ fn conv_fill(f: sv_lottie::PathFill) -> PathFill {
     }
 }
 
+#[cfg(feature = "lottie")]
 fn conv_stroke(s: &sv_lottie::StrokeStyle) -> StrokeStyle {
     StrokeStyle {
         width: s.width,
@@ -256,6 +272,7 @@ fn conv_stroke(s: &sv_lottie::StrokeStyle) -> StrokeStyle {
     }
 }
 
+#[cfg(feature = "lottie")]
 impl<P: Painter + ?Sized> sv_lottie::PathSink for PainterSink<'_, P> {
     fn fill_path(
         &mut self,
@@ -297,6 +314,7 @@ impl<P: Painter + ?Sized> sv_lottie::PathSink for PainterSink<'_, P> {
 /// 返回是否真的画了(便于测试与将来的脏矩形判断)。
 ///
 /// `rect` 是内容盒 `(x, y, w, h)`(物理像素);内容按 `object-fit: contain` 摆进去。
+#[cfg(feature = "lottie")]
 pub(crate) fn render_vector(
     handle: u64,
     frame_index: u32,
@@ -324,6 +342,7 @@ pub(crate) fn render_vector(
 #[cfg(test)]
 pub(crate) fn reset_for_test() {
     STORE.with(|s| s.borrow_mut().clear());
+    #[cfg(feature = "lottie")]
     VSTORE.with(|s| s.borrow_mut().clear());
     NEXT.with(|n| n.set(1));
 }
@@ -380,6 +399,7 @@ mod tests {
     }
 
     // 一个合法的最小 Lottie:200×100 画布,一个填充圆(velato 能解析并渲染)
+    #[cfg(feature = "lottie")]
     const LOTTIE: &str = r#"{
       "v": "5.9.0", "fr": 60, "ip": 0, "op": 60, "w": 200, "h": 100, "ddd": 0,
       "layers": [
@@ -397,6 +417,7 @@ mod tests {
       ]
     }"#;
 
+    #[cfg(feature = "lottie")]
     #[test]
     fn vector_registers_and_renders_paths_into_the_painter() {
         use crate::paint::{PaintCmd, RecordingPainter};
@@ -430,6 +451,7 @@ mod tests {
         assert_eq!(pushes, pops, "push/pop 裁剪必须成对,否则宿主裁剪栈被污染");
     }
 
+    #[cfg(feature = "pag")]
     #[test]
     fn pag_sequence_replays_into_frames() {
         use sv_pag::{BitmapFrame, BitmapRect, BitmapSequence, DecodedImage};
@@ -498,6 +520,7 @@ mod tests {
         assert!(register_pag(&bad, decode).is_none(), "解不了应整段拒绝");
     }
 
+    #[cfg(feature = "pag")]
     #[test]
     fn pag_webp_decodes_real_frames_end_to_end() {
         use sv_pag::{BitmapFrame, BitmapRect, BitmapSequence};
@@ -569,6 +592,7 @@ mod tests {
         assert!(register_pag_webp(&bad).is_none(), "非 WebP 应整段拒绝");
     }
 
+    #[cfg(feature = "pag")]
     #[test]
     fn webp_decode_never_panics_on_malformed_input() {
         // decode_webp 吃的是 .pag 里的**不可信** WebP 字节。契约:解不了返回 None,
@@ -615,6 +639,7 @@ mod tests {
         assert!(decode_webp(&valid).is_some(), "4×4 合法 WebP 应能解");
     }
 
+    #[cfg(feature = "lottie")]
     #[test]
     fn vector_unknown_handle_draws_nothing() {
         use crate::paint::RecordingPainter;

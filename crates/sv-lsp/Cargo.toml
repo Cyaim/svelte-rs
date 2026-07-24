@@ -11,6 +11,9 @@ keywords.workspace = true
 categories.workspace = true
 authors.workspace = true
 description = ".svelte 语言服务器(LSP):把编译器诊断实时喂给编辑器"
+# 暂不随首发(MVP,补全/跳转未做);不在任何首发 crate 的依赖闭包里。
+# 机器可查的护栏:防依赖序脚本或 `cargo publish --workspace` 误发。
+publish = false
 
 [[bin]]
 name = "sv-lsp"

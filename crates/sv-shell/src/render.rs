@@ -1217,8 +1217,10 @@ pub(crate) fn paint_tree_culled(
                                     painter.draw_image(x + inset, y + inset_top, cw, ch, &img);
                                 }
                             }
-                            // 矢量档(Lottie):每帧现算路径,直接发到 Painter,不落位图
+                            // 矢量档(Lottie):每帧现算路径,直接发到 Painter,不落位图。
+                            // feature `lottie` 关时矢量档无法注册,句柄恒查不到,静默不画
                             sv_ui::AnimSource::Vector { handle } => {
+                                #[cfg(feature = "lottie")]
                                 crate::animation::render_vector(
                                     handle,
                                     a.frame,
@@ -1226,6 +1228,8 @@ pub(crate) fn paint_tree_culled(
                                     op,
                                     painter,
                                 );
+                                #[cfg(not(feature = "lottie"))]
+                                let _ = handle;
                             }
                         }
                     }
