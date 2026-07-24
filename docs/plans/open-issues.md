@@ -182,6 +182,16 @@
 - ~~双前端内核合并~~ ✅ 2026-07-23 落地(公共 IR `sv_compiler::template` +
   共享 codegen,两前端只剩 parser;span 精度有契约测试守护)。API 冻结前置
   已全部出清,首发关键路径推进到依赖序发 crates.io。
+- **🔴 首发清单被依赖打破(2026-07-24 商业化核查发现,此前未登记)**:
+  CHANGELOG 定的六 crate 首发清单("sv-lsp/sv-pag/sv-lottie/sv-vap 暂不随首发")
+  与 `sv-shell/Cargo.toml` 对 `sv-lottie`、`sv-pag` 的**硬依赖**矛盾——crates.io
+  要求全部非 dev 依赖已在 registry,按清单推到 sv-shell 必然失败。出路二选一:
+  动画依赖 feature 化(可保 velato 的上游 panic 面不进默认依赖树,推荐)或
+  首发扩为 ≥8 crate。修完后才谈 publish=false ×4 与依赖序 dry-run 演练
+  (`cargo publish --dry-run` 级全链演练从未发生过,CI 只真打包叶子 sv-reactive)。
+- 商标粗查/GitHub org 查重仍未做(ADR-10 裁决时风险由维护者书面自担,
+  DESIGN.md ADR-10 注)——是"知情承担"不是"已排除";首发公告前顺手项:
+  README 首行残留 working name(`# svelte-rs (working name \`sv\`)`)应清。
 
 ## 方法论:这一轮反复出现的几类错
 
