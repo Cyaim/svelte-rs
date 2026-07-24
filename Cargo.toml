@@ -24,6 +24,7 @@ members = [
     "examples/vap-gift",
     "examples/arco-gallery",
     "examples/multiclosure-check",
+    "examples/multi-window",
 ]
 
 [workspace.package]

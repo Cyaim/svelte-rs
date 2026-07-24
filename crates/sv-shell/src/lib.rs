@@ -167,10 +167,19 @@ fn cpu_presenter(window: &Arc<Window>) -> Result<Presenter, ShellError> {
     })
 }
 
-/// 事件循环用户事件:后台任务唤醒 + AccessKit 事件(调研 24 §4.2)
+/// 事件循环用户事件:后台任务唤醒 + AccessKit 事件(调研 24 §4.2)+ 全窗重绘。
+///
+/// `RedrawAll` 是多窗体的 frame_scheduler 出口:响应式冲刷不知道"哪个窗脏"
+/// (effect 可改任意 Doc),故广播——保守地请求所有窗重绘,各窗 `last_frame_key`
+/// 静止帧短路吸收开销(没变的窗当帧直接跳过绘制)。`Access` 自带 window_id,精确路由。
+///
+/// (注:携带 `BuildFn` 的"运行期开新窗"不能走 proxy —— `BuildFn` 是 `!Send`
+/// (Doc 句柄 `!Send`),proxy 要求 `Send`。故首发的多窗经 `run_multi` 启动即建,
+/// 运行期开窗留作后续〔thread_local BuildFn 队列 + 无载荷唤醒〕。)
 enum UserEvent {
     Wake,
     Access(accesskit_winit::Event),
+    RedrawAll,
 }
 
 impl From<accesskit_winit::Event> for UserEvent {
@@ -179,23 +188,23 @@ impl From<accesskit_winit::Event> for UserEvent {
     }
 }
 
-struct WinState {
+/// 首次 resumed 时跑一次的建树闭包(此后一切更新由 signal 驱动)
+type BuildFn = Box<dyn FnOnce(&Doc, ViewId)>;
+
+/// **一个窗口的全部状态**(多窗体:App 持有 `HashMap<WindowId, Pane>`,每窗一份)。
+///
+/// 由旧 `WinState`(window/presenter/access)+ 旧 `App` 的**每窗字段**合并而来:
+/// UI 树(doc/_scope)、布局缓存(layout)、指针/焦点/拖选/连击/修饰键交互态、
+/// IME、光标闪烁、静止帧键、framebuffer、脏矩形、a11y 缓存、丢帧/FPS 计数。
+/// **响应式运行时是线程内共享的**——多个 Pane 的 Doc 各订阅同一批 signal,写一次
+/// 全部窗精准更新(见 `shared_signal_drives_multiple_docs` 测试),Pane 之间零同步代码。
+struct Pane {
     window: Arc<Window>,
     presenter: Presenter,
     /// AccessKit 平台适配器(懒激活:AT 首次请求前零成本,egui PR#2294 形态)
     access: accesskit_winit::Adapter,
-}
-
-/// 首次 resumed 时跑一次的建树闭包(此后一切更新由 signal 驱动)
-type BuildFn = Box<dyn FnOnce(&Doc, ViewId)>;
-
-struct App {
-    title: String,
     doc: Doc,
-    build: Option<BuildFn>,
     _scope: Option<RootHandle>,
-    backend: Backend,
-    win: Option<WinState>,
     layout: std::rc::Rc<Layout>,
     cursor: (f64, f64),
     hovered: Option<ViewId>,
@@ -209,11 +218,10 @@ struct App {
     /// 连击串:(上次按下时刻, 物理坐标, 第几击)——双击选词/三击全选。
     /// winit 不给点击计数,阈值自持:500ms + 4 物理 px(平台惯例中值)
     last_click: Option<(std::time::Instant, (f64, f64), u32)>,
-    /// 当前修饰键状态(winit 单独派发 ModifiersChanged,应用自存)
+    /// 当前修饰键状态(winit 单独派发 ModifiersChanged,每窗自存)
     mods: ModifiersState,
     /// IME 会话开关镜像(焦点落在 accepts_text 节点时开;避免重复系统调用)
     ime_allowed: bool,
-    epoch: std::time::Instant,
     /// 光标闪烁计时的**重置点**:每次编辑活动(打字/移光标/点击)刷新它,让光标
     /// 活动后先"亮"再开始闪(浏览器/系统输入框同款手感)
     caret_blink_reset: std::time::Instant,
@@ -225,15 +233,28 @@ struct App {
     frame_buf: Option<tiny_skia::Pixmap>,
     /// 脏矩形 + scroll-blit 的常驻状态(上一帧快照 / scratch / 待并脏日志)
     damage: render::DamageCtx,
-    /// SV_SHOW_FPS=1:连续重绘 + 每 60 帧打印帧率(基准/诊断用)
-    show_fps: bool,
-    fps_frames: u32,
-    fps_t0: std::time::Instant,
-    proxy: winit::event_loop::EventLoopProxy<UserEvent>,
     /// 累计丢帧次数(present/resize 失败;仅用于限流日志)
     frame_drops: u32,
     /// 语义树增量推送的记忆(上次交给平台的节点内容)
     a11y: a11y::A11yCache,
+    fps_frames: u32,
+    fps_t0: std::time::Instant,
+}
+
+/// **事件循环级状态**(全应用一份),持有各窗 `Pane`。
+struct App {
+    backend: Backend,
+    /// 未建的窗口(标题 + 建树闭包):`resumed` 首次触发时逐个兑现成 `Pane`。
+    /// `run_app` 放一个,`run_multi` 放 N 个。
+    pending: Vec<(String, BuildFn)>,
+    windows: std::collections::HashMap<WindowId, Pane>,
+    /// 全局单例(frame_scheduler/waker/clipboard)是否已装(建首个窗时装一次)
+    globals_wired: bool,
+    /// 动画/后台任务时钟原点(全窗共享一个时钟)
+    epoch: std::time::Instant,
+    /// SV_SHOW_FPS=1:连续重绘 + 每 30 帧打印帧率(基准/诊断用)
+    show_fps: bool,
+    proxy: winit::event_loop::EventLoopProxy<UserEvent>,
     /// 致命错误:记下并退事件循环,由 [`run_app`] 返给调用方
     fatal: Option<ShellError>,
 }
@@ -245,21 +266,26 @@ impl App {
         self.fatal = Some(e);
         event_loop.exit();
     }
+}
 
-    fn paint(&mut self) {
+impl Pane {
+    /// 一个窗口的一帧。`epoch`/`show_fps` 是事件循环级的(全窗共享),其余全是本窗
+    /// 状态。帧前的 `tasks::pump`/`anim::pump`/`reactive::tick` 是**幂等**的(第二次
+    /// 调用无新任务/同 now_ms/无脏 → no-op),故多窗各自 paint 时重复调用无害,
+    /// 单窗行为与拆分前逐字不变。
+    fn paint(&mut self, epoch: std::time::Instant, show_fps: bool) {
         // 帧前流水线(ADR-6):后台任务完成值 → 动画推进 → **响应式统一冲刷**
         // → 布局 → 绘制。上面两步都会写 signal,所以 tick 必须排在它们之后;
         // 冲刷完成前不读版本号,否则会拿到上一帧的 key 而跳过本帧
         sv_ui::tasks::pump();
-        let now_ms = self.epoch.elapsed().as_secs_f64() * 1000.0;
+        let now_ms = epoch.elapsed().as_secs_f64() * 1000.0;
         let animating = sv_ui::anim::pump(now_ms);
         sv_reactive::tick();
-        let Some(ws) = &mut self.win else { return };
-        let size = ws.window.inner_size();
+        let size = self.window.inner_size();
         if size.width == 0 || size.height == 0 {
             return;
         }
-        let scale = ws.window.scale_factor() as f32;
+        let scale = self.window.scale_factor() as f32;
         // 静止帧短路:版本/尺寸/缩放全没变 → 不重绘制(呈现内容仍在 surface 上)。
         // 细粒度更新模型下"静止"是常态,这一步把静止功耗归零
         // 光标闪烁相:有文本框获焦(ime_allowed 恰是这个)时按 530ms 周期明灭;
@@ -279,7 +305,7 @@ impl App {
             caret_phase,
         );
         let unchanged = self.last_frame_key == Some(frame_key);
-        if unchanged && !animating && !self.show_fps {
+        if unchanged && !animating && !show_fps {
             return;
         }
         // 闪烁相翻转帧的损伤只有光标那一块 —— 在覆盖 key 之前捕获
@@ -288,7 +314,7 @@ impl App {
         // 平滑滚动/滚轮的物理像素网格步长跟着 scale 走(供 anim::pump 与
         // route_wheel 吸附;离屏路径从不设置,行为不变)
         sv_ui::anim::set_scroll_quantum(1.0 / scale);
-        match &mut ws.presenter {
+        match &mut self.presenter {
             Presenter::Cpu { surface, .. } => {
                 // 复用常驻 framebuffer(脏矩形地基):尺寸没变就重画进旧缓冲,省掉每帧
                 // 一次 W×H×4 的分配/释放(60fps 滚动时的真实 churn);尺寸变了才重分配。
@@ -357,7 +383,7 @@ impl App {
                         // 否则"无损伤 → Skip → 不 present"会让窗口停在旧帧
                         self.damage.invalidate();
                         self.last_frame_key = None;
-                        ws.window.request_redraw();
+                        self.window.request_redraw();
                         return;
                     }
                 }
@@ -370,7 +396,7 @@ impl App {
                 self.layout = layout;
                 if !presented {
                     // surface 过期/被遮挡等:下一帧重试(与 vello 官方示例一致)
-                    ws.window.request_redraw();
+                    self.window.request_redraw();
                 }
             }
         }
@@ -379,13 +405,13 @@ impl App {
         if self.ime_allowed
             && let Some((cx, cy, cw, ch)) = ime_caret_rect(&self.doc, &self.layout.placed, scale)
         {
-            ws.window.set_ime_cursor_area(
+            self.window.set_ime_cursor_area(
                 winit::dpi::PhysicalPosition::new(cx as f64, cy as f64),
                 winit::dpi::PhysicalSize::new(cw as f64, ch as f64),
             );
         }
-        // 帧率计数(SV_SHOW_FPS=1):连续重绘,每 120 帧打印一次
-        if self.show_fps {
+        // 帧率计数(SV_SHOW_FPS=1):连续重绘,每 30 帧打印一次
+        if show_fps {
             self.fps_frames += 1;
             if self.fps_frames >= 30 {
                 let dt = self.fps_t0.elapsed().as_secs_f64();
@@ -393,10 +419,10 @@ impl App {
                 self.fps_frames = 0;
                 self.fps_t0 = std::time::Instant::now();
             }
-            ws.window.request_redraw();
+            self.window.request_redraw();
         }
         if animating {
-            ws.window.request_redraw();
+            self.window.request_redraw();
         }
         // 语义树跟随版本节拍(静止帧短路已在上方 return;懒激活未开时零成本)
         self.push_access_tree();
@@ -405,12 +431,11 @@ impl App {
     /// 语义树推送(调研 24 §4.2 + P6):按版本节拍触发,**只推变动节点**。
     /// 懒激活未开时 `update_if_active` 里的闭包根本不跑 —— 零成本
     fn push_access_tree(&mut self) {
-        let Some(ws) = &mut self.win else { return };
-        let scale = ws.window.scale_factor() as f32;
+        let scale = self.window.scale_factor() as f32;
         let doc = self.doc.clone();
         let placed = &self.layout.placed;
         let cache = &mut self.a11y;
-        ws.access
+        self.access
             .update_if_active(|| a11y::incremental_tree_update(cache, &doc, placed, scale));
     }
 
@@ -463,8 +488,7 @@ impl App {
 
     /// 悬停派发:命中最上层带 enter/leave 回调的节点,变化时先 leave 后 enter
     fn update_hover(&mut self) {
-        let Some(ws) = &self.win else { return };
-        let scale = ws.window.scale_factor();
+        let scale = self.window.scale_factor();
         let (lx, ly) = (
             (self.cursor.0 / scale) as f32,
             (self.cursor.1 / scale) as f32,
@@ -517,28 +541,24 @@ impl App {
                 sv_ui::Cursor::Default => winit::window::CursorIcon::Default,
             })
             .unwrap_or(winit::window::CursorIcon::Default);
-        if let Some(ws) = &self.win {
-            ws.window.set_cursor(winit::window::Cursor::Icon(icon));
-        }
+        self.window.set_cursor(winit::window::Cursor::Icon(icon));
     }
 
     /// 焦点 ↔ IME 会话同步:焦点在 accepts_text 节点上才开 IME
     /// (Masonry `accepts_text_input` 语义;开关有系统成本,镜像位去重)
     fn sync_ime(&mut self) {
-        let Some(ws) = &self.win else { return };
         let want = self.doc.focused().is_some_and(|id| {
             self.doc
                 .read(|inner| inner.nodes.get(id).is_some_and(|n| n.accepts_text))
         });
         if want != self.ime_allowed {
-            ws.window.set_ime_allowed(want);
+            self.window.set_ime_allowed(want);
             self.ime_allowed = want;
         }
     }
 
     fn click(&mut self) {
-        let Some(ws) = &self.win else { return };
-        let scale = ws.window.scale_factor();
+        let scale = self.window.scale_factor();
         let (lx, ly) = (
             (self.cursor.0 / scale) as f32,
             (self.cursor.1 / scale) as f32,
@@ -649,21 +669,30 @@ fn map_key(
     Some(e)
 }
 
-impl ApplicationHandler<UserEvent> for App {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.win.is_some() {
-            return;
-        }
+impl App {
+    /// 建一个窗口的 [`Pane`]:窗口 + a11y adapter + presenter + 一棵新 Doc + 一个
+    /// root(执行 `build`)。失败则 `abort`(记错误、退循环)并返回 None。
+    /// **每窗一棵独立 Doc**;`build` 捕获的 signal 与别窗共享同一线程内运行时,
+    /// 天然跨窗联动(见 `shared_signal_drives_multiple_docs`)。
+    fn create_pane(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        title: String,
+        build: BuildFn,
+    ) -> Option<(WindowId, Pane)> {
         // AccessKit 要求:adapter 必须在窗口首次可见前创建 → 先隐身建窗
         let attrs = Window::default_attributes()
-            .with_title(self.title.clone())
+            .with_title(title)
             .with_inner_size(LogicalSize::new(480.0, 400.0))
             .with_visible(false);
-        // 起不来就体面退出:记下错误、退事件循环,由 run_app 返给调用方
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
-            Err(e) => return self.abort(event_loop, ShellError::Window(e.to_string())),
+            Err(e) => {
+                self.abort(event_loop, ShellError::Window(e.to_string()));
+                return None;
+            }
         };
+        let id = window.id();
         let access = accesskit_winit::Adapter::with_event_loop_proxy(
             event_loop,
             &window,
@@ -687,63 +716,138 @@ impl ApplicationHandler<UserEvent> for App {
         };
         let presenter = match presenter {
             Ok(p) => p,
-            Err(e) => return self.abort(event_loop, e),
+            Err(e) => {
+                self.abort(event_loop, e);
+                return None;
+            }
         };
 
-        // 帧对齐(ADR-6):**先于 build**开启——建树期的 effect 首跑是创建时
-        // 同步执行(ADR-1),不走队列,不受影响;之后一切写入攒到帧前统一冲刷。
-        // 一次事件里连写 N 个 state 只重绘一帧,effect 写树与布局/绘制严格有序
+        // 每窗一棵 Doc + 一个 root(建树期 effect 首跑同步执行,ADR-1)
+        let doc = Doc::new();
+        let scope = {
+            let d = doc.clone();
+            let (_, scope) = create_root(move || build(&d, d.root()));
+            scope
+        };
+        // 该 Doc 变了 → 精确重绘**本窗**(per-Doc,不牵连别窗)
         {
             let w = window.clone();
-            sv_reactive::set_frame_scheduler(move || w.request_redraw());
+            doc.set_on_mutate(move || w.request_redraw());
         }
 
-        // 首次 resumed 时才构建 UI(此后 signal → 树 → 重绘的链路开始工作)
-        if let Some(build) = self.build.take() {
-            let doc = self.doc.clone();
-            let (_, scope) = create_root(move || build(&doc, doc.root()));
-            self._scope = Some(scope);
-        }
-        let w = window.clone();
-        self.doc.set_on_mutate(move || w.request_redraw());
-        let proxy = self.proxy.clone();
-        sv_ui::tasks::set_waker(move || {
-            let _ = proxy.send_event(UserEvent::Wake);
-        });
+        Some((
+            id,
+            Pane {
+                window,
+                presenter,
+                access,
+                doc,
+                _scope: Some(scope),
+                layout: std::rc::Rc::new(Layout::default()),
+                cursor: (0.0, 0.0),
+                hovered: None,
+                pressed: None,
+                drag_input: None,
+                drag_scroll: None,
+                last_click: None,
+                mods: ModifiersState::empty(),
+                ime_allowed: false,
+                caret_blink_reset: std::time::Instant::now(),
+                last_frame_key: None,
+                frame_buf: None,
+                damage: {
+                    let mut d = render::DamageCtx::new();
+                    // 保险丝:SV_DAMAGE=0 恒走整帧(怀疑脏矩形画错时的一键排除法)
+                    d.enabled = !std::env::var("SV_DAMAGE").is_ok_and(|v| v == "0");
+                    d
+                },
+                frame_drops: 0,
+                a11y: a11y::A11yCache::default(),
+                fps_frames: 0,
+                fps_t0: std::time::Instant::now(),
+            },
+        ))
+    }
 
-        self.win = Some(WinState {
-            window,
-            presenter,
-            access,
-        });
+    /// 装一次全局单例(线程内共享:全窗一份)。frame_scheduler 广播 `RedrawAll`
+    /// 而非绑单窗——响应式冲刷不知哪个窗脏(effect 可改任意 Doc),故保守全窗
+    /// 请求重绘,各窗 `last_frame_key` 静止帧短路吸收开销。**先于任何 build 装好**
+    /// (ADR-6:建树期写入也能攒到帧前统一冲刷)。
+    fn wire_globals(&mut self) {
+        if self.globals_wired {
+            return;
+        }
+        self.globals_wired = true;
+        {
+            let proxy = self.proxy.clone();
+            sv_reactive::set_frame_scheduler(move || {
+                let _ = proxy.send_event(UserEvent::RedrawAll);
+            });
+        }
+        {
+            let proxy = self.proxy.clone();
+            sv_ui::tasks::set_waker(move || {
+                let _ = proxy.send_event(UserEvent::Wake);
+            });
+        }
+    }
+
+    /// 请求所有窗重绘(`RedrawAll`/`Wake` 的落地;静止窗当帧短路)
+    fn redraw_all(&self) {
+        for pane in self.windows.values() {
+            pane.window.request_redraw();
+        }
+    }
+}
+
+impl ApplicationHandler<UserEvent> for App {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        // 已建过就不再建(winit 可能多次 resumed;桌面首发单次即可)
+        if !self.windows.is_empty() {
+            return;
+        }
+        self.wire_globals();
+        // 兑现 pending 里的每个窗口(run_app 放一个,run_multi 放 N 个)
+        for (title, build) in std::mem::take(&mut self.pending) {
+            match self.create_pane(event_loop, title, build) {
+                Some((id, pane)) => {
+                    self.windows.insert(id, pane);
+                }
+                None => return, // create_pane 内已 abort
+            }
+        }
     }
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::Wake => {
-                // 后台任务完成的唤醒:立即套用并请求重绘
+                // 后台任务完成的唤醒:套用并请求全窗重绘(静止窗当帧短路)
                 sv_ui::tasks::pump();
-                if let Some(ws) = &self.win {
-                    ws.window.request_redraw();
-                }
+                self.redraw_all();
             }
-            UserEvent::Access(ev) => match ev.window_event {
-                accesskit_winit::WindowEvent::InitialTreeRequested => {
-                    // 懒激活:AT 首次请求时才建全量语义树
-                    self.push_access_tree();
-                }
-                accesskit_winit::WindowEvent::ActionRequested(req) => {
-                    if req.target_tree == accesskit::TreeId::ROOT
-                        && a11y::dispatch_action(&self.doc, req.action, req.target_node)
-                    {
-                        // 树可能因动作变化(焦点/点击),下一帧节拍推送
-                        if let Some(ws) = &self.win {
-                            ws.window.request_redraw();
+            // 响应式冲刷广播:全窗请求重绘(见 wire_globals)
+            UserEvent::RedrawAll => self.redraw_all(),
+            UserEvent::Access(ev) => {
+                // AccessKit 事件自带 window_id → 精确路由到对应窗
+                let Some(pane) = self.windows.get_mut(&ev.window_id) else {
+                    return;
+                };
+                match ev.window_event {
+                    accesskit_winit::WindowEvent::InitialTreeRequested => {
+                        // 懒激活:AT 首次请求时才建全量语义树
+                        pane.push_access_tree();
+                    }
+                    accesskit_winit::WindowEvent::ActionRequested(req) => {
+                        if req.target_tree == accesskit::TreeId::ROOT
+                            && a11y::dispatch_action(&pane.doc, req.action, req.target_node)
+                        {
+                            // 树可能因动作变化(焦点/点击),下一帧节拍推送
+                            pane.window.request_redraw();
                         }
                     }
+                    accesskit_winit::WindowEvent::AccessibilityDeactivated => {}
                 }
-                accesskit_winit::WindowEvent::AccessibilityDeactivated => {}
-            },
+            }
         }
     }
 
@@ -754,45 +858,69 @@ impl ApplicationHandler<UserEvent> for App {
     /// 无文本框获焦则恢复默认 `Wait`(零功耗静止,动画另靠 request_redraw 驱动)。
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         use winit::event_loop::ControlFlow;
-        if !self.ime_allowed {
-            event_loop.set_control_flow(ControlFlow::Wait);
-            return;
-        }
         const CARET_BLINK_MS: u128 = 530;
-        let elapsed = self.caret_blink_reset.elapsed().as_millis();
-        let phase_now = (elapsed / CARET_BLINK_MS).is_multiple_of(2);
-        // 相位自上帧翻转 → 请求重绘把光标明灭切过来(定时唤醒本身不重绘)
-        if self.last_frame_key.map(|k| k.4) != Some(phase_now)
-            && let Some(ws) = &self.win
-        {
-            ws.window.request_redraw();
+        // 多窗:取所有有文本框获焦的窗中**最早**的下一次明灭翻转唤醒;
+        // 无任何窗获焦则默认 Wait(零功耗静止,动画另靠 request_redraw 驱动)
+        let mut earliest: Option<std::time::Instant> = None;
+        for pane in self.windows.values() {
+            if !pane.ime_allowed {
+                continue;
+            }
+            let elapsed = pane.caret_blink_reset.elapsed().as_millis();
+            let phase_now = (elapsed / CARET_BLINK_MS).is_multiple_of(2);
+            // 相位自上帧翻转 → 请求重绘把光标明灭切过来(定时唤醒本身不重绘)
+            if pane.last_frame_key.map(|k| k.4) != Some(phase_now) {
+                pane.window.request_redraw();
+            }
+            let next_ms = ((elapsed / CARET_BLINK_MS) + 1) * CARET_BLINK_MS;
+            let wake = pane.caret_blink_reset + std::time::Duration::from_millis(next_ms as u64);
+            earliest = Some(earliest.map_or(wake, |e| e.min(wake)));
         }
-        // 安排下一次翻转时唤醒
-        let next_ms = ((elapsed / CARET_BLINK_MS) + 1) * CARET_BLINK_MS;
-        let wake = self.caret_blink_reset + std::time::Duration::from_millis(next_ms as u64);
-        event_loop.set_control_flow(ControlFlow::WaitUntil(wake));
+        match earliest {
+            Some(wake) => event_loop.set_control_flow(ControlFlow::WaitUntil(wake)),
+            None => event_loop.set_control_flow(ControlFlow::Wait),
+        }
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
-        // 每个 winit 事件先过 AccessKit 适配器(官方要求的接线形态)
-        if let Some(ws) = &mut self.win {
-            ws.access.process_event(&ws.window, &event);
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        // 每个 winit 事件先过**对应窗**的 AccessKit 适配器(官方要求的接线形态)
+        if let Some(pane) = self.windows.get_mut(&id) {
+            pane.access.process_event(&pane.window, &event);
         }
+        // 关窗:移除该 Pane;**最后一个**窗关掉才退事件循环(多窗语义)
+        if matches!(event, WindowEvent::CloseRequested) {
+            self.windows.remove(&id);
+            if self.windows.is_empty() {
+                event_loop.exit();
+            }
+            return;
+        }
+        let (epoch, show_fps) = (self.epoch, self.show_fps);
+        if let Some(pane) = self.windows.get_mut(&id) {
+            pane.handle_window_event(event, epoch, show_fps);
+        }
+    }
+}
+
+impl Pane {
+    /// 一个窗口的 winit 事件处理(关窗/AccessKit 前置那两步在 App 层路由)。
+    /// `epoch`/`show_fps` 是事件循环级的,转给 `paint`。
+    fn handle_window_event(
+        &mut self,
+        event: WindowEvent,
+        epoch: std::time::Instant,
+        show_fps: bool,
+    ) {
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::RedrawRequested => self.paint(),
+            WindowEvent::RedrawRequested => self.paint(epoch, show_fps),
             WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
-                if let Some(ws) = &self.win {
-                    ws.window.request_redraw();
-                }
+                self.window.request_redraw();
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = (position.x, position.y);
                 // 滚动条拖动优先于文本拖选(两者不会同时进入)
-                if let Some((id, grab)) = self.drag_scroll
-                    && let Some(ws) = &self.win
-                {
-                    let ly = (position.y / ws.window.scale_factor()) as f32;
+                if let Some((id, grab)) = self.drag_scroll {
+                    let ly = (position.y / self.window.scale_factor()) as f32;
                     if let Some(off) =
                         scrollbar_drag_offset(&self.layout.scroll_areas, id, ly, grab)
                     {
@@ -804,10 +932,8 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 // 拖选:按住左键在输入框上移动 = 扩选(anchor 停在按下处)。
                 // 指针未捕获,拖出控件外仍跟随——与桌面文本框一致
-                if let Some((id, p)) = self.drag_input
-                    && let Some(ws) = &self.win
-                {
-                    let sf = ws.window.scale_factor();
+                if let Some((id, p)) = self.drag_input {
+                    let sf = self.window.scale_factor();
                     let (lx, ly) = ((position.x / sf) as f32, (position.y / sf) as f32);
                     let byte = input_caret_at(&self.doc, &p, lx, ly);
                     self.doc.set_caret(id, byte, true);
@@ -815,8 +941,7 @@ impl ApplicationHandler<UserEvent> for App {
                 self.update_hover();
             }
             WindowEvent::MouseWheel { delta, .. } => {
-                let Some(ws) = &self.win else { return };
-                let scale = ws.window.scale_factor();
+                let scale = self.window.scale_factor();
                 let (lx, ly) = (
                     (self.cursor.0 / scale) as f32,
                     (self.cursor.1 / scale) as f32,
@@ -833,7 +958,7 @@ impl ApplicationHandler<UserEvent> for App {
                         ((p.x / scale) as f32, (p.y / scale) as f32, false)
                     }
                 };
-                let size = ws.window.inner_size();
+                let size = self.window.inner_size();
                 // 中途布局会破坏性取走脏日志 —— 用 taking 变体并进待处理池,
                 // 否则这些变更的损伤会在下一帧被静默吞掉(画错且无报错)
                 let (layout, taken) = render::layout_full_cached_taking(
@@ -915,8 +1040,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // 点击可能移动光标 → 重置闪烁,光标先亮
                 self.caret_blink_reset = std::time::Instant::now();
                 // :active / 按压回调:先派发 pointer_down,再派发点击
-                let Some(ws) = &self.win else { return };
-                let scale = ws.window.scale_factor();
+                let scale = self.window.scale_factor();
                 let (lx, ly) = (
                     (self.cursor.0 / scale) as f32,
                     (self.cursor.1 / scale) as f32,
@@ -1009,11 +1133,37 @@ impl ApplicationHandler<UserEvent> for App {
     }
 }
 
-/// 开窗运行一个 sv 应用。`build` 在窗口就绪后执行一次,之后一切更新由 signal 驱动
+/// 开窗运行一个 sv 应用(单窗)。`build` 在窗口就绪后执行一次,之后一切更新由
+/// signal 驱动。多窗体见 [`run_multi`]。
 pub fn run_app(
     title: &str,
     build: impl FnOnce(&Doc, ViewId) + 'static,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    run_windows(vec![(title.to_string(), Box::new(build) as BuildFn)])
+}
+
+/// **多窗体启动**:一次开 N 个窗口,各自一棵 UI 树。所有 `build` 共享同一**线程内**
+/// 响应式运行时——捕获同一个 `state` 的多个窗天然联动(一处写、处处精准更新),
+/// 无需任何窗口间通信/序列化代码(核心已由 `shared_signal_drives_multiple_docs`
+/// 测试证明)。关掉最后一个窗才退出。
+///
+/// ```ignore
+/// let shared = state(0i32);
+/// run_multi(vec![
+///     ("窗 A".into(), Box::new(move |doc, root| build_a(doc, root, shared))),
+///     ("窗 B".into(), Box::new(move |doc, root| build_b(doc, root, shared))),
+/// ])?;
+/// ```
+///
+/// (运行期动态开窗留作后续:`BuildFn` 是 `!Send`,不能走 `EventLoopProxy`;
+/// 需 thread_local BuildFn 队列 + 无载荷唤醒。首发的多窗经本函数启动即建。)
+pub fn run_multi(windows: Vec<(String, BuildFn)>) -> Result<(), Box<dyn std::error::Error>> {
+    run_windows(windows)
+}
+
+/// [`run_app`] / [`run_multi`] 的共同实现:建事件循环、装剪贴板、把待建窗口
+/// (`pending`)交给 [`App`],由 `resumed` 兑现。
+fn run_windows(pending: Vec<(String, BuildFn)>) -> Result<(), Box<dyn std::error::Error>> {
     let event_loop = EventLoop::<UserEvent>::with_user_event()
         .build()
         .map_err(|e| ShellError::EventLoop(e.to_string()))?;
@@ -1021,37 +1171,13 @@ pub fn run_app(
     // 系统剪贴板接入编辑内核(Ctrl+C/X/V;测试路径注入假实现,互不相扰)
     sv_ui::set_clipboard(ShellClipboard::default());
     let mut app = App {
-        title: title.to_string(),
-        doc: Doc::new(),
-        build: Some(Box::new(build)),
-        _scope: None,
         backend: select_backend(),
-        win: None,
-        layout: std::rc::Rc::new(Layout::default()),
-        cursor: (0.0, 0.0),
-        hovered: None,
-        pressed: None,
-        drag_input: None,
-        drag_scroll: None,
-        last_click: None,
-        mods: ModifiersState::empty(),
-        ime_allowed: false,
+        pending,
+        windows: std::collections::HashMap::new(),
+        globals_wired: false,
         epoch: std::time::Instant::now(),
-        caret_blink_reset: std::time::Instant::now(),
-        frame_buf: None,
-        last_frame_key: None,
-        damage: {
-            let mut d = render::DamageCtx::new();
-            // 保险丝:SV_DAMAGE=0 恒走整帧(怀疑脏矩形画错时的一键排除法)
-            d.enabled = !std::env::var("SV_DAMAGE").is_ok_and(|v| v == "0");
-            d
-        },
         show_fps: std::env::var("SV_SHOW_FPS").is_ok_and(|v| v == "1"),
-        fps_frames: 0,
-        fps_t0: std::time::Instant::now(),
         proxy,
-        frame_drops: 0,
-        a11y: a11y::A11yCache::default(),
         fatal: None,
     };
     event_loop

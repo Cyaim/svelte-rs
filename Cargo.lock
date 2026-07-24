@@ -1651,6 +1651,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "multi-window"
+version = "0.1.0"
+dependencies = [
+ "sv-macro",
+ "sv-reactive",
+ "sv-shell",
+ "sv-ui",
+]
+
+[[package]]
 name = "multiclosure-check"
 version = "0.1.0"
 dependencies = [
